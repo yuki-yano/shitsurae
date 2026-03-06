@@ -1,0 +1,561 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/yuki-yano/shitsurae/main/schemas/shitsurae-config.schema.json",
+  "title": "Shitsurae Config",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["layouts"],
+  "properties": {
+    "ignore": {
+      "$ref": "#/$defs/ignoreDefinition"
+    },
+    "overlay": {
+      "$ref": "#/$defs/overlayDefinition"
+    },
+    "executionPolicy": {
+      "$ref": "#/$defs/executionPolicy"
+    },
+    "monitors": {
+      "$ref": "#/$defs/monitorsDefinition"
+    },
+    "layouts": {
+      "type": "object",
+      "minProperties": 1,
+      "patternProperties": {
+        "^[A-Za-z0-9._-]+$": {
+          "$ref": "#/$defs/layoutDefinition"
+        }
+      },
+      "additionalProperties": false
+    },
+    "shortcuts": {
+      "$ref": "#/$defs/shortcutsDefinition"
+    }
+  },
+  "$defs": {
+    "spaceMoveMethod": {
+      "type": "string",
+      "enum": ["drag", "displayRelay"]
+    },
+    "windowSource": {
+      "type": "string",
+      "enum": ["window"]
+    },
+    "monitorRole": {
+      "type": "string",
+      "enum": ["primary", "secondary"]
+    },
+    "globalActionType": {
+      "type": "string",
+      "enum": ["move", "resize", "moveResize", "snap"]
+    },
+    "snapPreset": {
+      "type": "string",
+      "enum": [
+        "leftHalf",
+        "rightHalf",
+        "topHalf",
+        "bottomHalf",
+        "leftThird",
+        "centerThird",
+        "rightThird",
+        "maximize",
+        "center"
+      ]
+    },
+    "lengthValue": {
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "string",
+          "minLength": 1
+        }
+      ]
+    },
+    "titleMatcher": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "equals": {
+          "type": "string"
+        },
+        "contains": {
+          "type": "string"
+        },
+        "regex": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "not": {
+            "required": ["equals", "contains"]
+          }
+        },
+        {
+          "not": {
+            "required": ["equals", "regex"]
+          }
+        },
+        {
+          "not": {
+            "required": ["contains", "regex"]
+          }
+        }
+      ]
+    },
+    "windowMatchRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bundleID"],
+      "properties": {
+        "bundleID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "$ref": "#/$defs/titleMatcher"
+        },
+        "role": {
+          "type": "string"
+        },
+        "subrole": {
+          "type": "string"
+        },
+        "excludeTitleRegex": {
+          "type": "string"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "displayDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "monitor": {
+          "$ref": "#/$defs/monitorRole"
+        },
+        "id": {
+          "type": "string"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "frameDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": {
+          "$ref": "#/$defs/lengthValue"
+        },
+        "y": {
+          "$ref": "#/$defs/lengthValue"
+        },
+        "width": {
+          "$ref": "#/$defs/lengthValue"
+        },
+        "height": {
+          "$ref": "#/$defs/lengthValue"
+        }
+      }
+    },
+    "windowDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["match", "slot", "frame"],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/windowSource"
+        },
+        "match": {
+          "$ref": "#/$defs/windowMatchRule"
+        },
+        "slot": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9
+        },
+        "launch": {
+          "type": "boolean"
+        },
+        "frame": {
+          "$ref": "#/$defs/frameDefinition"
+        }
+      }
+    },
+    "spaceDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["spaceID", "windows"],
+      "properties": {
+        "spaceID": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "display": {
+          "$ref": "#/$defs/displayDefinition"
+        },
+        "windows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/windowDefinition"
+          }
+        }
+      }
+    },
+    "initialFocusDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slot"],
+      "properties": {
+        "slot": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9
+        }
+      }
+    },
+    "layoutDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["spaces"],
+      "properties": {
+        "initialFocus": {
+          "$ref": "#/$defs/initialFocusDefinition"
+        },
+        "spaces": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/spaceDefinition"
+          }
+        }
+      }
+    },
+    "ignoreWindowRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bundleID": {
+          "type": "string"
+        },
+        "titleRegex": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "subrole": {
+          "type": "string"
+        },
+        "minimized": {
+          "type": "boolean"
+        },
+        "hidden": {
+          "type": "boolean"
+        }
+      },
+      "anyOf": [
+        {
+          "required": ["bundleID"]
+        },
+        {
+          "required": ["titleRegex"]
+        },
+        {
+          "required": ["role"]
+        },
+        {
+          "required": ["subrole"]
+        },
+        {
+          "required": ["minimized"]
+        },
+        {
+          "required": ["hidden"]
+        }
+      ]
+    },
+    "ignoreRuleSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "apps": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "windows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ignoreWindowRule"
+          }
+        }
+      }
+    },
+    "ignoreDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "apply": {
+          "$ref": "#/$defs/ignoreRuleSet"
+        },
+        "focus": {
+          "$ref": "#/$defs/ignoreRuleSet"
+        }
+      }
+    },
+    "overlayDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "showThumbnails": {
+          "type": "boolean"
+        }
+      }
+    },
+    "executionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "spaceMoveMethod": {
+          "$ref": "#/$defs/spaceMoveMethod"
+        },
+        "spaceMoveMethodInApps": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/spaceMoveMethod"
+          }
+        }
+      }
+    },
+    "monitorTargetDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      }
+    },
+    "monitorsDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "primary": {
+          "$ref": "#/$defs/monitorTargetDefinition"
+        },
+        "secondary": {
+          "$ref": "#/$defs/monitorTargetDefinition"
+        }
+      }
+    },
+    "modifier": {
+      "type": "string",
+      "enum": ["cmd", "shift", "ctrl", "alt", "fn"]
+    },
+    "keyName": {
+      "type": "string",
+      "pattern": "^(tab|enter|esc|space|left|right|up|down|home|end|pageup|pagedown|[A-Za-z0-9])$"
+    },
+    "hotkeyDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "modifiers"],
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/keyName"
+        },
+        "modifiers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/modifier"
+          }
+        }
+      }
+    },
+    "focusBySlotShortcut": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "modifiers", "slot"],
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/keyName"
+        },
+        "modifiers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/modifier"
+          }
+        },
+        "slot": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9
+        }
+      }
+    },
+    "switcherShortcutDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "trigger": {
+          "$ref": "#/$defs/hotkeyDefinition"
+        },
+        "includeAllSpaces": {
+          "type": "boolean"
+        },
+        "prioritizeCurrentSpace": {
+          "type": "boolean"
+        },
+        "quickKeys": {
+          "type": "string",
+          "minLength": 1
+        },
+        "acceptOnModifierRelease": {
+          "type": "boolean"
+        },
+        "acceptKeys": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/keyName"
+          }
+        },
+        "cancelKeys": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/keyName"
+          }
+        },
+        "sources": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/windowSource"
+          }
+        }
+      }
+    },
+    "globalActionDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/globalActionType"
+        },
+        "x": {
+          "$ref": "#/$defs/lengthValue"
+        },
+        "y": {
+          "$ref": "#/$defs/lengthValue"
+        },
+        "width": {
+          "$ref": "#/$defs/lengthValue"
+        },
+        "height": {
+          "$ref": "#/$defs/lengthValue"
+        },
+        "preset": {
+          "$ref": "#/$defs/snapPreset"
+        }
+      }
+    },
+    "globalActionShortcut": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "modifiers", "action"],
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/keyName"
+        },
+        "modifiers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/modifier"
+          }
+        },
+        "action": {
+          "$ref": "#/$defs/globalActionDefinition"
+        }
+      }
+    },
+    "shortcutsDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "focusBySlot": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/focusBySlotShortcut"
+          }
+        },
+        "nextWindow": {
+          "$ref": "#/$defs/hotkeyDefinition"
+        },
+        "prevWindow": {
+          "$ref": "#/$defs/hotkeyDefinition"
+        },
+        "switcher": {
+          "$ref": "#/$defs/switcherShortcutDefinition"
+        },
+        "globalActions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/globalActionShortcut"
+          }
+        },
+        "disabledInApps": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "focusBySlotEnabledInApps": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "focusBySlotFallbackEnabled": {
+          "type": "boolean"
+        },
+        "cycleExcludedApps": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "switcherExcludedApps": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

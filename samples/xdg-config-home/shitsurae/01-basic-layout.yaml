@@ -1,0 +1,27 @@
+# arrange command: shitsurae arrange work --dry-run --json
+# expected exit code: 0
+layouts:
+  work:
+    initialFocus:
+      slot: 1
+    spaces:
+      - spaceID: 1
+        windows:
+          - slot: 1
+            launch: false
+            match:
+              bundleID: com.apple.TextEdit
+            frame:
+              x: "0%"
+              y: "0%"
+              width: "50%"
+              height: "100%"
+          - slot: 2
+            launch: false
+            match:
+              bundleID: com.apple.Terminal
+            frame:
+              x: "50%"
+              y: "0%"
+              width: "50%"
+              height: "100%"

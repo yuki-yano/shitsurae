@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "owner": "@yuki-yano",
+  "updateTrigger": [
+    "release",
+    "permissionDesignChange",
+    "osBuildChange",
+    "xcodeUpdate",
+    "skylightDependencyUpdate",
+    "ciChange"
+  ],
+  "comparisonKey": "sw_vers -buildVersion",
+  "statusEnum": [
+    "supported",
+    "candidate",
+    "deprecated"
+  ],
+  "allowStatusesForRuntime": [
+    "supported"
+  ],
+  "builds": [
+    {
+      "productVersion": "15.7.3",
+      "productBuildVersion": "24G419",
+      "status": "supported",
+      "verifiedAt": "2026-03-04T00:00:00Z",
+      "notes": "初期登録（要継続検証）"
+    }
+  ]
+}

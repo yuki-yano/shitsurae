@@ -1,0 +1,914 @@
+import AppKit
+import CoreGraphics
+import Foundation
+
+public struct CommandResult {
+    public let exitCode: Int32
+    public let stdout: String
+    public let stderr: String
+
+    public init(exitCode: Int32, stdout: String = "", stderr: String = "") {
+        self.exitCode = exitCode
+        self.stdout = stdout
+        self.stderr = stderr
+    }
+}
+
+public struct CommandServiceRuntimeHooks: @unchecked Sendable {
+    public let accessibilityGranted: () -> Bool
+    public let listWindows: () -> [WindowSnapshot]
+    public let focusedWindow: () -> WindowSnapshot?
+    public let activateBundle: (String) -> Bool
+    public let setFocusedWindowFrame: (ResolvedFrame) -> Bool
+    public let displays: () -> [DisplayInfo]
+    public let runProcess: (String, [String]) -> (exitCode: Int32, output: String)
+
+    public init(
+        accessibilityGranted: @escaping () -> Bool,
+        listWindows: @escaping () -> [WindowSnapshot],
+        focusedWindow: @escaping () -> WindowSnapshot?,
+        activateBundle: @escaping (String) -> Bool,
+        setFocusedWindowFrame: @escaping (ResolvedFrame) -> Bool,
+        displays: @escaping () -> [DisplayInfo],
+        runProcess: @escaping (String, [String]) -> (exitCode: Int32, output: String)
+    ) {
+        self.accessibilityGranted = accessibilityGranted
+        self.listWindows = listWindows
+        self.focusedWindow = focusedWindow
+        self.activateBundle = activateBundle
+        self.setFocusedWindowFrame = setFocusedWindowFrame
+        self.displays = displays
+        self.runProcess = runProcess
+    }
+
+    public static let live = CommandServiceRuntimeHooks(
+        accessibilityGranted: SystemProbe.accessibilityGranted,
+        listWindows: { WindowQueryService.listWindows() },
+        focusedWindow: { WindowQueryService.focusedWindow() },
+        activateBundle: { WindowQueryService.activate(bundleID: $0) },
+        setFocusedWindowFrame: WindowQueryService.setFocusedWindowFrame,
+        displays: SystemProbe.displays,
+        runProcess: { executable, arguments in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: executable)
+            process.arguments = arguments
+            process.standardInput = nil
+            process.standardError = Pipe()
+
+            let outputPipe = Pipe()
+            process.standardOutput = outputPipe
+
+            do {
+                try process.run()
+                process.waitUntilExit()
+            } catch {
+                return (Int32(ErrorCode.externalCommandFailed.rawValue), "")
+            }
+
+            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            let output = String(data: outputData, encoding: .utf8) ?? ""
+            return (process.terminationStatus, output)
+        }
+    )
+}
+
+public final class CommandService {
+    public static let bundledSupportedBuildCatalogURL: URL = {
+        guard let url = Bundle.module.url(forResource: "supported-macos-builds", withExtension: "json") else {
+            preconditionFailure("missing bundled resource: supported-macos-builds.json")
+        }
+        return url
+    }()
+
+    private let configLoader: ConfigLoader
+    private let logger: ShitsuraeLogger
+    private let stateStore: RuntimeStateStore
+    private let supportedBuildCatalogURL: URL
+    private let arrangeDriver: ArrangeDriver
+    private let arrangeRequestDeduplicator: ArrangeRequestDeduplicating
+    private let autoReloadMonitorEnabled: Bool
+    private let environment: [String: String]
+    private let configDirectoryOverride: URL?
+private let runtimeHooks: CommandServiceRuntimeHooks
+    private let configWatchDebounceMs = 250
+
+    private var lastConfigReload: ConfigReloadStatus
+    private var watchStatus: WatchStatus
+    private var watcher: ConfigWatcher?
+    private var cachedValidConfig: LoadedConfig?
+
+    public var onAutoReload: ((Bool) -> Void)?
+
+    public init(
+        configLoader: ConfigLoader = ConfigLoader(),
+        logger: ShitsuraeLogger = ShitsuraeLogger(),
+        stateStore: RuntimeStateStore = RuntimeStateStore(),
+        supportedBuildCatalogURL: URL = CommandService.bundledSupportedBuildCatalogURL,
+        arrangeDriver: ArrangeDriver = LiveArrangeDriver(),
+        arrangeRequestDeduplicator: ArrangeRequestDeduplicating? = nil,
+        enableAutoReloadMonitor: Bool = false,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        configDirectoryOverride: URL? = nil,
+        runtimeHooks: CommandServiceRuntimeHooks = .live
+    ) {
+        self.configLoader = configLoader
+        self.logger = logger
+        self.stateStore = stateStore
+        self.supportedBuildCatalogURL = supportedBuildCatalogURL
+        self.arrangeDriver = arrangeDriver
+        self.arrangeRequestDeduplicator = arrangeRequestDeduplicator
+            ?? FileBasedArrangeRequestDeduplicator(environment: environment)
+        self.autoReloadMonitorEnabled = enableAutoReloadMonitor
+        self.environment = environment
+        self.configDirectoryOverride = configDirectoryOverride
+        self.runtimeHooks = runtimeHooks
+        self.lastConfigReload = ConfigReloadStatus(
+            status: "success",
+            at: Date.rfc3339UTC(),
+            trigger: "manual",
+            errorCode: nil,
+            message: nil
+        )
+        self.watchStatus = WatchStatus(debounceMs: configWatchDebounceMs, watcherRunning: false)
+
+        if enableAutoReloadMonitor {
+            setupAutoReloadMonitor()
+        }
+    }
+
+    deinit {
+        watcher?.stop()
+    }
+
+    public func validate(json: Bool) -> CommandResult {
+        do {
+            _ = try loadConfigFromSource()
+            let payload = ValidateJSON(schemaVersion: 1, valid: true, errors: [])
+            if json {
+                return CommandResult(exitCode: 0, stdout: encodeJSON(payload) + "\n")
+            }
+            return CommandResult(exitCode: 0, stdout: "valid\n")
+        } catch let error as ConfigLoadError {
+            updateLastReload(status: "failed", code: error.code.rawValue, message: error.errors.first?.message)
+            if json {
+                let payload = ValidateJSON(schemaVersion: 1, valid: false, errors: error.errors)
+                return CommandResult(exitCode: Int32(error.code.rawValue), stdout: encodeJSON(payload) + "\n")
+            }
+
+            let message = error.errors.map { "\($0.path): \($0.message)" }.joined(separator: "\n") + "\n"
+            return CommandResult(exitCode: Int32(error.code.rawValue), stderr: message)
+        } catch {
+            return errorAsResult(code: .validationError, message: error.localizedDescription, json: json)
+        }
+    }
+
+    public func layoutsList() -> CommandResult {
+        do {
+            let loaded = try loadConfig(trigger: "manual")
+            let output = loaded.config.layouts.keys.sorted().joined(separator: "\n")
+            if output.isEmpty {
+                return CommandResult(exitCode: 0)
+            }
+            return CommandResult(exitCode: 0, stdout: output + "\n")
+        } catch let error as ConfigLoadError {
+            let message = error.errors.map { $0.message }.joined(separator: "\n") + "\n"
+            return CommandResult(exitCode: Int32(error.code.rawValue), stderr: message)
+        } catch {
+            return CommandResult(exitCode: Int32(ErrorCode.validationError.rawValue), stderr: error.localizedDescription + "\n")
+        }
+    }
+
+    public func diagnostics(json: Bool) -> CommandResult {
+        guard json else {
+            return CommandResult(
+                exitCode: Int32(ErrorCode.validationError.rawValue),
+                stderr: "diagnostics supports --json only\n"
+            )
+        }
+
+        let loaded: LoadedConfig?
+        let loadError: ConfigLoadError?
+
+        do {
+            loaded = try loadConfig(trigger: "manual")
+            loadError = nil
+        } catch let error as ConfigLoadError {
+            loaded = nil
+            loadError = error
+            updateLastReload(status: "failed", code: error.code.rawValue, message: error.errors.first?.message)
+        } catch {
+            return errorAsResult(code: .backendUnavailable, message: "failed to load config", json: true)
+        }
+
+        let diagnostics = DiagnosticsService.collect(
+            loadedConfig: loaded,
+            loadError: loadError,
+            lastConfigReload: lastConfigReload,
+            supportedBuildCatalogURL: supportedBuildCatalogURL,
+            watchOverride: autoReloadMonitorEnabled ? watchStatus : nil
+        )
+
+        return CommandResult(exitCode: 0, stdout: encodeJSON(diagnostics) + "\n")
+    }
+
+    public func arrange(layoutName: String, spaceID: Int? = nil, dryRun: Bool, verbose: Bool, json: Bool) -> CommandResult {
+        if !dryRun, arrangeRequestDeduplicator.shouldSuppress(layoutName: layoutName, spaceID: spaceID) {
+            var fields: [String: Any] = ["layout": layoutName]
+            if let spaceID {
+                fields["spaceID"] = spaceID
+            }
+            logger.log(level: "info", event: "arrange.duplicateSuppressed", fields: fields)
+            let execution = ArrangeExecutionJSON(
+                schemaVersion: 1,
+                layout: layoutName,
+                spacesMode: .perDisplay,
+                result: "success",
+                hardErrors: [],
+                softErrors: [],
+                skipped: [],
+                warnings: [
+                    WarningItem(
+                        code: "arrange.duplicateSuppressed",
+                        detail: "suppressed duplicate arrange request"
+                    ),
+                ],
+                exitCode: ErrorCode.success.rawValue
+            )
+            if json {
+                return CommandResult(exitCode: 0, stdout: encodeJSON(execution) + "\n")
+            }
+            let stdout = renderExecution(execution)
+            let stderr = verbose ? renderVerbose(execution) : ""
+            return CommandResult(exitCode: 0, stdout: stdout, stderr: stderr)
+        }
+
+        do {
+            let loaded = try loadConfig(trigger: "manual")
+            let service = ArrangeService(
+                context: ArrangeContext(config: loaded.config, supportedBuildCatalogURL: supportedBuildCatalogURL),
+                logger: logger,
+                stateStore: stateStore,
+                driver: arrangeDriver
+            )
+
+            if dryRun {
+                let plan = try service.dryRun(layoutName: layoutName, spaceID: spaceID)
+                if json {
+                    return CommandResult(exitCode: 0, stdout: encodeJSON(plan) + "\n")
+                }
+                return CommandResult(exitCode: 0, stdout: renderDryRun(plan))
+            }
+
+            let execution = try service.execute(layoutName: layoutName, spaceID: spaceID)
+            if json {
+                return CommandResult(exitCode: Int32(execution.exitCode), stdout: encodeJSON(execution) + "\n")
+            }
+
+            let stdout = renderExecution(execution)
+            let stderr = verbose ? renderVerbose(execution) : ""
+            return CommandResult(exitCode: Int32(execution.exitCode), stdout: stdout, stderr: stderr)
+        } catch let error as ConfigLoadError {
+            updateLastReload(status: "failed", code: error.code.rawValue, message: error.errors.first?.message)
+            if json {
+                if dryRun {
+                    let payload = CommonErrorJSON(code: error.code, message: error.errors.first?.message ?? "config load failed")
+                    return CommandResult(exitCode: Int32(error.code.rawValue), stdout: encodeJSON(payload) + "\n")
+                }
+
+                let failed = ArrangeExecutionJSON(
+                    schemaVersion: 1,
+                    layout: layoutName,
+                    spacesMode: .perDisplay,
+                    result: "failed",
+                    hardErrors: [
+                        ErrorItem(
+                            code: error.code.rawValue,
+                            message: error.errors.first?.message ?? "config load failed",
+                            spaceID: nil,
+                            slot: nil
+                        ),
+                    ],
+                    softErrors: [],
+                    skipped: [],
+                    warnings: [],
+                    exitCode: error.code.rawValue
+                )
+
+                return CommandResult(exitCode: Int32(error.code.rawValue), stdout: encodeJSON(failed) + "\n")
+            }
+
+            let stderr = error.errors.map { "\($0.path): \($0.message)" }.joined(separator: "\n") + "\n"
+            return CommandResult(exitCode: Int32(error.code.rawValue), stderr: stderr)
+        } catch let error as ShitsuraeError {
+            if json {
+                let payload = CommonErrorJSON(code: error.code, message: error.message, subcode: error.subcode)
+                return CommandResult(exitCode: Int32(error.code.rawValue), stdout: encodeJSON(payload) + "\n")
+            }
+            return CommandResult(exitCode: Int32(error.code.rawValue), stderr: error.message + "\n")
+        } catch {
+            return errorAsResult(code: .validationError, message: error.localizedDescription, json: json)
+        }
+    }
+
+    public func windowCurrent(json: Bool) -> CommandResult {
+        guard json else {
+            return CommandResult(
+                exitCode: Int32(ErrorCode.validationError.rawValue),
+                stderr: "window current supports --json only\n"
+            )
+        }
+
+        guard runtimeHooks.accessibilityGranted() else {
+            return commonJSONError(.missingPermission, "Accessibility permission is required", toStdErr: false)
+        }
+
+        guard let focused = runtimeHooks.focusedWindow() else {
+            return commonJSONError(.targetWindowNotFound, "focused window not found", toStdErr: false)
+        }
+
+        let spacesMode = (try? loadConfig(trigger: "manual").config.resolvedSpacesMode) ?? .perDisplay
+        let slotEntry = findSlotEntry(for: focused)
+
+        let payload = WindowCurrentJSON(
+            schemaVersion: 1,
+            bundleID: focused.bundleID,
+            pid: focused.pid,
+            title: focused.title,
+            spaceID: focused.isFullscreen ? nil : focused.spaceID,
+            spacesMode: spacesMode,
+            displayID: focused.displayID ?? "unknown",
+            role: focused.role,
+            subrole: focused.subrole,
+            isMinimized: focused.minimized,
+            frame: focused.frame,
+            slot: slotEntry?.slot
+        )
+
+        return CommandResult(exitCode: 0, stdout: encodeJSON(payload) + "\n")
+    }
+
+    public func windowMove(x: LengthValue, y: LengthValue) -> CommandResult {
+        mutateCurrentWindow(x: x, y: y, width: nil, height: nil)
+    }
+
+    public func windowResize(width: LengthValue, height: LengthValue) -> CommandResult {
+        mutateCurrentWindow(x: nil, y: nil, width: width, height: height)
+    }
+
+    public func windowSet(x: LengthValue, y: LengthValue, width: LengthValue, height: LengthValue) -> CommandResult {
+        mutateCurrentWindow(x: x, y: y, width: width, height: height)
+    }
+
+    public func focus(slot: Int) -> CommandResult {
+        guard (1 ... 9).contains(slot) else {
+            return CommandResult(exitCode: Int32(ErrorCode.validationError.rawValue), stderr: "slot must be 1..9\n")
+        }
+
+        guard runtimeHooks.accessibilityGranted() else {
+            return CommandResult(exitCode: Int32(ErrorCode.missingPermission.rawValue))
+        }
+
+        let state = stateStore.load()
+        let currentSpaceID = runtimeHooks.focusedWindow()?.spaceID
+        var resolvedEntry = resolveSlotEntry(slot: slot, state: state, currentSpaceID: currentSpaceID)
+        var loadedConfig: LoadedConfig?
+
+        if resolvedEntry == nil {
+            loadedConfig = try? loadConfig(trigger: "manual")
+            if let loadedConfig,
+               loadedConfig.config.resolvedShortcuts.focusBySlotFallbackEnabled
+            {
+                resolvedEntry = fallbackSlotEntry(for: slot, config: loadedConfig.config)
+            }
+        }
+
+        guard let entry = resolvedEntry else {
+            return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
+        }
+
+        if loadedConfig == nil {
+            do {
+                loadedConfig = try loadConfig(trigger: "manual")
+            } catch let error as ConfigLoadError {
+                return CommandResult(exitCode: Int32(error.code.rawValue))
+            } catch {
+                loadedConfig = nil
+            }
+        }
+
+        if let ignoreRules = loadedConfig?.config.ignore?.focus {
+            let windows = runtimeHooks.listWindows()
+            let targetWindow = resolveSlotWindow(entry: entry, windows: windows)
+            if PolicyEngine.matchesIgnoreRule(window: targetWindow, rules: ignoreRules) {
+                return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
+            }
+        }
+
+        if !runtimeHooks.activateBundle(entry.bundleID) {
+            return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
+        }
+
+        return CommandResult(exitCode: 0)
+    }
+
+    public func shouldHandleFocusShortcut(slot: Int) -> Bool {
+        guard (1 ... 9).contains(slot) else {
+            return false
+        }
+
+        guard runtimeHooks.accessibilityGranted() else {
+            return false
+        }
+
+        let windows = runtimeHooks.listWindows()
+        let state = stateStore.load()
+        var resolvedEntry = state.slots.first(where: { $0.slot == slot })
+        var loadedConfig: LoadedConfig?
+
+        if resolvedEntry == nil {
+            loadedConfig = try? loadConfig(trigger: "manual")
+            if let loadedConfig,
+               loadedConfig.config.resolvedShortcuts.focusBySlotFallbackEnabled
+            {
+                resolvedEntry = fallbackSlotEntry(for: slot, config: loadedConfig.config)
+            }
+        }
+
+        guard let entry = resolvedEntry,
+              focusShortcutTargetExists(entry: entry, windows: windows)
+        else {
+            return false
+        }
+
+        if loadedConfig == nil {
+            loadedConfig = try? loadConfig(trigger: "manual")
+        }
+
+        if let ignoreRules = loadedConfig?.config.ignore?.focus {
+            let targetWindow = resolveSlotWindow(entry: entry, windows: windows)
+            if PolicyEngine.matchesIgnoreRule(window: targetWindow, rules: ignoreRules) {
+                return false
+            }
+        }
+
+        return true
+    }
+
+    public func switcherList(json: Bool, includeAllSpacesOverride: Bool?) -> CommandResult {
+        guard json else {
+            return CommandResult(
+                exitCode: Int32(ErrorCode.validationError.rawValue),
+                stderr: "switcher list supports --json only\n"
+            )
+        }
+
+        guard runtimeHooks.accessibilityGranted() else {
+            return commonJSONError(.missingPermission, "Accessibility permission is required", toStdErr: false)
+        }
+
+        let loaded: LoadedConfig?
+        do {
+            loaded = try loadConfig(trigger: "manual")
+        } catch let error as ConfigLoadError where isNoConfigFilesError(error) {
+            loaded = nil
+        } catch let error as ConfigLoadError {
+            let payload = CommonErrorJSON(code: error.code, message: error.errors.first?.message ?? "failed to load config")
+            return CommandResult(exitCode: Int32(error.code.rawValue), stdout: encodeJSON(payload) + "\n")
+        } catch {
+            return commonJSONError(.backendUnavailable, "failed to enumerate switcher candidates", toStdErr: false)
+        }
+
+        let shortcuts = loaded?.config.resolvedShortcuts ?? ResolvedShortcuts(from: nil)
+        let includeAllSpaces = includeAllSpacesOverride ?? shortcuts.includeAllSpaces
+        let quickKeys = Array(shortcuts.quickKeys)
+        let ignoreFocusRules = loaded?.config.ignore?.focus
+
+        let windows = runtimeHooks.listWindows().filter {
+            !$0.isFullscreen && !$0.hidden && !$0.minimized
+        }
+        let focused = runtimeHooks.focusedWindow()
+        let currentSpaceID = focused?.spaceID
+        let slots = stateStore.load().slots
+
+        var internalCandidates: [InternalCandidate] = []
+
+        for window in windows {
+            if PolicyEngine.matchesIgnoreRule(window: window, rules: ignoreFocusRules) {
+                continue
+            }
+
+            if !includeAllSpaces,
+               let currentSpaceID,
+               let spaceID = window.spaceID,
+               currentSpaceID != spaceID
+            {
+                continue
+            }
+
+            let slot = slots.first(where: { slot in
+                if let windowID = slot.windowID {
+                    return windowID == window.windowID
+                }
+                return slot.bundleID == window.bundleID
+            })?.slot
+
+            internalCandidates.append(
+                InternalCandidate(
+                    candidate: SwitcherCandidate(
+                        id: "window:\(window.windowID)",
+                        source: .window,
+                        title: window.title.isEmpty ? window.bundleID : window.title,
+                        bundleID: window.bundleID,
+                        spaceID: window.spaceID,
+                        displayID: window.displayID,
+                        slot: slot,
+                        quickKey: nil
+                    ),
+                    frontIndex: window.frontIndex,
+                    windowID: window.windowID,
+                    inCurrentSpace: currentSpaceID != nil && window.spaceID == currentSpaceID
+                )
+            )
+        }
+
+        let ordered = orderCandidates(internalCandidates, prioritizeCurrentSpace: shortcuts.prioritizeCurrentSpace)
+        let keyed = ordered.enumerated().map { index, item in
+            let quickKey = index < quickKeys.count ? String(quickKeys[index]) : nil
+            return SwitcherCandidate(
+                id: item.candidate.id,
+                source: item.candidate.source,
+                title: item.candidate.title,
+                bundleID: item.candidate.bundleID,
+                spaceID: item.candidate.spaceID,
+                displayID: item.candidate.displayID,
+                slot: item.candidate.slot,
+                quickKey: quickKey
+            )
+        }
+
+        let payload = SwitcherListJSON(
+            schemaVersion: 1,
+            generatedAt: Date.rfc3339UTC(),
+            includeAllSpaces: includeAllSpaces,
+            spacesMode: loaded?.config.resolvedSpacesMode ?? .perDisplay,
+            candidates: keyed
+        )
+
+        return CommandResult(exitCode: 0, stdout: encodeJSON(payload) + "\n")
+    }
+
+    private func mutateCurrentWindow(
+        x: LengthValue?,
+        y: LengthValue?,
+        width: LengthValue?,
+        height: LengthValue?
+    ) -> CommandResult {
+        guard runtimeHooks.accessibilityGranted() else {
+            return CommandResult(exitCode: Int32(ErrorCode.missingPermission.rawValue))
+        }
+
+        guard let window = runtimeHooks.focusedWindow() else {
+            return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
+        }
+
+        let displays = runtimeHooks.displays()
+        let display = displays.first(where: { $0.id == window.displayID }) ?? displays.first
+        let basis = display?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+
+        let scale = display?.scale ?? 2.0
+
+        do {
+            let resolvedX = try x.map { try LengthParser.parse($0).resolve(dimension: basis.width, scale: scale) }
+            let resolvedY = try y.map { try LengthParser.parse($0).resolve(dimension: basis.height, scale: scale) }
+            let resolvedW = try width.map { try LengthParser.parse($0).resolve(dimension: basis.width, scale: scale) }
+            let resolvedH = try height.map { try LengthParser.parse($0).resolve(dimension: basis.height, scale: scale) }
+
+            let nextWidth = resolvedW ?? window.frame.width
+            let nextHeight = resolvedH ?? window.frame.height
+            if nextWidth < 1 || nextHeight < 1 {
+                return CommandResult(exitCode: Int32(ErrorCode.validationError.rawValue))
+            }
+
+            let frame = ResolvedFrame(
+                x: basis.origin.x + (resolvedX ?? (window.frame.x - basis.origin.x)),
+                y: basis.origin.y + (resolvedY ?? (window.frame.y - basis.origin.y)),
+                width: nextWidth,
+                height: nextHeight
+            )
+
+            if !runtimeHooks.setFocusedWindowFrame(frame) {
+                return CommandResult(exitCode: Int32(ErrorCode.operationTimedOut.rawValue))
+            }
+
+            return CommandResult(exitCode: 0)
+        } catch {
+            return CommandResult(exitCode: Int32(ErrorCode.validationError.rawValue))
+        }
+    }
+
+    private func resolveSlotWindow(entry: SlotEntry, windows: [WindowSnapshot]) -> WindowSnapshot {
+        if let windowID = entry.windowID,
+           let exact = windows.first(where: { $0.windowID == windowID })
+        {
+            return exact
+        }
+
+        if let byBundle = windows.first(where: { $0.bundleID == entry.bundleID }) {
+            return byBundle
+        }
+
+        return WindowSnapshot(
+            windowID: entry.windowID ?? 0,
+            bundleID: entry.bundleID,
+            pid: 0,
+            title: entry.title,
+            role: "AXWindow",
+            subrole: nil,
+            minimized: false,
+            hidden: false,
+            frame: ResolvedFrame(x: 0, y: 0, width: 100, height: 100),
+            spaceID: entry.spaceID,
+            displayID: entry.displayID,
+            isFullscreen: false,
+            frontIndex: Int.max
+        )
+    }
+
+    private func focusShortcutTargetExists(entry: SlotEntry, windows: [WindowSnapshot]) -> Bool {
+        if let windowID = entry.windowID,
+           windows.contains(where: { $0.windowID == windowID })
+        {
+            return true
+        }
+
+        return windows.contains(where: { $0.bundleID == entry.bundleID })
+    }
+
+    private func findSlotEntry(for window: WindowSnapshot) -> SlotEntry? {
+        let state = stateStore.load()
+
+        if let matchedByWindowID = state.slots.first(where: { $0.windowID == window.windowID }) {
+            return matchedByWindowID
+        }
+
+        return state.slots.first(where: { $0.bundleID == window.bundleID })
+    }
+
+    private func resolveSlotEntry(slot: Int, state: RuntimeState, currentSpaceID: Int?) -> SlotEntry? {
+        let matching = state.slots.filter { $0.slot == slot }
+        if let currentSpaceID,
+           let currentSpaceMatch = matching.first(where: { $0.spaceID == currentSpaceID })
+        {
+            return currentSpaceMatch
+        }
+
+        return matching.first
+    }
+
+    private func fallbackSlotEntry(for slot: Int, config: ShitsuraeConfig) -> SlotEntry? {
+        var candidates: [FocusFallbackCandidate] = []
+        for (_, layout) in config.layouts.sorted(by: { $0.key < $1.key }) {
+            for space in layout.spaces {
+                for window in space.windows where window.slot == slot {
+                    candidates.append(
+                        FocusFallbackCandidate(
+                            source: window.source ?? .window,
+                            bundleID: window.match.bundleID
+                        )
+                    )
+                }
+            }
+        }
+
+        guard !candidates.isEmpty else {
+            return nil
+        }
+
+        let unique = Set(candidates)
+        guard unique.count == 1,
+              let selected = unique.first
+        else {
+            return nil
+        }
+
+        return SlotEntry(
+            slot: slot,
+            source: selected.source,
+            bundleID: selected.bundleID,
+            title: selected.bundleID,
+            spaceID: nil,
+            displayID: nil,
+            windowID: nil
+        )
+    }
+
+    private func orderCandidates(_ candidates: [InternalCandidate], prioritizeCurrentSpace: Bool) -> [InternalCandidate] {
+        let baseSorted = candidates.sorted { lhs, rhs in
+            if lhs.frontIndex != rhs.frontIndex { return lhs.frontIndex < rhs.frontIndex }
+
+            switch (lhs.windowID, rhs.windowID) {
+            case let (.some(left), .some(right)):
+                if left != right { return left < right }
+            case (.some, .none):
+                return true
+            case (.none, .some):
+                return false
+            case (.none, .none):
+                break
+            }
+
+            return lhs.candidate.id < rhs.candidate.id
+        }
+
+        let spaceOrdered: [InternalCandidate]
+        if prioritizeCurrentSpace {
+            let current = baseSorted.filter(\.inCurrentSpace)
+            let other = baseSorted.filter { !$0.inCurrentSpace }
+            spaceOrdered = current + other
+        } else {
+            spaceOrdered = baseSorted
+        }
+
+        let indexed = Array(spaceOrdered.enumerated())
+        let slotted = indexed
+            .filter { $0.element.candidate.slot != nil }
+            .sorted { lhs, rhs in
+                let leftSlot = lhs.element.candidate.slot ?? Int.max
+                let rightSlot = rhs.element.candidate.slot ?? Int.max
+                if leftSlot != rightSlot {
+                    return leftSlot < rightSlot
+                }
+                return lhs.offset < rhs.offset
+            }
+        let nonSlotted = indexed.filter { $0.element.candidate.slot == nil }
+        return (slotted + nonSlotted).map(\.element)
+    }
+
+    private func setupAutoReloadMonitor() {
+        let directory = resolvedConfigDirectoryURL()
+
+        // 初期状態は手動読込で決め、失敗時は既定 watch 設定を維持する。
+        do {
+            let loaded = try configLoader.load(from: directory)
+            cachedValidConfig = loaded
+            watchStatus = WatchStatus(
+                debounceMs: configWatchDebounceMs,
+                watcherRunning: false
+            )
+            updateLastReload(status: "success", code: nil, message: nil, trigger: "manual")
+        } catch let error as ConfigLoadError {
+            watchStatus = WatchStatus(debounceMs: configWatchDebounceMs, watcherRunning: false)
+            updateLastReload(status: "failed", code: error.code.rawValue, message: error.errors.first?.message, trigger: "manual")
+            RecentErrorStore.shared.record(error.code, summary: error.errors.first?.message ?? "config load failed")
+        } catch {
+            watchStatus = WatchStatus(debounceMs: configWatchDebounceMs, watcherRunning: false)
+            updateLastReload(status: "failed", code: ErrorCode.validationError.rawValue, message: error.localizedDescription, trigger: "manual")
+            RecentErrorStore.shared.record(.validationError, summary: error.localizedDescription)
+        }
+
+        let watcher = ConfigWatcher(
+            directoryURL: directory,
+            debounceMs: watchStatus.debounceMs,
+            configLoader: configLoader
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case let .success(loaded):
+                self.cachedValidConfig = loaded
+                self.updateLastReload(status: "success", code: nil, message: nil, trigger: "auto")
+                self.onAutoReload?(true)
+            case let .failure(error):
+                self.updateLastReload(status: "failed", code: error.code.rawValue, message: error.errors.first?.message, trigger: "auto")
+                RecentErrorStore.shared.record(error.code, summary: error.errors.first?.message ?? "auto reload failed")
+                self.onAutoReload?(false)
+            }
+        }
+
+        let running = watcher.start()
+        self.watcher = watcher
+        watchStatus = WatchStatus(
+            debounceMs: watchStatus.debounceMs,
+            watcherRunning: running
+        )
+    }
+
+    private func loadConfig(trigger: String) throws -> LoadedConfig {
+        do {
+            let loaded = try loadConfigFromSource()
+            updateLastReload(status: "success", code: nil, message: nil, trigger: trigger)
+            cachedValidConfig = loaded
+            return loaded
+        } catch let error as ConfigLoadError {
+            updateLastReload(status: "failed", code: error.code.rawValue, message: error.errors.first?.message, trigger: trigger)
+            throw error
+        }
+    }
+
+    private func updateLastReload(status: String, code: Int?, message: String?, trigger: String = "manual") {
+        lastConfigReload = ConfigReloadStatus(
+            status: status,
+            at: Date.rfc3339UTC(),
+            trigger: trigger,
+            errorCode: code,
+            message: message
+        )
+    }
+
+    private func renderDryRun(_ plan: ArrangeDryRunJSON) -> String {
+        var lines: [String] = []
+        lines.append("layout: \(plan.layout)")
+        lines.append("spacesMode: \(plan.spacesMode.rawValue)")
+        lines.append("planCount: \(plan.plan.count)")
+        lines.append("skippedCount: \(plan.skipped.count)")
+        lines.append("warningCount: \(plan.warnings.count)")
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    private func renderExecution(_ execution: ArrangeExecutionJSON) -> String {
+        [
+            "layout: \(execution.layout)",
+            "result: \(execution.result)",
+            "exitCode: \(execution.exitCode)",
+            "hardErrors: \(execution.hardErrors.count)",
+            "softErrors: \(execution.softErrors.count)",
+            "skipped: \(execution.skipped.count)",
+            "warnings: \(execution.warnings.count)",
+        ].joined(separator: "\n") + "\n"
+    }
+
+    private func renderVerbose(_ execution: ArrangeExecutionJSON) -> String {
+        var lines: [String] = []
+        for error in execution.hardErrors {
+            lines.append("hardError code=\(error.code) message=\(error.message)")
+        }
+        for error in execution.softErrors {
+            lines.append("softError code=\(error.code) message=\(error.message)")
+        }
+        for warning in execution.warnings {
+            lines.append("warning code=\(warning.code) detail=\(warning.detail)")
+        }
+        return lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
+    }
+
+    private func commonJSONError(_ code: ErrorCode, _ message: String, toStdErr: Bool, subcode: String? = nil) -> CommandResult {
+        let payload = CommonErrorJSON(code: code, message: message, subcode: subcode)
+        let encoded = encodeJSON(payload) + "\n"
+        if toStdErr {
+            return CommandResult(exitCode: Int32(code.rawValue), stderr: encoded)
+        }
+        return CommandResult(exitCode: Int32(code.rawValue), stdout: encoded)
+    }
+
+    private func errorAsResult(code: ErrorCode, message: String, json: Bool) -> CommandResult {
+        if json {
+            let payload = CommonErrorJSON(code: code, message: message)
+            return CommandResult(exitCode: Int32(code.rawValue), stdout: encodeJSON(payload) + "\n")
+        }
+
+        return CommandResult(exitCode: Int32(code.rawValue), stderr: message + "\n")
+    }
+
+    private func encodeJSON<T: Encodable>(_ value: T) -> String {
+        guard let data = try? JSONEncoder.pretty.encode(value),
+              let text = String(data: data, encoding: .utf8)
+        else {
+            return "{}"
+        }
+
+        return text
+    }
+
+    private func loadConfigFromSource() throws -> LoadedConfig {
+        if let configDirectoryOverride {
+            return try configLoader.load(from: configDirectoryOverride)
+        }
+        return try configLoader.loadFromDefaultDirectory(environment: environment)
+    }
+
+    private func isNoConfigFilesError(_ error: ConfigLoadError) -> Bool {
+        guard error.code == .validationError else {
+            return false
+        }
+
+        return error.errors.contains(where: { $0.message == "no YAML config files found" })
+    }
+
+    private func resolvedConfigDirectoryURL() -> URL {
+        if let configDirectoryOverride {
+            return configDirectoryOverride
+        }
+        return ConfigPathResolver.configDirectoryURL(environment: environment)
+    }
+}
+
+private struct InternalCandidate {
+    let candidate: SwitcherCandidate
+    let frontIndex: Int
+    let windowID: UInt32?
+    let inCurrentSpace: Bool
+}
+
+private struct FocusFallbackCandidate: Hashable {
+    let source: WindowSource
+    let bundleID: String
+}
