@@ -4,6 +4,8 @@ import Foundation
 import ShitsuraeCore
 import SwiftUI
 
+// MARK: - App
+
 struct ShitsuraeMenuBarApp: App {
     @StateObject private var model = AppModel()
     @Environment(\.openWindow) private var openWindow
@@ -28,13 +30,15 @@ struct ShitsuraeMenuBarApp: App {
                 }
             }
 
-            Button("Preferences") {
-                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+            Divider()
+
+            Button("Open Shitsurae") {
+                openWindow(id: "main")
+                NSApp.activate(ignoringOtherApps: true)
             }
 
-            Button("Diagnostics") {
-                model.refreshDiagnostics()
-                openWindow(id: "diagnostics")
+            Button("Preferences…") {
+                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
             }
 
             Button("Open Config Directory") {
@@ -51,23 +55,59 @@ struct ShitsuraeMenuBarApp: App {
         }
         .menuBarExtraStyle(.menu)
 
-        Window("Diagnostics", id: "diagnostics") {
-            DiagnosticsView(text: model.diagnosticsText)
+        Window("Shitsurae", id: "main") {
+            AppContentView(model: model)
+                .onAppear {
+                    NSApp.activate(ignoringOtherApps: true)
+                }
         }
-        .defaultSize(width: 700, height: 460)
+        .defaultSize(width: 780, height: 520)
+        .defaultLaunchBehavior(.presented)
+        .commands {
+            CommandGroup(replacing: .appTermination) {
+                Button("Quit Shitsurae") {
+                    model.quit()
+                }
+                .keyboardShortcut("q")
+            }
+        }
 
         Settings {
-            PreferencesView(model: model)
+            AppContentView(model: model)
+                .frame(minWidth: 780, minHeight: 520)
         }
     }
 }
 
+// MARK: - Sidebar Item
+
+private enum SidebarItem: Hashable {
+    case arrange
+    case layout(String)
+    case permissions
+    case diagnostics
+}
+
+// MARK: - ArrangeStatus
+
+private enum ArrangeStatus: Equatable {
+    case idle
+    case running
+    case success
+    case failed
+}
+
+// MARK: - AppModel
+
 @MainActor
 private final class AppModel: ObservableObject {
     @Published var layouts: [String] = []
+    @Published var config: ShitsuraeConfig?
+    @Published var configError: String?
     @Published var diagnosticsText = "{}"
+    @Published var arrangeStatus: ArrangeStatus = .idle
 
-    private let commandService: CommandService
+    let commandService: CommandService
     private let shortcutManager: ShortcutManager
     private var shutdownPerformed = false
 
@@ -92,9 +132,7 @@ private final class AppModel: ObservableObject {
             }
         }
         DispatchQueue.main.async { [weak self] in
-            guard let self else {
-                return
-            }
+            guard let self else { return }
             self.shortcutManager.start()
             self.reloadConfig()
             self.refreshDiagnostics()
@@ -102,21 +140,34 @@ private final class AppModel: ObservableObject {
     }
 
     func reloadConfig() {
-        let result = commandService.layoutsList()
-        if result.exitCode == 0 {
-            let names = result.stdout
-                .split(separator: "\n")
-                .map(String.init)
-                .filter { !$0.isEmpty }
-            layouts = names
-        } else {
+        do {
+            let loaded = try ConfigLoader().loadFromDefaultDirectory()
+            config = loaded.config
+            configError = nil
+            layouts = loaded.config.layouts.keys.sorted()
+        } catch {
+            config = nil
+            configError = error.localizedDescription
             layouts = []
         }
     }
 
     func apply(layout: String, spaceID: Int? = nil) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            _ = RemoteCommandService().arrange(layoutName: layout, spaceID: spaceID, dryRun: false, verbose: false, json: false)
+        arrangeStatus = .running
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = RemoteCommandService().arrange(
+                layoutName: layout, spaceID: spaceID,
+                dryRun: false, verbose: false, json: false
+            )
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.arrangeStatus = result.exitCode == 0 ? .success : .failed
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                    if self.arrangeStatus == .success || self.arrangeStatus == .failed {
+                        self.arrangeStatus = .idle
+                    }
+                }
+            }
         }
     }
 
@@ -133,11 +184,6 @@ private final class AppModel: ObservableObject {
     func quit() {
         shutdownIfNeeded()
         NSApplication.shared.terminate(nil)
-    }
-
-    func validationStatusText() -> String {
-        let result = commandService.validate(json: true)
-        return result.exitCode == 0 ? "Config loaded" : "Config invalid"
     }
 
     private func ensureAgentRunning() {
@@ -164,16 +210,11 @@ private final class AppModel: ObservableObject {
         let domain = "gui/\(getuid())"
         let service = "\(domain)/\(AgentXPCConstants.launchAgentLabel)"
         runProcess(executable: "/bin/launchctl", arguments: ["bootout", service])
-
-        // LaunchAgent 管理外の手動起動プロセスも停止する。
         runProcess(executable: "/usr/bin/pkill", arguments: ["-x", "ShitsuraeAgent"])
     }
 
     private func shutdownIfNeeded() {
-        guard !shutdownPerformed else {
-            return
-        }
-
+        guard !shutdownPerformed else { return }
         shutdownPerformed = true
         shortcutManager.stop()
         terminateAgentProcess()
@@ -190,71 +231,443 @@ private final class AppModel: ObservableObject {
     }
 }
 
-private struct PreferencesView: View {
+// MARK: - Shared Content View
+
+private struct AppContentView: View {
     @ObservedObject var model: AppModel
+    @State private var selection: SidebarItem? = .arrange
 
     var body: some View {
-        TabView {
-            PermissionsTab()
-                .tabItem { Label("Permissions", systemImage: "checkmark.shield") }
+        HStack(spacing: 0) {
+            List(selection: $selection) {
+                Section("Actions") {
+                    Label("Arrange", systemImage: "play.rectangle")
+                        .tag(SidebarItem.arrange)
+                }
 
-            ShortcutsTab(model: model)
-                .tabItem { Label("Shortcuts", systemImage: "keyboard") }
+                if !model.layouts.isEmpty {
+                    Section("Layouts") {
+                        ForEach(model.layouts, id: \.self) { name in
+                            Label(name, systemImage: "square.grid.2x2")
+                                .tag(SidebarItem.layout(name))
+                        }
+                    }
+                }
 
-            DiagnosticsView(text: model.diagnosticsText)
-                .tabItem { Label("Diagnostics", systemImage: "stethoscope") }
+                Section("System") {
+                    Label("Permissions", systemImage: "checkmark.shield")
+                        .tag(SidebarItem.permissions)
+                    Label("Diagnostics", systemImage: "stethoscope")
+                        .tag(SidebarItem.diagnostics)
+                }
+            }
+            .listStyle(.sidebar)
+            .frame(width: 200)
+
+            Divider()
+
+            Group {
+                switch selection {
+                case .arrange:
+                    ArrangeView(model: model)
+                case let .layout(name):
+                    if let layout = model.config?.layouts[name] {
+                        LayoutDetailView(name: name, layout: layout)
+                    } else {
+                        ContentUnavailableView("Layout not found", systemImage: "exclamationmark.triangle")
+                    }
+                case .permissions:
+                    PermissionsView()
+                case .diagnostics:
+                    DiagnosticsView(text: model.diagnosticsText)
+                case nil:
+                    ContentUnavailableView("Select an item", systemImage: "sidebar.left")
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .padding(16)
-        .frame(minWidth: 560, minHeight: 360)
     }
 }
 
-private struct PermissionsTab: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Permissions")
-                .font(.title2)
-                .bold()
+// MARK: - Arrange View
 
-            permissionRow(name: "Accessibility", granted: SystemProbe.accessibilityGranted())
-            permissionRow(name: "Screen Recording", granted: SystemProbe.screenRecordingGranted())
-            permissionRow(name: "Automation", granted: false)
+private struct ArrangeView: View {
+    @ObservedObject var model: AppModel
+    @State private var selectedLayout: String?
+    @State private var selectedSpaceID: Int?
 
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+    private var currentLayout: LayoutDefinition? {
+        guard let name = selectedLayout else { return nil }
+        return model.config?.layouts[name]
     }
 
-    private func permissionRow(name: String, granted: Bool) -> some View {
-        HStack {
-            Text(name)
+    private var spaceIDs: [Int] {
+        currentLayout?.spaces.map(\.spaceID) ?? []
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Arrange")
+                    .font(.title2).bold()
+
+                if let error = model.configError {
+                    GroupBox {
+                        Label(error, systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.red)
+                    }
+                }
+
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Layout").font(.caption).foregroundStyle(.secondary)
+                        Picker("Layout", selection: $selectedLayout) {
+                            Text("Select…").tag(nil as String?)
+                            ForEach(model.layouts, id: \.self) { name in
+                                Text(name).tag(name as String?)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 180)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Space").font(.caption).foregroundStyle(.secondary)
+                        Picker("Space", selection: $selectedSpaceID) {
+                            Text("All Spaces").tag(nil as Int?)
+                            ForEach(spaceIDs, id: \.self) { id in
+                                Text("Space \(id)").tag(id as Int?)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 140)
+                    }
+
+                    applyButton
+                }
+
+                if let layout = currentLayout {
+                    layoutPreview(layout)
+                }
+            }
+            .padding(20)
+        }
+        .onChange(of: model.layouts) { _, newValue in
+            if let sel = selectedLayout, !newValue.contains(sel) {
+                selectedLayout = nil
+            }
+        }
+        .onChange(of: selectedLayout) { _, _ in
+            selectedSpaceID = nil
+        }
+    }
+
+    @ViewBuilder
+    private var applyButton: some View {
+        Button {
+            guard let layout = selectedLayout else { return }
+            model.apply(layout: layout, spaceID: selectedSpaceID)
+        } label: {
+            HStack(spacing: 6) {
+                switch model.arrangeStatus {
+                case .idle:
+                    Image(systemName: "play.fill")
+                case .running:
+                    ProgressView().controlSize(.small)
+                case .success:
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                case .failed:
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
+                }
+                Text("Apply")
+            }
+        }
+        .disabled(selectedLayout == nil || model.arrangeStatus == .running)
+        .padding(.top, 16)
+    }
+
+    private func layoutPreview(_ layout: LayoutDefinition) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeader(icon: "rectangle.on.rectangle", title: "Preview")
+
+            ForEach(Array(layout.spaces.enumerated()), id: \.offset) { _, space in
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Space \(space.spaceID)").font(.subheadline).bold()
+                            if let display = space.display {
+                                displayBadge(display)
+                            }
+                        }
+
+                        VisualLayoutPreview(space: space, compact: true)
+
+                        windowLegend(space.windows)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    private func windowLegend(_ windows: [WindowDefinition]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(windows.enumerated()), id: \.offset) { _, win in
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(colorForSlot(win.slot))
+                        .frame(width: 8, height: 8)
+                    Text("\(win.slot)")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(colorForSlot(win.slot))
+                    Text(win.match.bundleID)
+                        .font(.system(.caption, design: .monospaced))
+                    if let tm = win.match.title {
+                        Text(formatTitleMatcher(tm))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Text(formatFrame(win.frame))
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Layout Detail View
+
+private struct LayoutDetailView: View {
+    let name: String
+    let layout: LayoutDefinition
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(name)
+                    .font(.title2).bold()
+
+                HStack(spacing: 16) {
+                    statBadge(
+                        icon: "rectangle.split.3x1",
+                        label: "Spaces",
+                        value: "\(layout.spaces.count)"
+                    )
+                    statBadge(
+                        icon: "macwindow",
+                        label: "Windows",
+                        value: "\(layout.spaces.reduce(0) { $0 + $1.windows.count })"
+                    )
+                    if let focus = layout.initialFocus {
+                        statBadge(
+                            icon: "target",
+                            label: "Initial Focus",
+                            value: "Slot \(focus.slot)"
+                        )
+                    }
+                }
+
+                ForEach(Array(layout.spaces.enumerated()), id: \.offset) { _, space in
+                    spaceSection(space)
+                }
+            }
+            .padding(20)
+        }
+    }
+
+    private func statBadge(icon: String, label: String, value: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.title3)
+                .foregroundColor(.accentColor)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(value).font(.title3).bold()
+                Text(label).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func spaceSection(_ space: SpaceDefinition) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Space \(space.spaceID)")
+                    .font(.headline)
+                if let display = space.display {
+                    displayBadge(display)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.quaternary.opacity(0.5))
+
+            VStack(alignment: .leading, spacing: 8) {
+                if space.windows.isEmpty {
+                    Text("No windows").foregroundStyle(.secondary)
+                } else {
+                    VisualLayoutPreview(space: space, compact: false)
+
+                    windowTable(space.windows)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+        }
+        .background(.background)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(.quaternary, lineWidth: 1)
+        )
+    }
+
+    private func windowTable(_ windows: [WindowDefinition]) -> some View {
+        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+            GridRow {
+                Text("")
+                Text("Slot")
+                Text("Bundle ID")
+                Text("Title")
+                Text("Frame")
+                Text("Launch")
+                    .gridColumnAlignment(.center)
+            }
+            .font(.caption.bold())
+            .foregroundStyle(.secondary)
+
+            Divider()
+                .gridCellUnsizedAxes(.horizontal)
+
+            ForEach(Array(windows.enumerated()), id: \.offset) { _, win in
+                GridRow {
+                    Circle()
+                        .fill(colorForSlot(win.slot))
+                        .frame(width: 8, height: 8)
+
+                    Text("\(win.slot)")
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(colorForSlot(win.slot))
+
+                    Text(win.match.bundleID)
+                        .font(.system(.body, design: .monospaced))
+                        .lineLimit(1)
+
+                    Group {
+                        if let tm = win.match.title {
+                            Text(formatTitleMatcher(tm))
+                        } else {
+                            Text("—").foregroundStyle(.quaternary)
+                        }
+                    }
+                    .font(.caption)
+                    .lineLimit(1)
+
+                    Text(formatFrame(win.frame))
+                        .font(.system(.caption, design: .monospaced))
+
+                    Group {
+                        if win.launch == true {
+                            Image(systemName: "checkmark").foregroundStyle(.green)
+                        } else {
+                            Text("—").foregroundStyle(.quaternary)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Permissions View
+
+private struct PermissionsView: View {
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Permissions")
+                    .font(.title2).bold()
+
+                permissionRow(
+                    icon: "hand.raised.fill",
+                    name: "Accessibility",
+                    description: "Required to move and resize windows.",
+                    granted: SystemProbe.accessibilityGranted(),
+                    required: true
+                )
+
+                permissionRow(
+                    icon: "rectangle.dashed.badge.record",
+                    name: "Screen Recording",
+                    description: "Required to read window titles and positions.",
+                    granted: SystemProbe.screenRecordingGranted(),
+                    required: true
+                )
+
+                permissionRow(
+                    icon: "gearshape.2.fill",
+                    name: "Automation",
+                    description: "Used for space switching via AppleScript.",
+                    granted: false,
+                    required: false
+                )
+
+                Divider()
+
+                Button("Open Accessibility Settings") {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            }
+            .padding(20)
+        }
+    }
+
+    private func permissionRow(
+        icon: String, name: String, description: String,
+        granted: Bool, required: Bool
+    ) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.title3)
+                .frame(width: 28)
+                .foregroundStyle(granted ? .green : .orange)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(name).font(.body).bold()
+                    Text(required ? "Required" : "Optional")
+                        .font(.caption2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(
+                            required ? Color.red.opacity(0.15) : Color.gray.opacity(0.15),
+                            in: Capsule()
+                        )
+                        .foregroundStyle(required ? .red : .secondary)
+                }
+                Text(description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Spacer()
-            Text(granted ? "Granted" : "Not granted")
+
+            Text(granted ? "Granted" : "Not Granted")
+                .font(.callout)
                 .foregroundStyle(granted ? .green : .orange)
         }
+        .padding(10)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
-private struct ShortcutsTab: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Shortcuts")
-                .font(.title2)
-                .bold()
-
-            Text(model.validationStatusText())
-
-            Text("Cmd+1 ... Cmd+9")
-            Text("Cmd+Ctrl+J / Cmd+Ctrl+K")
-            Text("Cmd+Tab")
-
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
+// MARK: - Diagnostics View
 
 private struct DiagnosticsView: View {
     let text: String
@@ -263,10 +676,189 @@ private struct DiagnosticsView: View {
         ScrollView {
             Text(text)
                 .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(12)
+                .padding(16)
         }
     }
 }
+
+// MARK: - Section Header
+
+private struct SectionHeader: View {
+    let icon: String
+    let title: String
+
+    var body: some View {
+        Label(title, systemImage: icon)
+            .font(.headline)
+    }
+}
+
+// MARK: - Visual Layout Preview
+
+private struct VisualLayoutPreview: View {
+    let space: SpaceDefinition
+    let compact: Bool
+
+    private var displayAspectRatio: CGFloat {
+        let screen = NSScreen.main?.frame.size ?? CGSize(width: 1440, height: 900)
+        return screen.height / screen.width
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let previewWidth = geo.size.width
+            let previewHeight = previewWidth * displayAspectRatio
+            let rects = space.windows.map { win in
+                (win: win, rect: resolveProportionalRect(frame: win.frame))
+            }
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(.black.opacity(0.05))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .strokeBorder(.secondary.opacity(0.3), lineWidth: 1)
+                    )
+
+                ForEach(Array(rects.enumerated()), id: \.offset) { _, item in
+                    let color = colorForSlot(item.win.slot)
+                    let r = item.rect
+                    let gap: CGFloat = 1.5
+
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(color.opacity(0.15))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 3)
+                                .strokeBorder(color.opacity(0.5), lineWidth: 1)
+                        )
+                        .overlay {
+                            VStack(spacing: 2) {
+                                Text("\(item.win.slot)")
+                                    .font(.system(compact ? .caption2 : .caption, design: .rounded, weight: .bold))
+                                    .foregroundStyle(color)
+                                Text(shortBundleID(item.win.match.bundleID))
+                                    .font(.system(size: compact ? 8 : 10))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        .frame(
+                            width: max(0, previewWidth * r.width - gap * 2),
+                            height: max(0, previewHeight * r.height - gap * 2)
+                        )
+                        .position(
+                            x: previewWidth * (r.x + r.width / 2),
+                            y: previewHeight * (r.y + r.height / 2)
+                        )
+                }
+            }
+            .frame(height: previewHeight)
+        }
+        .aspectRatio(1 / displayAspectRatio, contentMode: .fit)
+    }
+}
+
+// MARK: - Helpers
+
+private let slotColors: [Color] = [.blue, .orange, .green, .purple, .pink, .cyan, .yellow, .indigo, .mint]
+
+private func colorForSlot(_ slot: Int) -> Color {
+    guard slot >= 1, slot <= slotColors.count else { return .gray }
+    return slotColors[slot - 1]
+}
+
+private func shortBundleID(_ bundleID: String) -> String {
+    bundleID.split(separator: ".").last.map(String.init) ?? bundleID
+}
+
+private struct ProportionalRect {
+    let x: Double
+    let y: Double
+    let width: Double
+    let height: Double
+}
+
+private func lengthToProportion(_ value: LengthValue, referenceDimension: Double) -> Double {
+    guard let parsed = try? LengthParser.parse(value) else { return 0 }
+    switch parsed.unit {
+    case .percent:
+        return parsed.value / 100.0
+    case .ratio:
+        return parsed.value
+    case .pt:
+        return referenceDimension > 0 ? parsed.value / referenceDimension : 0
+    case .px:
+        let points = parsed.value / 2.0
+        return referenceDimension > 0 ? points / referenceDimension : 0
+    }
+}
+
+private func resolveProportionalRect(frame: FrameDefinition) -> ProportionalRect {
+    let refWidth: Double = 1440
+    let refHeight: Double = 900
+    return ProportionalRect(
+        x: lengthToProportion(frame.x, referenceDimension: refWidth),
+        y: lengthToProportion(frame.y, referenceDimension: refHeight),
+        width: lengthToProportion(frame.width, referenceDimension: refWidth),
+        height: lengthToProportion(frame.height, referenceDimension: refHeight)
+    )
+}
+
+private func displayBadge(_ display: DisplayDefinition) -> some View {
+    Group {
+        if let monitor = display.monitor {
+            Text(monitor.rawValue)
+                .font(.caption2)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .background(.blue.opacity(0.15), in: Capsule())
+                .foregroundStyle(.blue)
+        } else if let id = display.id {
+            Text(id.prefix(8) + "…")
+                .font(.caption2)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .background(.blue.opacity(0.15), in: Capsule())
+                .foregroundStyle(.blue)
+        }
+    }
+}
+
+private func formatLength(_ value: LengthValue) -> String {
+    switch value {
+    case let .pt(v):
+        if v == v.rounded() {
+            return "\(Int(v))"
+        }
+        return String(format: "%.1f", v)
+    case let .expression(s):
+        return s
+    }
+}
+
+private func formatFrame(_ frame: FrameDefinition) -> String {
+    let x = formatLength(frame.x)
+    let y = formatLength(frame.y)
+    let w = formatLength(frame.width)
+    let h = formatLength(frame.height)
+    return "\(x), \(y)  \(w) \u{00D7} \(h)"
+}
+
+private func formatTitleMatcher(_ matcher: TitleMatcher) -> String {
+    if let eq = matcher.equals {
+        return "title = \"\(eq)\""
+    }
+    if let c = matcher.contains {
+        return "title ~ \"\(c)\""
+    }
+    if let r = matcher.regex {
+        return "title \u{2248} /\(r)/"
+    }
+    return ""
+}
+
+// MARK: - Entry Point
 
 ShitsuraeMenuBarApp.main()
