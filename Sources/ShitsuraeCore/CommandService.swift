@@ -84,12 +84,7 @@ public struct CommandServiceRuntimeHooks: @unchecked Sendable {
 }
 
 public final class CommandService {
-    public static let bundledSupportedBuildCatalogURL: URL = {
-        guard let url = Bundle.module.url(forResource: "supported-macos-builds", withExtension: "json") else {
-            preconditionFailure("missing bundled resource: supported-macos-builds.json")
-        }
-        return url
-    }()
+    public static let bundledSupportedBuildCatalogURL = BundledResourceLocator.supportedBuildCatalogURL()
 
     private let configLoader: ConfigLoader
     private let logger: ShitsuraeLogger
