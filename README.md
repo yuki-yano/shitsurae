@@ -89,6 +89,13 @@ Always available from the system menu bar:
 
 A full GUI with sidebar navigation, organized into the following sections:
 
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/3adc77fe-03f4-4035-99d6-46ec116cf171" alt="Layout detail view" width="720" />
+</p>
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/8852c847-3091-4773-9c6c-5e8c4d1b6bfd" alt="Layout detail view (dashboard)" width="720" />
+</p>
+
 **Arrange** — run layouts from the GUI:
 - Layout picker dropdown to select a defined layout
 - Space picker to target all Spaces or a specific one
@@ -107,6 +114,10 @@ A full GUI with sidebar navigation, organized into the following sections:
 - Overlay settings (thumbnail on/off)
 - Monitor assignments (primary / secondary)
 
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/89261418-4110-491f-8bc0-4920fe5de1af" alt="Shortcuts view" width="720" />
+</p>
+
 **Shortcuts** — full shortcut reference:
 - Focus-by-slot keys (`Cmd+1`–`Cmd+9`) with per-app enable/disable status
 - Window navigation keys (next / prev) and cycle-excluded apps
@@ -122,6 +133,10 @@ A full GUI with sidebar navigation, organized into the following sections:
 **Diagnostics** — raw system diagnostics displayed as selectable JSON text
 
 #### Window switcher overlay
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/9bc0e59f-392a-4c0a-8ea1-2facc9d7b104" alt="Window switcher overlay" width="720" />
+</p>
 
 A floating overlay triggered by the switcher hotkey (`Cmd+Tab` by default):
 

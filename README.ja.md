@@ -89,6 +89,13 @@ Shitsurae は通常の macOS アプリとして起動し、メニューバーに
 
 サイドバー付きの GUI で、以下のセクションで構成されています：
 
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/3adc77fe-03f4-4035-99d6-46ec116cf171" alt="レイアウト詳細ビュー" width="720" />
+</p>
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/8852c847-3091-4773-9c6c-5e8c4d1b6bfd" alt="レイアウト詳細ビュー (dashboard)" width="720" />
+</p>
+
 **Arrange** — GUI からレイアウトを実行：
 - レイアウト選択ドロップダウンで定義済みレイアウトを選択
 - Space 選択で全 Space または特定の Space を指定
@@ -107,6 +114,10 @@ Shitsurae は通常の macOS アプリとして起動し、メニューバーに
 - オーバーレイ設定（サムネイルの ON/OFF）
 - モニター割り当て（primary / secondary）
 
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/89261418-4110-491f-8bc0-4920fe5de1af" alt="ショートカットビュー" width="720" />
+</p>
+
 **Shortcuts** — ショートカット一覧：
 - スロットフォーカスキー（`Cmd+1`〜`Cmd+9`）とアプリごとの有効/無効設定
 - ウィンドウナビゲーションキー（次/前）と巡回除外アプリ
@@ -122,6 +133,10 @@ Shitsurae は通常の macOS アプリとして起動し、メニューバーに
 **Diagnostics** — システム診断情報を選択可能な JSON テキストで表示
 
 #### ウィンドウスイッチャーオーバーレイ
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/9bc0e59f-392a-4c0a-8ea1-2facc9d7b104" alt="ウィンドウスイッチャーオーバーレイ" width="720" />
+</p>
 
 スイッチャーホットキー（デフォルトは `Cmd+Tab`）で表示されるフローティングオーバーレイ：
 
