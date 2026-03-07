@@ -4,7 +4,7 @@
 
 # Shitsurae
 
-[English version (README.md)](README.md)
+[English](README.md)
 
 **Shitsurae** は、1 コマンドでデスクトップを整える macOS 向けワークスペース整列ツールです。
 

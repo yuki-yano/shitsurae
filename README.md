@@ -4,7 +4,7 @@
 
 # Shitsurae
 
-[日本語版はこちら (README.ja.md)](README.ja.md)
+[日本語](README.ja.md)
 
 **Shitsurae** is a macOS workspace arranger that brings order to your desktop with a single command.
 
