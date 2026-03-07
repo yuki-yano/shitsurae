@@ -377,6 +377,10 @@
       "type": "string",
       "pattern": "^(tab|enter|esc|space|left|right|up|down|home|end|pageup|pagedown|[A-Za-z0-9])$"
     },
+    "overlayCommandKeyName": {
+      "type": "string",
+      "pattern": "^(tab|enter|esc|space|left|right|up|down|home|end|pageup|pagedown|[-A-Za-z0-9`=\\[\\]\\\\;',./])$"
+    },
     "hotkeyDefinition": {
       "type": "object",
       "additionalProperties": false,
@@ -434,13 +438,13 @@
         "acceptKeys": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/keyName"
+            "$ref": "#/$defs/overlayCommandKeyName"
           }
         },
         "cancelKeys": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/keyName"
+            "$ref": "#/$defs/overlayCommandKeyName"
           }
         }
       }
@@ -459,13 +463,13 @@
         "acceptKeys": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/keyName"
+            "$ref": "#/$defs/overlayCommandKeyName"
           }
         },
         "cancelKeys": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/keyName"
+            "$ref": "#/$defs/overlayCommandKeyName"
           }
         },
         "sources": {

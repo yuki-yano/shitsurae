@@ -20,6 +20,9 @@ final class ConfigSchemaTests: XCTestCase {
         XCTAssertNotNil(patternProperties["^[A-Za-z0-9._-]+$"])
 
         let defs = try XCTUnwrap(root["$defs"] as? [String: Any])
+        let overlayCommandKeyName = try XCTUnwrap(defs["overlayCommandKeyName"] as? [String: Any])
+        XCTAssertTrue((overlayCommandKeyName["pattern"] as? String)?.contains("\\[") == true)
+
         let executionPolicy = try XCTUnwrap(defs["executionPolicy"] as? [String: Any])
         let executionPolicyProperties = try XCTUnwrap(executionPolicy["properties"] as? [String: Any])
         XCTAssertNotNil(executionPolicyProperties["spaceMoveMethod"])
@@ -38,6 +41,9 @@ final class ConfigSchemaTests: XCTestCase {
 
         let switcher = try XCTUnwrap(defs["switcherShortcutDefinition"] as? [String: Any])
         let switcherProperties = try XCTUnwrap(switcher["properties"] as? [String: Any])
+        let switcherCancelKeys = try XCTUnwrap(switcherProperties["cancelKeys"] as? [String: Any])
+        let switcherCancelItems = try XCTUnwrap(switcherCancelKeys["items"] as? [String: Any])
+        XCTAssertEqual(switcherCancelItems["$ref"] as? String, "#/$defs/overlayCommandKeyName")
         XCTAssertNil(switcherProperties["includeAllSpaces"])
         XCTAssertNil(switcherProperties["prioritizeCurrentSpace"])
         XCTAssertNil(switcherProperties["acceptOnModifierRelease"])

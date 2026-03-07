@@ -423,6 +423,35 @@ final class ConfigValidatorTests: XCTestCase {
         assertHasError(errors, contains: "cycle.quickKeys must not overlap cycle.acceptKeys/cancelKeys")
     }
 
+    func testOverlayCommandKeysAllowBracketCharacter() {
+        let config = baseConfig(
+            shortcuts: ShortcutsDefinition(
+                focusBySlot: nil,
+                nextWindow: nil,
+                prevWindow: nil,
+                cycle: CycleShortcutDefinition(
+                    mode: .overlay,
+                    quickKeys: "123",
+                    acceptKeys: ["enter"],
+                    cancelKeys: ["esc", "["]
+                ),
+                switcher: SwitcherShortcutDefinition(
+                    trigger: HotkeyDefinition(key: "tab", modifiers: ["cmd"]),
+                    quickKeys: nil,
+                    acceptKeys: ["enter"],
+                    cancelKeys: ["esc", "["],
+                    sources: nil
+                ),
+                globalActions: nil,
+                disabledInApps: nil
+            )
+        )
+
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
+        XCTAssertFalse(errors.contains(where: { $0.message.contains("cycle.cancelKeys contains invalid key: [") }))
+        XCTAssertFalse(errors.contains(where: { $0.message.contains("switcher.cancelKeys contains invalid key: [") }))
+    }
+
     func testGlobalActionValidationAndDisabledInAppsID() {
         let config = baseConfig(
             shortcuts: ShortcutsDefinition(

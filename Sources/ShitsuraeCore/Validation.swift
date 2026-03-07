@@ -29,6 +29,7 @@ public enum ConfigValidator {
     private static let specialKeys: Set<String> = [
         "tab", "enter", "esc", "space", "left", "right", "up", "down", "home", "end", "pageup", "pagedown"
     ]
+    private static let overlayCommandLiteralKeys: Set<String> = ["`", "-", "=", "[", "]", "\\", ";", "'", ",", ".", "/"]
 
     public static func validate(config: ShitsuraeConfig, sourcePath: String) -> [ValidateErrorItem] {
         var errors: [ValidateErrorItem] = []
@@ -260,7 +261,7 @@ public enum ConfigValidator {
             )
         }
 
-        for key in shortcuts.cycleAcceptKeys where !isKeyValid(key) {
+        for key in shortcuts.cycleAcceptKeys where !isOverlayCommandKeyValid(key) {
             errors.append(
                 ValidateErrorItem(
                     code: .validationError,
@@ -270,7 +271,7 @@ public enum ConfigValidator {
             )
         }
 
-        for key in shortcuts.cycleCancelKeys where !isKeyValid(key) {
+        for key in shortcuts.cycleCancelKeys where !isOverlayCommandKeyValid(key) {
             errors.append(
                 ValidateErrorItem(
                     code: .validationError,
@@ -320,7 +321,7 @@ public enum ConfigValidator {
             )
         }
 
-        for key in shortcuts.acceptKeys where !isKeyValid(key) {
+        for key in shortcuts.acceptKeys where !isOverlayCommandKeyValid(key) {
             errors.append(
                 ValidateErrorItem(
                     code: .validationError,
@@ -330,7 +331,7 @@ public enum ConfigValidator {
             )
         }
 
-        for key in shortcuts.cancelKeys where !isKeyValid(key) {
+        for key in shortcuts.cancelKeys where !isOverlayCommandKeyValid(key) {
             errors.append(
                 ValidateErrorItem(
                     code: .validationError,
@@ -501,6 +502,11 @@ public enum ConfigValidator {
         }
 
         return false
+    }
+
+    private static func isOverlayCommandKeyValid(_ key: String) -> Bool {
+        let lower = key.lowercased()
+        return isKeyValid(lower) || overlayCommandLiteralKeys.contains(lower)
     }
 
     private static func matches(_ regex: NSRegularExpression, text: String) -> Bool {

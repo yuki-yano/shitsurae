@@ -205,6 +205,33 @@ final class ConfigLoaderTests: XCTestCase {
         XCTAssertEqual(loaded.config.resolvedShortcuts.quickKeys, "asdf")
     }
 
+    func testLoadOverlayCommandKeysWithBracketCharacter() throws {
+        let yaml = """
+        shortcuts:
+          cycle:
+            mode: overlay
+            cancelKeys: [esc, "["]
+          switcher:
+            trigger: { key: "tab", modifiers: ["cmd"] }
+            cancelKeys: [esc, "["]
+        layouts:
+          work:
+            spaces:
+              - spaceID: 1
+                windows:
+                  - match:
+                      bundleID: "com.example.app"
+                    slot: 1
+                    frame: { x: "0%", y: "0%", width: "100%", height: "100%" }
+        """
+        try write(yaml: yaml, named: "config.yaml")
+
+        let loaded = try ConfigLoader().load(from: tempDirectory)
+        XCTAssertEqual(loaded.config.resolvedShortcuts.cycleMode, .overlay)
+        XCTAssertEqual(loaded.config.resolvedShortcuts.cycleCancelKeys, ["esc", "["])
+        XCTAssertEqual(loaded.config.resolvedShortcuts.cancelKeys, ["esc", "["])
+    }
+
     private func write(yaml: String, named: String) throws {
         let fileURL = tempDirectory.appendingPathComponent(named)
         try yaml.write(to: fileURL, atomically: true, encoding: .utf8)
