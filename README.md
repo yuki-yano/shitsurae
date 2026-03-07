@@ -73,18 +73,66 @@ Bind any of these to a global shortcut in your YAML config.
 
 Shitsurae runs as a standard macOS app with both a menu bar presence and a main window.
 
-**Menu bar** — always-available controls:
-- Apply any defined layout
-- Open main window
-- Preferences and diagnostics
-- Open config directory
-- Reload config
+#### Menu bar
 
-**Main window** — full GUI with sidebar navigation:
-- Visual layout preview with color-coded slots
-- Arrangement controls with dry-run option
-- Shortcut reference
-- Permission status and diagnostics
+Always available from the system menu bar:
+
+- **Layout submenus** — each defined layout appears as a submenu with:
+  - *Apply All* — apply the layout to all Spaces
+  - *Apply Current Space* — apply the layout to the currently active Space only
+- **Open Shitsurae** — open the main window
+- **Preferences…** — open the settings window
+- **Open Config Directory** — reveal the config folder in Finder
+- **Quit** — terminate the app
+
+#### Main window
+
+A full GUI with sidebar navigation, organized into the following sections:
+
+**Arrange** — run layouts from the GUI:
+- Layout picker dropdown to select a defined layout
+- Space picker to target all Spaces or a specific one
+- Apply button with live status indicator (idle → running → success / failed)
+- Visual layout preview showing color-coded window slots on each Space
+- Window legend listing slot number, bundle ID, title matcher, and frame dimensions
+
+**Layouts** — inspect each defined layout:
+- Summary badges for space count, window count, and initial focus target
+- Per-space visual preview with color-coded slot positions
+- Window detail table showing slot, bundle ID, title matcher, frame, and launch flag
+
+**General** — review current configuration at a glance:
+- Ignore rules for `apply` and `focus` (excluded apps and window conditions)
+- Execution policy (default space-move method and per-app overrides)
+- Overlay settings (thumbnail on/off)
+- Monitor assignments (primary / secondary)
+
+**Shortcuts** — full shortcut reference:
+- Focus-by-slot keys (`Cmd+1`–`Cmd+9`) with per-app enable/disable status
+- Window navigation keys (next / prev) and cycle-excluded apps
+- Switcher trigger key, scope options (all Spaces / current Space priority), accept-on-modifier-release toggle, and accept/cancel key lists
+- Global actions table (snap presets and custom actions with their shortcuts)
+
+**Permissions** — system permission status:
+- Accessibility (required) — granted / not granted
+- Screen Recording (required) — granted / not granted
+- Automation (optional) — granted / not granted
+- Button to jump to macOS Accessibility settings
+
+**Diagnostics** — raw system diagnostics displayed as selectable JSON text
+
+#### Window switcher overlay
+
+A floating overlay triggered by the switcher hotkey (`Cmd+Tab` by default):
+
+- Displays candidate windows as horizontal cards, each showing:
+  - App icon and window title
+  - Quick-select key (`1`, `2`, `3`, …)
+  - Bundle ID
+  - Window thumbnail preview (requires Screen Recording permission) or an icon-based fallback
+- The selected card is visually highlighted
+- **Keyboard:** Tab / Shift+Tab to cycle, number keys for quick select, custom accept/cancel keys, or release the modifier to confirm
+- **Mouse:** click any card to activate it
 
 ### 6. CLI + automation
 
