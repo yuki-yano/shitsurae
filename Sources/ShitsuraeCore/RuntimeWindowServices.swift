@@ -345,8 +345,7 @@ public enum WindowQueryService {
         guard focusWindowElement(
             appElement: appElement,
             windowElement: windowElement,
-            pid: running.processIdentifier,
-            bundleID: bundleID
+            pid: running.processIdentifier
         ) else {
             return false
         }
@@ -391,8 +390,7 @@ public enum WindowQueryService {
         return focusWindowElement(
             appElement: appElement,
             windowElement: windowElement,
-            pid: running.processIdentifier,
-            bundleID: bundleID
+            pid: running.processIdentifier
         )
     }
 
@@ -493,71 +491,42 @@ public enum WindowQueryService {
     private static func focusWindowElement(
         appElement: AXUIElement,
         windowElement: AXUIElement,
-        pid: pid_t,
-        bundleID: String?
+        pid: pid_t
     ) -> Bool {
         var resolvedWindowID: CGWindowID = 0
         guard AXUIElementGetWindowID(windowElement, &resolvedWindowID) == .success else {
             return false
         }
 
-        return performWindowFocusTransition(
-            setFrontmost: {
-                if !promoteWindowToFront(pid: pid, windowID: UInt32(resolvedWindowID)) {
-                    _ = AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
-                }
-            },
-            waitForFrontmost: {
-                waitForFrontmost(pid: pid, bundleID: bundleID)
-            },
-            applyWindowFocus: {
+        return applyTargetedWindowFocus(
+            pid: pid,
+            windowID: UInt32(resolvedWindowID),
+            promoteWindow: promoteWindowToFront,
+            applyAccessibilityFocus: {
                 _ = AXUIElementSetAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, windowElement)
                 _ = AXUIElementSetAttributeValue(appElement, kAXMainWindowAttribute as CFString, windowElement)
                 _ = AXUIElementSetAttributeValue(windowElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-                _ = AXUIElementPerformAction(windowElement, kAXRaiseAction as CFString)
             },
-            waitForTargetWindow: {
-                waitForFocusedWindow(
-                    appElement: appElement,
-                    targetWindowID: UInt32(resolvedWindowID),
-                    pid: pid,
-                    bundleID: bundleID
-                )
+            raiseWindow: {
+                _ = AXUIElementPerformAction(windowElement, kAXRaiseAction as CFString)
             }
         )
     }
 
-    static func performWindowFocusTransition(
-        setFrontmost: () -> Void,
-        waitForFrontmost: () -> Bool,
-        applyWindowFocus: () -> Void,
-        waitForTargetWindow: () -> Bool,
-        sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
-        maxAttempts: Int = 3,
-        settleDelay: TimeInterval = 0.05
+    static func applyTargetedWindowFocus(
+        pid: pid_t,
+        windowID: UInt32,
+        promoteWindow: (pid_t, UInt32) -> Bool,
+        applyAccessibilityFocus: () -> Void,
+        raiseWindow: () -> Void
     ) -> Bool {
-        setFrontmost()
-
-        guard waitForFrontmost() else {
+        guard promoteWindow(pid, windowID) else {
             return false
         }
 
-        for attempt in 0 ..< maxAttempts {
-            applyWindowFocus()
-            if waitForTargetWindow() {
-                return true
-            }
-
-            if attempt + 1 < maxAttempts {
-                sleep(0.01)
-            }
-        }
-
-        if settleDelay > 0 {
-            sleep(settleDelay)
-        }
-
-        return waitForTargetWindow()
+        applyAccessibilityFocus()
+        raiseWindow()
+        return true
     }
 
     private static func getProcessSerialNumber(pid: pid_t, psn: UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus {
@@ -655,60 +624,6 @@ public enum WindowQueryService {
         if let bundleID, frontmost.bundleIdentifier == bundleID {
             return true
         }
-        return false
-    }
-
-    private static func waitForFocusedWindow(
-        appElement: AXUIElement,
-        targetWindowID: UInt32,
-        pid: pid_t,
-        bundleID: String?
-    ) -> Bool {
-        for _ in 0 ..< 5 {
-            if frontmostMatches(pid: pid, bundleID: bundleID),
-               focusedWindowMatches(appElement: appElement, targetWindowID: targetWindowID)
-            {
-                return true
-            }
-            Thread.sleep(forTimeInterval: 0.01)
-        }
-
-        return frontmostMatches(pid: pid, bundleID: bundleID)
-            && focusedWindowMatches(appElement: appElement, targetWindowID: targetWindowID)
-    }
-
-    static func focusedWindowMatches(
-        appElement: AXUIElement,
-        targetWindowID: UInt32,
-        attributeValueResolver: (AXUIElement, CFString) -> AXUIElement? = { element, attribute in
-            var ref: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(element, attribute, &ref) == .success,
-                  let resolved = ref
-            else {
-                return nil
-            }
-            return (resolved as! AXUIElement)
-        },
-        windowIDResolver: (AXUIElement) -> CGWindowID? = { element in
-            var resolvedWindowID: CGWindowID = 0
-            guard AXUIElementGetWindowID(element, &resolvedWindowID) == .success else {
-                return nil
-            }
-            return resolvedWindowID
-        }
-    ) -> Bool {
-        for attribute in [kAXFocusedWindowAttribute as CFString, kAXMainWindowAttribute as CFString] {
-            guard let window = attributeValueResolver(appElement, attribute),
-                  let windowID = windowIDResolver(window)
-            else {
-                continue
-            }
-
-            if UInt32(windowID) == targetWindowID {
-                return true
-            }
-        }
-
         return false
     }
 

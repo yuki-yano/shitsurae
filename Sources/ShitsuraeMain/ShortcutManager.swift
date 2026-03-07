@@ -66,12 +66,14 @@ final class ShortcutManager {
 
     private let overlayController = SwitcherOverlayController()
     private var overlaySelectionObserver: NSObjectProtocol?
+    private var activeSpaceObserver: NSObjectProtocol?
     private var switcherSession: SwitcherSession?
     private var cycleIndex: Int = -1
     private var cycleCandidates: [SwitcherCandidate] = []
     private var lastCycleAt: Date?
+    private var lastActiveSpaceChangeAt: Date?
     private let cycleSessionTimeout: TimeInterval = 1.5
-    private var activationSequence: UInt64 = 0
+    private let activeSpaceSettleDelay: TimeInterval = 0.15
     private var lastCarbonShortcutID: String?
     private var lastCarbonShortcutAt: Date?
     private let eventTapDuplicateThreshold: TimeInterval = 0.12
@@ -96,6 +98,7 @@ final class ShortcutManager {
     }
 
     func start() {
+        startObservingWorkspaceChanges()
         reloadConfiguration()
     }
 
@@ -104,6 +107,10 @@ final class ShortcutManager {
             NotificationCenter.default.removeObserver(overlaySelectionObserver)
             self.overlaySelectionObserver = nil
         }
+        if let activeSpaceObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(activeSpaceObserver)
+            self.activeSpaceObserver = nil
+        }
         unregisterHotkeys()
         stopEventTap()
         stopModifierReleasePolling()
@@ -111,6 +118,7 @@ final class ShortcutManager {
         switcherSession = nil
         overlayController.hide()
         resetCycleState()
+        lastActiveSpaceChangeAt = nil
         lastCarbonShortcutID = nil
         lastCarbonShortcutAt = nil
         lastEventTapSwitcherAdvanceAt = nil
@@ -543,7 +551,26 @@ final class ShortcutManager {
     private func scheduleCycleFocus(forward: Bool) {
         let managerBox = WeakShortcutManagerBox(manager: self)
         DispatchQueue.main.async {
-            managerBox.manager?.cycleFocus(forward: forward)
+            managerBox.manager?.executeScheduledCycleFocus(forward: forward)
+        }
+    }
+
+    private func executeScheduledCycleFocus(forward: Bool) {
+        let now = Date()
+        let delay = CycleFocusTiming(
+            hasCachedCandidates: !cycleCandidates.isEmpty,
+            lastCycleAt: lastCycleAt,
+            lastActiveSpaceChangeAt: lastActiveSpaceChangeAt
+        ).dispatchDelay(now: now, activeSpaceSettleDelay: activeSpaceSettleDelay)
+
+        guard delay > 0 else {
+            cycleFocus(forward: forward)
+            return
+        }
+
+        let managerBox = WeakShortcutManagerBox(manager: self)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            managerBox.manager?.executeScheduledCycleFocus(forward: forward)
         }
     }
 
@@ -583,7 +610,7 @@ final class ShortcutManager {
             ]
         )
         lastCycleAt = now
-        activate(candidate: candidate, allowRetry: false)
+        activate(candidate: candidate)
     }
 
     private func presentOrAdvanceSwitcher(forward: Bool) {
@@ -965,13 +992,11 @@ final class ShortcutManager {
         )
     }
 
-    private func activate(candidate: SwitcherCandidate, allowRetry: Bool = true) {
-        activationSequence &+= 1
-        let sequence = activationSequence
-        performActivation(candidate: candidate, sequence: sequence, attempt: 1, allowRetry: allowRetry)
+    private func activate(candidate: SwitcherCandidate) {
+        performActivation(candidate: candidate)
     }
 
-    private func performActivation(candidate: SwitcherCandidate, sequence: UInt64, attempt: Int, allowRetry: Bool) {
+    private func performActivation(candidate: SwitcherCandidate) {
         if let windowID = candidateWindowID(from: candidate.id) {
             let result = commandService.focus(
                 slot: nil,
@@ -983,15 +1008,7 @@ final class ShortcutManager {
                     "windowID": windowID,
                     "bundleID": candidate.bundleID ?? "",
                     "activated": result.exitCode == 0,
-                    "attempt": attempt,
                 ]
-            )
-            retryActivationIfNeeded(
-                candidate: candidate,
-                sequence: sequence,
-                attempt: attempt,
-                success: result.exitCode == 0,
-                allowRetry: allowRetry
             )
             return
         }
@@ -1015,37 +1032,8 @@ final class ShortcutManager {
                 fields: [
                     "bundleID": bundleID,
                     "activated": result.exitCode == 0,
-                    "attempt": attempt,
                 ]
             )
-            retryActivationIfNeeded(
-                candidate: candidate,
-                sequence: sequence,
-                attempt: attempt,
-                success: result.exitCode == 0,
-                allowRetry: allowRetry
-            )
-        }
-    }
-
-    private func retryActivationIfNeeded(candidate: SwitcherCandidate, sequence: UInt64, attempt: Int, success: Bool, allowRetry: Bool) {
-        guard allowRetry,
-              !success,
-              sequence == activationSequence,
-              attempt < 3,
-              candidate.slot == nil
-        else {
-            return
-        }
-
-        let managerBox = WeakShortcutManagerBox(manager: self)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            guard let manager = managerBox.manager,
-                  manager.activationSequence == sequence
-            else {
-                return
-            }
-            manager.performActivation(candidate: candidate, sequence: sequence, attempt: attempt + 1, allowRetry: allowRetry)
         }
     }
 
@@ -1120,15 +1108,11 @@ final class ShortcutManager {
     }
 
     private func shouldRefreshCycleCandidates(now: Date) -> Bool {
-        if cycleCandidates.isEmpty {
-            return true
-        }
-
-        guard let lastCycleAt else {
-            return true
-        }
-
-        return now.timeIntervalSince(lastCycleAt) > cycleSessionTimeout
+        CycleFocusTiming(
+            hasCachedCandidates: !cycleCandidates.isEmpty,
+            lastCycleAt: lastCycleAt,
+            lastActiveSpaceChangeAt: lastActiveSpaceChangeAt
+        ).shouldRefreshCandidates(now: now, cycleSessionTimeout: cycleSessionTimeout)
     }
 
     private func initialSelectionIndex(candidates: [SwitcherCandidate], forward: Bool) -> Int {
@@ -1182,6 +1166,27 @@ final class ShortcutManager {
         cycleIndex = -1
         cycleCandidates = []
         lastCycleAt = nil
+    }
+
+    private func startObservingWorkspaceChanges() {
+        guard activeSpaceObserver == nil else {
+            return
+        }
+
+        let managerBox = WeakShortcutManagerBox(manager: self)
+        activeSpaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            managerBox.manager?.handleActiveSpaceDidChange()
+        }
+    }
+
+    private func handleActiveSpaceDidChange() {
+        lastActiveSpaceChangeAt = Date()
+        resetCycleState()
+        logger.log(event: "workspace.activeSpace.changed")
     }
 
     private func shouldRegisterSwitcherReverseHotkey(trigger: HotkeyDefinition) -> Bool {

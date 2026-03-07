@@ -82,90 +82,43 @@ final class RuntimeWindowServicesTests: XCTestCase {
         XCTAssertEqual(postedEventTypes, [0x01, 0x02])
     }
 
-    func testPerformWindowFocusTransitionWaitsForFrontmostBeforeApplyingWindowFocus() {
+    func testApplyTargetedWindowFocusPromotesThenAppliesAccessibilityFocusAndRaise() {
         var events: [String] = []
 
-        let result = WindowQueryService.performWindowFocusTransition(
-            setFrontmost: { events.append("setFrontmost") },
-            waitForFrontmost: {
-                events.append("waitForFrontmost")
+        let result = WindowQueryService.applyTargetedWindowFocus(
+            pid: 321,
+            windowID: 0x55667788,
+            promoteWindow: { pid, windowID in
+                events.append("promote:\(pid):\(windowID)")
                 return true
             },
-            applyWindowFocus: { events.append("applyWindowFocus") },
-            waitForTargetWindow: {
-                events.append("waitForTargetWindow")
-                return true
-            },
-            sleep: { _ in events.append("sleep") }
+            applyAccessibilityFocus: { events.append("applyAccessibilityFocus") },
+            raiseWindow: { events.append("raiseWindow") }
         )
 
         XCTAssertTrue(result)
-        XCTAssertEqual(events, ["setFrontmost", "waitForFrontmost", "applyWindowFocus", "waitForTargetWindow"])
+        XCTAssertEqual(
+            events,
+            ["promote:321:1432778632", "applyAccessibilityFocus", "raiseWindow"]
+        )
     }
 
-    func testPerformWindowFocusTransitionRetriesUntilTargetWindowMatches() {
-        var applyCount = 0
-        var waitCount = 0
-        var sleepCount = 0
+    func testApplyTargetedWindowFocusStopsWhenWindowPromotionFails() {
+        var events: [String] = []
 
-        let result = WindowQueryService.performWindowFocusTransition(
-            setFrontmost: {},
-            waitForFrontmost: { true },
-            applyWindowFocus: { applyCount += 1 },
-            waitForTargetWindow: {
-                waitCount += 1
-                return waitCount == 2
+        let result = WindowQueryService.applyTargetedWindowFocus(
+            pid: 123,
+            windowID: 456,
+            promoteWindow: { _, _ in
+                events.append("promote")
+                return false
             },
-            sleep: { _ in sleepCount += 1 }
+            applyAccessibilityFocus: { events.append("applyAccessibilityFocus") },
+            raiseWindow: { events.append("raiseWindow") }
         )
 
-        XCTAssertTrue(result)
-        XCTAssertEqual(applyCount, 2)
-        XCTAssertEqual(waitCount, 2)
-        XCTAssertEqual(sleepCount, 1)
-    }
-
-    func testPerformWindowFocusTransitionUsesSettleDelayBeforeFailing() {
-        var sleepDurations: [TimeInterval] = []
-        var waitCount = 0
-
-        let result = WindowQueryService.performWindowFocusTransition(
-            setFrontmost: {},
-            waitForFrontmost: { true },
-            applyWindowFocus: {},
-            waitForTargetWindow: {
-                waitCount += 1
-                return waitCount == 4
-            },
-            sleep: { sleepDurations.append($0) },
-            maxAttempts: 3,
-            settleDelay: 0.05
-        )
-
-        XCTAssertTrue(result)
-        XCTAssertEqual(waitCount, 4)
-        XCTAssertEqual(sleepDurations, [0.01, 0.01, 0.05])
-    }
-
-    func testFocusedWindowMatchesFallsBackToMainWindowAttribute() {
-        let appElement = AXUIElementCreateApplication(1)
-        let mainWindow = AXUIElementCreateApplication(2)
-
-        let result = WindowQueryService.focusedWindowMatches(
-            appElement: appElement,
-            targetWindowID: 42,
-            attributeValueResolver: { _, attribute in
-                if attribute == kAXMainWindowAttribute as CFString {
-                    return mainWindow
-                }
-                return nil
-            },
-            windowIDResolver: { element in
-                CFEqual(element, mainWindow) ? 42 : nil
-            }
-        )
-
-        XCTAssertTrue(result)
+        XCTAssertFalse(result)
+        XCTAssertEqual(events, ["promote"])
     }
 
     func testListWindowsTransformsRawWindowInfoAndSortsByFrontAndWindowID() {
