@@ -5,9 +5,30 @@ public struct SlotEntry: Codable, Equatable {
     public let source: WindowSource
     public let bundleID: String
     public let title: String
+    public let profile: String?
     public let spaceID: Int?
     public let displayID: String?
     public let windowID: UInt32?
+
+    public init(
+        slot: Int,
+        source: WindowSource,
+        bundleID: String,
+        title: String,
+        profile: String? = nil,
+        spaceID: Int?,
+        displayID: String?,
+        windowID: UInt32?
+    ) {
+        self.slot = slot
+        self.source = source
+        self.bundleID = bundleID
+        self.title = title
+        self.profile = profile
+        self.spaceID = spaceID
+        self.displayID = displayID
+        self.windowID = windowID
+    }
 }
 
 public struct RuntimeState: Codable, Equatable {

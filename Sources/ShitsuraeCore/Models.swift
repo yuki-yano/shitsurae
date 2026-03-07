@@ -99,8 +99,27 @@ public struct WindowMatchRule: Codable, Equatable {
     public let title: TitleMatcher?
     public let role: String?
     public let subrole: String?
+    public let profile: String?
     public let excludeTitleRegex: String?
     public let index: Int?
+
+    public init(
+        bundleID: String,
+        title: TitleMatcher?,
+        role: String?,
+        subrole: String?,
+        profile: String? = nil,
+        excludeTitleRegex: String?,
+        index: Int?
+    ) {
+        self.bundleID = bundleID
+        self.title = title
+        self.role = role
+        self.subrole = subrole
+        self.profile = profile
+        self.excludeTitleRegex = excludeTitleRegex
+        self.index = index
+    }
 }
 
 public struct IgnoreDefinition: Codable, Equatable {

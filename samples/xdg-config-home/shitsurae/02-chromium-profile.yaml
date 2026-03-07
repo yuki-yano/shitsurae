@@ -1,0 +1,17 @@
+# arrange command: shitsurae arrange browser --dry-run --json
+# expected exit code: 0
+layouts:
+  browser:
+    spaces:
+      - spaceID: 1
+        windows:
+          - slot: 1
+            launch: true
+            match:
+              bundleID: com.google.Chrome
+              profile: Default
+            frame:
+              x: "0%"
+              y: "0%"
+              width: "50%"
+              height: "100%"

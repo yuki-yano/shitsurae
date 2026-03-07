@@ -124,6 +124,10 @@
         "subrole": {
           "type": "string"
         },
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
         "excludeTitleRegex": {
           "type": "string"
         },

@@ -2,6 +2,23 @@ import AppKit
 import ApplicationServices
 import Foundation
 
+private final class ProcessOutputBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+
+    func set(_ newValue: Data) {
+        lock.lock()
+        data = newValue
+        lock.unlock()
+    }
+
+    func get() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return data
+    }
+}
+
 public struct DisplayInfo: Codable, Equatable {
     public let id: String
     public let width: Int
@@ -117,13 +134,34 @@ public enum SystemProbe {
 
     @discardableResult
     public static func launchApplication(bundleID: String) -> Bool {
+        launchApplication(request: ApplicationLaunchRequest(bundleID: bundleID))
+    }
+
+    @discardableResult
+    public static func launchApplication(request: ApplicationLaunchRequest) -> Bool {
         let workspace = NSWorkspace.shared
-        if isApplicationRunning(bundleID: bundleID, workspace: workspace) {
+        if request.profileDirectory == nil,
+           isApplicationRunning(bundleID: request.bundleID, workspace: workspace)
+        {
             return true
         }
 
-        guard let appURL = workspace.urlForApplication(withBundleIdentifier: bundleID) else {
+        guard let appURL = workspace.urlForApplication(withBundleIdentifier: request.bundleID) else {
             return false
+        }
+
+        if let profileDirectory = request.profileDirectory,
+           ChromiumProfileSupport.supports(bundleID: request.bundleID),
+           let executableURL = Bundle(url: appURL)?.executableURL
+        {
+            let arguments = ChromiumProfileSupport.launchArguments(profileDirectory: profileDirectory)
+            guard launchDetachedProcess(executable: executableURL.path, arguments: arguments) else {
+                return false
+            }
+
+            return waitForRunningApplication(bundleID: request.bundleID) {
+                isApplicationRunning(bundleID: $0, workspace: workspace)
+            }
         }
 
         let configuration = NSWorkspace.OpenConfiguration()
@@ -131,9 +169,30 @@ public enum SystemProbe {
         configuration.hides = false
         workspace.openApplication(at: appURL, configuration: configuration, completionHandler: nil)
 
-        return waitForRunningApplication(bundleID: bundleID) {
+        return waitForRunningApplication(bundleID: request.bundleID) {
             isApplicationRunning(bundleID: $0, workspace: workspace)
         }
+    }
+
+    public static func browserProfileDirectory(bundleID: String, pid: Int) -> String? {
+        guard ChromiumProfileSupport.supports(bundleID: bundleID),
+              let lsofOutput = runProcess(
+                  executable: "/usr/sbin/lsof",
+                  arguments: ChromiumProfileSupport.lsofArguments(pid: pid)
+              )
+        else {
+            return nil
+        }
+
+        let localStateData = ChromiumProfileSupport
+            .localStateURL(bundleID: bundleID)
+            .flatMap { try? Data(contentsOf: $0) }
+
+        return ChromiumProfileSupport.resolveUnambiguousProfileDirectory(
+            bundleID: bundleID,
+            lsofOutput: lsofOutput,
+            localStateData: localStateData
+        )
     }
 
     static func waitForRunningApplication(
@@ -173,27 +232,68 @@ public enum SystemProbe {
         return CGDirectDisplayID(number.uint32Value)
     }
 
-    @discardableResult
-    private static func runProcess(executable: String, arguments: [String]) -> String? {
+    private static func launchDetachedProcess(executable: String, arguments: [String]) -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
-
-        let output = Pipe()
-        process.standardOutput = output
+        process.standardOutput = Pipe()
         process.standardError = Pipe()
 
         do {
             try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else {
-                return nil
-            }
+            return true
         } catch {
+            return false
+        }
+    }
+
+    @discardableResult
+    static func runProcess(executable: String, arguments: [String]) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardInput = nil
+
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        let outputReader = outputPipe.fileHandleForReading
+        let errorReader = errorPipe.fileHandleForReading
+        let outputData = ProcessOutputBox()
+        let group = DispatchGroup()
+
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            outputData.set(outputReader.readDataToEndOfFile())
+            group.leave()
+        }
+
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = errorReader.readDataToEndOfFile()
+            group.leave()
+        }
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            outputPipe.fileHandleForWriting.closeFile()
+            errorPipe.fileHandleForWriting.closeFile()
+            group.wait()
             return nil
         }
 
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)
+        outputPipe.fileHandleForWriting.closeFile()
+        errorPipe.fileHandleForWriting.closeFile()
+        group.wait()
+
+        guard process.terminationStatus == 0 else {
+            return nil
+        }
+
+        return String(data: outputData.get(), encoding: .utf8)
     }
 }

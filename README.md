@@ -117,20 +117,8 @@ Sample configs:
 You can enable YAML LSP validation and completion by pointing your config file at the schema:
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/yuki-yano/shitsurae/main/schemas/shitsurae-config.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yuki-yano/shitsurae/refs/heads/main/schemas/shitsurae-config.schema.json
 ```
-
-Schema file in this repo:
-
-- `schemas/shitsurae-config.schema.json`
-
-If you are working on local changes that are not pushed yet, use a local schema path instead:
-
-```yaml
-# yaml-language-server: $schema=./shitsurae-config.schema.json
-```
-
-The config directory can contain a symlink or copy named `shitsurae-config.schema.json` for that purpose.
 
 ## Common Commands
 
@@ -160,6 +148,33 @@ Available values:
 
 - `drag`: drag the window and send the macOS desktop shortcut
 - `displayRelay`: in multi-monitor `perDisplay` setups, temporarily move the window to another monitor, switch the target space, then move it back
+
+## Chromium Browser Profiles
+
+For `com.google.Chrome`, `com.brave.Browser`, `com.microsoft.edgemac`, and `org.chromium.Chromium`, you can pin a window to a specific browser profile with `match.profile`.
+
+```yaml
+layouts:
+  browser:
+    spaces:
+      - spaceID: 1
+        windows:
+          - slot: 1
+            launch: true
+            match:
+              bundleID: com.google.Chrome
+              profile: Default
+            frame:
+              x: "0%"
+              y: "0%"
+              width: "50%"
+              height: "100%"
+```
+
+- `profile` is the Chromium profile directory name, not the display name.
+- Typical values are `Default`, `Profile 1`, and `Profile 2`.
+- With `launch: true`, Shitsurae starts Chromium with `--profile-directory=<profile> --new-window` and prefers the newly created window for placement.
+- `shitsurae window current --json` includes a `profile` field when Shitsurae can resolve it.
 
 ## Slot Focus App Scope / Fallback
 

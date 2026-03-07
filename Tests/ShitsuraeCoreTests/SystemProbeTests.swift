@@ -2,6 +2,10 @@ import Foundation
 import XCTest
 @testable import ShitsuraeCore
 
+private final class TestStringBox: @unchecked Sendable {
+    var value: String?
+}
+
 final class SystemProbeTests: XCTestCase {
     func testWaitForRunningApplicationPollsUntilCheckerSucceeds() {
         var checks = 0
@@ -84,5 +88,23 @@ final class SystemProbeTests: XCTestCase {
         if let mode {
             XCTAssertTrue(mode == .global || mode == .perDisplay)
         }
+    }
+
+    func testRunProcessConsumesLargeStdoutWithoutBlocking() {
+        let finished = expectation(description: "runProcess finished")
+        let payloadLineCount = 20000
+        let output = TestStringBox()
+
+        DispatchQueue.global().async {
+            output.value = SystemProbe.runProcess(
+                executable: "/bin/zsh",
+                arguments: ["-lc", "yes x | head -n \(payloadLineCount)"]
+            )
+            finished.fulfill()
+        }
+
+        wait(for: [finished], timeout: 2.0)
+        XCTAssertNotNil(output.value)
+        XCTAssertEqual(output.value?.split(separator: "\n").count, payloadLineCount)
     }
 }

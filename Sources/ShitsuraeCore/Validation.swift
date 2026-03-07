@@ -130,6 +130,18 @@ public enum ConfigValidator {
                         )
                     }
 
+                    if window.match.profile != nil,
+                       !ChromiumProfileSupport.supports(bundleID: window.match.bundleID)
+                    {
+                        errors.append(
+                            ValidateErrorItem(
+                                code: .validationError,
+                                path: sourcePath,
+                                message: "match.profile is only supported for Chromium-based browsers"
+                            )
+                        )
+                    }
+
                     do {
                         _ = try LengthParser.parse(window.frame.x)
                         _ = try LengthParser.parse(window.frame.y)

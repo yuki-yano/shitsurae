@@ -25,6 +25,7 @@ final class WindowMatchEngineTests: XCTestCase {
             title: nil,
             role: nil,
             subrole: nil,
+            profile: nil,
             excludeTitleRegex: nil,
             index: 2
         )
@@ -47,6 +48,7 @@ final class WindowMatchEngineTests: XCTestCase {
             title: nil,
             role: nil,
             subrole: nil,
+            profile: nil,
             excludeTitleRegex: "Settings",
             index: nil
         )
@@ -62,12 +64,35 @@ final class WindowMatchEngineTests: XCTestCase {
         XCTAssertEqual(selected?.windowID, 2)
     }
 
+    func testSelectByProfileDirectory() {
+        let rule = WindowMatchRule(
+            bundleID: "com.example.app",
+            title: nil,
+            role: nil,
+            subrole: nil,
+            profile: "Profile 1",
+            excludeTitleRegex: nil,
+            index: nil
+        )
+
+        let selected = WindowMatchEngine.select(
+            rule: rule,
+            candidates: [
+                window(id: 1, title: "Work", frontIndex: 0, profileDirectory: "Default"),
+                window(id: 2, title: "Personal", frontIndex: 1, profileDirectory: "Profile 1"),
+            ]
+        )
+
+        XCTAssertEqual(selected?.windowID, 2)
+    }
+
     func testSelectPrefersWindowWithSpaceAndNonEmptyTitleOverAuxiliaryWindows() {
         let rule = WindowMatchRule(
             bundleID: "com.example.app",
             title: nil,
             role: nil,
             subrole: nil,
+            profile: nil,
             excludeTitleRegex: nil,
             index: nil
         )
@@ -89,7 +114,8 @@ final class WindowMatchEngineTests: XCTestCase {
         frontIndex: Int,
         width: Double = 100,
         height: Double = 100,
-        spaceID: Int? = 1
+        spaceID: Int? = 1,
+        profileDirectory: String? = nil
     ) -> WindowSnapshot {
         WindowSnapshot(
             windowID: id,
@@ -103,6 +129,7 @@ final class WindowMatchEngineTests: XCTestCase {
             frame: ResolvedFrame(x: 0, y: 0, width: width, height: height),
             spaceID: spaceID,
             displayID: "display-1",
+            profileDirectory: profileDirectory,
             isFullscreen: false,
             frontIndex: frontIndex
         )

@@ -839,6 +839,43 @@ final class CommandServiceContractTests: XCTestCase {
         XCTAssertNil(payload.slot)
     }
 
+    func testWindowCurrentReturnsProfileWhenTrackedInRuntimeState() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+        let stateStore = RuntimeStateStore(stateFileURL: workspace.stateFileURL)
+        stateStore.save(
+            slots: [
+                SlotEntry(
+                    slot: 1,
+                    source: .window,
+                    bundleID: "com.google.Chrome",
+                    title: "Editor",
+                    profile: "Default",
+                    spaceID: 1,
+                    displayID: "display-a",
+                    windowID: 700
+                ),
+            ]
+        )
+        let window = Self.window(windowID: 700, bundleID: "com.google.Chrome", title: "Editor", spaceID: 1, frontIndex: 0)
+
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: { [window] },
+            focusedWindow: { window },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { _ in true },
+            displays: { [] },
+            runProcess: { _, _ in (0, "") }
+        )
+        let service = workspace.makeService(stateStore: stateStore, runtimeHooks: runtimeHooks)
+
+        let result = service.windowCurrent(json: true)
+        XCTAssertEqual(result.exitCode, 0)
+        let payload = try decode(WindowCurrentJSON.self, from: result.stdout)
+        XCTAssertEqual(payload.profile, "Default")
+    }
+
     func testSwitcherRequiresJSONFlag() throws {
         let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
         defer { workspace.cleanup() }
@@ -1253,7 +1290,7 @@ private struct BackendUnavailableArrangeDriver: ArrangeDriver {
     func displays() -> [DisplayInfo] { [] }
     func queryWindows() -> [WindowSnapshot] { [] }
     func queryWindowsOnAllSpaces() -> [WindowSnapshot] { [] }
-    func launch(bundleID _: String) -> Bool { true }
+    func launch(request _: ApplicationLaunchRequest) -> Bool { true }
     func moveWindowToSpace(
         windowID _: UInt32,
         bundleID _: String,
@@ -1274,7 +1311,7 @@ private struct MissingPermissionArrangeDriver: ArrangeDriver {
     func displays() -> [DisplayInfo] { [] }
     func queryWindows() -> [WindowSnapshot] { [] }
     func queryWindowsOnAllSpaces() -> [WindowSnapshot] { [] }
-    func launch(bundleID _: String) -> Bool { true }
+    func launch(request _: ApplicationLaunchRequest) -> Bool { true }
     func moveWindowToSpace(
         windowID _: UInt32,
         bundleID _: String,

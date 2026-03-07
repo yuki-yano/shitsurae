@@ -118,20 +118,8 @@ Shitsurae は次の順で設定ディレクトリを解決します。
 YAML LSP の補完と validation を有効にするには、設定ファイルの先頭で schema を参照します。
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/yuki-yano/shitsurae/main/schemas/shitsurae-config.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yuki-yano/shitsurae/refs/heads/main/schemas/shitsurae-config.schema.json
 ```
-
-schema 本体:
-
-- `schemas/shitsurae-config.schema.json`
-
-まだ push していないローカル変更を使う間は、GitHub URL ではなくローカルパス参照にしてください。
-
-```yaml
-# yaml-language-server: $schema=./shitsurae-config.schema.json
-```
-
-そのために、設定ディレクトリ側に `shitsurae-config.schema.json` を symlink またはコピーで置けます。
 
 ## 主要コマンド
 
@@ -161,6 +149,33 @@ executionPolicy:
 
 - `drag`: ウィンドウをドラッグしたまま macOS の desktop shortcut を送る
 - `displayRelay`: マルチディスプレイの `perDisplay` 環境で、いったん別 display に退避して target space を切り替えてから戻す
+
+## Chromium 系ブラウザの profile 指定
+
+`com.google.Chrome` / `com.brave.Browser` / `com.microsoft.edgemac` / `org.chromium.Chromium` では、`match.profile` で profile ごとのウィンドウを指定できます。
+
+```yaml
+layouts:
+  browser:
+    spaces:
+      - spaceID: 1
+        windows:
+          - slot: 1
+            launch: true
+            match:
+              bundleID: com.google.Chrome
+              profile: Default
+            frame:
+              x: "0%"
+              y: "0%"
+              width: "50%"
+              height: "100%"
+```
+
+- `profile` は Chromium の profile directory 名です。表示名ではありません。
+- 典型的な値は `Default`, `Profile 1`, `Profile 2` です。
+- `launch: true` の場合、Shitsurae は `--profile-directory=<profile> --new-window` 付きで起動し、その直後に増えたウィンドウを優先して配置します。
+- `shitsurae window current --json` の `profile` に、判定できた profile directory 名が出ます。
 
 ## スロットフォーカスのアプリ別制御 / Fallback
 

@@ -177,6 +177,67 @@ final class ArrangeServiceTests: XCTestCase {
         XCTAssertEqual(result.softErrors.first?.code, ErrorCode.appLaunchFailed.rawValue)
     }
 
+    func testExecuteMatchesChromiumWindowByProfileDirectory() throws {
+        let driver = FakeArrangeDriver()
+        driver.allSpacesWindowsQueue = [[
+            sampleWindow(windowID: 10, bundleID: "com.google.Chrome", profileDirectory: "Default"),
+            sampleWindow(windowID: 11, bundleID: "com.google.Chrome", frontIndex: 1, profileDirectory: "Profile 1"),
+        ]]
+        let service = makeService(
+            driver: driver,
+            config: baseConfig(
+                initialFocusSlot: 1,
+                launch: false,
+                windowMatch: WindowMatchRule(
+                    bundleID: "com.google.Chrome",
+                    title: nil,
+                    role: nil,
+                    subrole: nil,
+                    profile: "Profile 1",
+                    excludeTitleRegex: nil,
+                    index: nil
+                )
+            )
+        )
+
+        let result = try service.execute(layoutName: "work")
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(driver.setFrameInvocations.map(\.windowID), [11])
+    }
+
+    func testExecuteLaunchesChromiumProfileAndUsesNewWindowWhenProfileIsAmbiguous() throws {
+        let driver = FakeArrangeDriver()
+        driver.allSpacesWindowsQueue = [
+            [sampleWindow(windowID: 10, bundleID: "com.google.Chrome")],
+            [
+                sampleWindow(windowID: 10, bundleID: "com.google.Chrome"),
+                sampleWindow(windowID: 20, bundleID: "com.google.Chrome", frontIndex: 1),
+            ],
+        ]
+        let service = makeService(
+            driver: driver,
+            config: baseConfig(
+                initialFocusSlot: 1,
+                launch: true,
+                windowMatch: WindowMatchRule(
+                    bundleID: "com.google.Chrome",
+                    title: nil,
+                    role: nil,
+                    subrole: nil,
+                    profile: "Default",
+                    excludeTitleRegex: nil,
+                    index: nil
+                )
+            )
+        )
+
+        let result = try service.execute(layoutName: "work")
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(driver.launchInvocations.map(\.bundleID), ["com.google.Chrome"])
+        XCTAssertEqual(driver.launchInvocations.first?.profileDirectory, "Default")
+        XCTAssertEqual(driver.setFrameInvocations.map(\.windowID), [20])
+    }
+
     func testArrangeFindsWindowFromAllSpacesSnapshot() throws {
         let driver = FakeArrangeDriver()
         driver.windowsQueue = [[]]
@@ -500,6 +561,7 @@ final class ArrangeServiceTests: XCTestCase {
             title: nil,
             role: nil,
             subrole: nil,
+            profile: nil,
             excludeTitleRegex: nil,
             index: nil
         ),
@@ -533,7 +595,7 @@ final class ArrangeServiceTests: XCTestCase {
     private func configForSecondaryMonitor(monitorID: String?, displayDefinition: DisplayDefinition?) -> ShitsuraeConfig {
         let window = WindowDefinition(
             source: .window,
-            match: WindowMatchRule(bundleID: "com.example.app", title: nil, role: nil, subrole: nil, excludeTitleRegex: nil, index: nil),
+            match: WindowMatchRule(bundleID: "com.example.app", title: nil, role: nil, subrole: nil, profile: nil, excludeTitleRegex: nil, index: nil),
             slot: 1,
             launch: false,
             frame: FrameDefinition(x: .expression("0%"), y: .expression("0%"), width: .expression("100%"), height: .expression("100%"))
@@ -849,7 +911,8 @@ final class ArrangeServiceTests: XCTestCase {
         bundleID: String,
         isFullscreen: Bool = false,
         frontIndex: Int = 0,
-        spaceID: Int? = 1
+        spaceID: Int? = 1,
+        profileDirectory: String? = nil
     ) -> WindowSnapshot {
         WindowSnapshot(
             windowID: windowID,
@@ -863,6 +926,7 @@ final class ArrangeServiceTests: XCTestCase {
             frame: ResolvedFrame(x: 0, y: 0, width: 100, height: 100),
             spaceID: spaceID,
             displayID: "display-1",
+            profileDirectory: profileDirectory,
             isFullscreen: isFullscreen,
             frontIndex: frontIndex
         )
@@ -890,6 +954,7 @@ private final class FakeArrangeDriver: ArrangeDriver {
     var windowsQueue: [[WindowSnapshot]] = []
     var allSpacesWindowsQueue: [[WindowSnapshot]] = []
     var launchResults: [String: Bool] = [:]
+    var launchInvocations: [ApplicationLaunchRequest] = []
     var moveWindowToSpaceResult: Bool = true
     var autoUpdateWindowSpaceOnMove: Bool = true
     var moveWindowToSpaceCalls: [(windowID: UInt32, bundleID: String, displayID: String?, spaceID: Int, spacesMode: SpacesMode, method: SpaceMoveMethod)] = []
@@ -929,8 +994,9 @@ private final class FakeArrangeDriver: ArrangeDriver {
         return allSpacesWindowsQueue[index]
     }
 
-    func launch(bundleID: String) -> Bool {
-        launchResults[bundleID] ?? true
+    func launch(request: ApplicationLaunchRequest) -> Bool {
+        launchInvocations.append(request)
+        return launchResults[request.bundleID] ?? true
     }
 
     func moveWindowToSpace(

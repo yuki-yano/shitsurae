@@ -18,8 +18,41 @@ public struct WindowSnapshot: Codable, Equatable {
     public let frame: ResolvedFrame
     public let spaceID: Int?
     public let displayID: String?
+    public let profileDirectory: String?
     public let isFullscreen: Bool
     public let frontIndex: Int
+
+    public init(
+        windowID: UInt32,
+        bundleID: String,
+        pid: Int,
+        title: String,
+        role: String,
+        subrole: String?,
+        minimized: Bool,
+        hidden: Bool,
+        frame: ResolvedFrame,
+        spaceID: Int?,
+        displayID: String?,
+        profileDirectory: String? = nil,
+        isFullscreen: Bool,
+        frontIndex: Int
+    ) {
+        self.windowID = windowID
+        self.bundleID = bundleID
+        self.pid = pid
+        self.title = title
+        self.role = role
+        self.subrole = subrole
+        self.minimized = minimized
+        self.hidden = hidden
+        self.frame = frame
+        self.spaceID = spaceID
+        self.displayID = displayID
+        self.profileDirectory = profileDirectory
+        self.isFullscreen = isFullscreen
+        self.frontIndex = frontIndex
+    }
 }
 
 public enum WindowQueryService {
@@ -50,6 +83,7 @@ public enum WindowQueryService {
                 }
                 return (bundleID: bundleID, isHidden: app.isHidden)
             },
+            profileResolver: SystemProbe.browserProfileDirectory(bundleID:pid:),
             spaceResolver: resolvedSpaceID(for:displayID:)
         )
     }
@@ -58,9 +92,12 @@ public enum WindowQueryService {
         rawWindowInfo: [[String: Any]],
         displays: [DisplayInfo],
         appResolver: (Int) -> (bundleID: String, isHidden: Bool)?,
+        profileResolver: (String, Int) -> String? = { _, _ in nil },
         spaceResolver: (UInt32, String?) -> Int? = { _, _ in nil }
     ) -> [WindowSnapshot] {
         var windows: [WindowSnapshot] = []
+        var resolvedProfiles: [Int: String] = [:]
+        var unresolvedPIDs = Set<Int>()
         for (index, info) in rawWindowInfo.enumerated() {
             let layer = info[kCGWindowLayer as String] as? Int ?? 0
             if layer != 0 {
@@ -94,6 +131,20 @@ public enum WindowQueryService {
             let title = (info[kCGWindowName as String] as? String) ?? ""
             let spaceID = (info["kCGWindowWorkspace"] as? Int) ?? spaceResolver(windowID, mappedDisplay?.id)
             let isFullscreen = mappedDisplay.map { roughlySame(rect: rect, displayFrame: $0.frame) } ?? false
+            let profileDirectory: String?
+            if let cached = resolvedProfiles[pid] {
+                profileDirectory = cached
+            } else if unresolvedPIDs.contains(pid) {
+                profileDirectory = nil
+            } else {
+                let resolved = profileResolver(app.bundleID, pid)
+                if let resolved {
+                    resolvedProfiles[pid] = resolved
+                } else {
+                    unresolvedPIDs.insert(pid)
+                }
+                profileDirectory = resolved
+            }
 
             windows.append(
                 WindowSnapshot(
@@ -108,6 +159,7 @@ public enum WindowQueryService {
                     frame: ResolvedFrame(x: rect.origin.x, y: rect.origin.y, width: rect.width, height: rect.height),
                     spaceID: spaceID,
                     displayID: mappedDisplay?.id,
+                    profileDirectory: profileDirectory,
                     isFullscreen: isFullscreen,
                     frontIndex: index
                 )
@@ -505,6 +557,10 @@ public enum WindowMatchEngine {
 
         if let subrole = rule.subrole {
             filtered = filtered.filter { $0.subrole == subrole }
+        }
+
+        if let profile = rule.profile {
+            filtered = filtered.filter { $0.profileDirectory == profile }
         }
 
         if let excludeRegex = rule.excludeTitleRegex {

@@ -33,6 +33,25 @@ final class ConfigLoaderTests: XCTestCase {
         XCTAssertEqual(loaded.config.layouts.keys.sorted(), ["work"])
     }
 
+    func testLoadWindowMatchProfile() throws {
+        let yaml = """
+        layouts:
+          work:
+            spaces:
+              - spaceID: 1
+                windows:
+                  - match:
+                      bundleID: "com.google.Chrome"
+                      profile: "Default"
+                    slot: 1
+                    frame: { x: "0%", y: "0%", width: "100%", height: "100%" }
+        """
+        try write(yaml: yaml, named: "01-base.yaml")
+
+        let loaded = try ConfigLoader().load(from: tempDirectory)
+        XCTAssertEqual(loaded.config.layouts["work"]?.spaces.first?.windows.first?.match.profile, "Default")
+    }
+
     func testMergeIgnoreAppsUnion() throws {
         let base = """
         ignore:

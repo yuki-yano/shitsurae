@@ -1,10 +1,20 @@
 import Foundation
 
+public struct ApplicationLaunchRequest: Equatable {
+    public let bundleID: String
+    public let profileDirectory: String?
+
+    public init(bundleID: String, profileDirectory: String? = nil) {
+        self.bundleID = bundleID
+        self.profileDirectory = profileDirectory
+    }
+}
+
 public protocol ArrangeDriver {
     func displays() -> [DisplayInfo]
     func queryWindows() -> [WindowSnapshot]
     func queryWindowsOnAllSpaces() -> [WindowSnapshot]
-    func launch(bundleID: String) -> Bool
+    func launch(request: ApplicationLaunchRequest) -> Bool
     func moveWindowToSpace(
         windowID: UInt32,
         bundleID: String,
@@ -45,8 +55,8 @@ public struct LiveArrangeDriver: ArrangeDriver {
         WindowQueryService.listWindowsOnAllSpaces(displays: displays())
     }
 
-    public func launch(bundleID: String) -> Bool {
-        SystemProbe.launchApplication(bundleID: bundleID)
+    public func launch(request: ApplicationLaunchRequest) -> Bool {
+        SystemProbe.launchApplication(request: request)
     }
 
     public func moveWindowToSpace(

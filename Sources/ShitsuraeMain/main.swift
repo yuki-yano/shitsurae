@@ -84,6 +84,8 @@ struct ShitsuraeMenuBarApp: App {
 private enum SidebarItem: Hashable {
     case arrange
     case layout(String)
+    case general
+    case shortcuts
     case permissions
     case diagnostics
 }
@@ -254,6 +256,13 @@ private struct AppContentView: View {
                     }
                 }
 
+                Section("Settings") {
+                    Label("General", systemImage: "gearshape")
+                        .tag(SidebarItem.general)
+                    Label("Shortcuts", systemImage: "keyboard")
+                        .tag(SidebarItem.shortcuts)
+                }
+
                 Section("System") {
                     Label("Permissions", systemImage: "checkmark.shield")
                         .tag(SidebarItem.permissions)
@@ -276,6 +285,10 @@ private struct AppContentView: View {
                     } else {
                         ContentUnavailableView("Layout not found", systemImage: "exclamationmark.triangle")
                     }
+                case .general:
+                    GeneralSettingsView(config: model.config)
+                case .shortcuts:
+                    ShortcutsView(config: model.config)
                 case .permissions:
                     PermissionsView()
                 case .diagnostics:
@@ -583,6 +596,579 @@ private struct LayoutDetailView: View {
     }
 }
 
+// MARK: - General Settings View
+
+private struct GeneralSettingsView: View {
+    let config: ShitsuraeConfig?
+
+    private var hasIgnore: Bool {
+        guard let ignore = config?.ignore else { return false }
+        let applyApps = ignore.apply?.apps ?? []
+        let applyWindows = ignore.apply?.windows ?? []
+        let focusApps = ignore.focus?.apps ?? []
+        let focusWindows = ignore.focus?.windows ?? []
+        return !applyApps.isEmpty || !applyWindows.isEmpty || !focusApps.isEmpty || !focusWindows.isEmpty
+    }
+
+    private var hasExecutionPolicy: Bool {
+        config?.executionPolicy != nil
+    }
+
+    private var hasOverlay: Bool {
+        config?.overlay != nil
+    }
+
+    private var hasMonitors: Bool {
+        config?.monitors != nil
+    }
+
+    private var hasAnySettings: Bool {
+        hasIgnore || hasExecutionPolicy || hasOverlay || hasMonitors
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("General")
+                    .font(.title2).bold()
+
+                if !hasAnySettings {
+                    ContentUnavailableView(
+                        "No settings configured",
+                        systemImage: "gearshape",
+                        description: Text("Add ignore, executionPolicy, overlay, or monitors to your YAML config.")
+                    )
+                } else {
+                    if hasIgnore {
+                        ignoreSection
+                    }
+                    if hasExecutionPolicy {
+                        executionPolicySection
+                    }
+                    if hasOverlay {
+                        overlaySection
+                    }
+                    if hasMonitors {
+                        monitorsSection
+                    }
+                }
+            }
+            .padding(20)
+        }
+    }
+
+    // MARK: Ignore
+
+    @ViewBuilder
+    private var ignoreSection: some View {
+        if let ignore = config?.ignore {
+            if let apply = ignore.apply, !(apply.apps ?? []).isEmpty || !(apply.windows ?? []).isEmpty {
+                ignoreRuleSetBox(context: "Apply", icon: "play.rectangle", ruleSet: apply)
+            }
+            if let focus = ignore.focus, !(focus.apps ?? []).isEmpty || !(focus.windows ?? []).isEmpty {
+                ignoreRuleSetBox(context: "Focus", icon: "target", ruleSet: focus)
+            }
+        }
+    }
+
+    private func ignoreRuleSetBox(context: String, icon: String, ruleSet: IgnoreRuleSet) -> some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                SectionHeader(icon: "eye.slash", title: "Ignore — \(context)")
+
+                if let apps = ruleSet.apps, !apps.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Apps").font(.caption.bold()).foregroundStyle(.secondary)
+                        ForEach(apps, id: \.self) { bundleID in
+                            HStack(spacing: 6) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.red.opacity(0.7))
+                                Text(bundleID)
+                                    .font(.system(.body, design: .monospaced))
+                            }
+                        }
+                    }
+                }
+
+                if let windows = ruleSet.windows, !windows.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Window Rules").font(.caption.bold()).foregroundStyle(.secondary)
+                        ForEach(Array(windows.enumerated()), id: \.offset) { _, rule in
+                            ignoreWindowRuleRow(rule)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func ignoreWindowRuleRow(_ rule: IgnoreWindowRule) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "xmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.red.opacity(0.7))
+
+            HStack(spacing: 6) {
+                if let bundleID = rule.bundleID {
+                    conditionPill("app", bundleID)
+                }
+                if let titleRegex = rule.titleRegex {
+                    conditionPill("title", "/\(titleRegex)/")
+                }
+                if let role = rule.role {
+                    conditionPill("role", role)
+                }
+                if let subrole = rule.subrole {
+                    conditionPill("subrole", subrole)
+                }
+                if let minimized = rule.minimized {
+                    conditionPill("minimized", minimized ? "true" : "false")
+                }
+                if let hidden = rule.hidden {
+                    conditionPill("hidden", hidden ? "true" : "false")
+                }
+            }
+        }
+    }
+
+    private func conditionPill(_ label: String, _ value: String) -> some View {
+        HStack(spacing: 2) {
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(.caption, design: .monospaced))
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
+    }
+
+    // MARK: Execution Policy
+
+    private var executionPolicySection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                SectionHeader(icon: "arrow.triangle.swap", title: "Execution Policy")
+
+                let policy = config?.resolvedExecutionPolicy ?? ExecutionPolicy()
+
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                    GridRow {
+                        Text("Setting")
+                        Text("Value")
+                    }
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+
+                    Divider().gridCellUnsizedAxes(.horizontal)
+
+                    GridRow {
+                        Text("Default Space Move")
+                        methodBadge(policy.spaceMoveMethod ?? .drag)
+                    }
+                }
+
+                if let overrides = policy.spaceMoveMethodInApps, !overrides.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Per-App Overrides").font(.caption.bold()).foregroundStyle(.secondary)
+
+                        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                            GridRow {
+                                Text("App")
+                                Text("Method")
+                            }
+                            .font(.caption2.bold())
+                            .foregroundStyle(.tertiary)
+
+                            ForEach(overrides.keys.sorted(), id: \.self) { bundleID in
+                                if let method = overrides[bundleID] {
+                                    GridRow {
+                                        Text(bundleID)
+                                            .font(.system(.body, design: .monospaced))
+                                        methodBadge(method)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func methodBadge(_ method: SpaceMoveMethod) -> some View {
+        Text(method.rawValue)
+            .font(.system(.caption, design: .monospaced).bold())
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(
+                method == .drag ? Color.blue.opacity(0.15) : Color.orange.opacity(0.15),
+                in: Capsule()
+            )
+            .foregroundStyle(method == .drag ? .blue : .orange)
+    }
+
+    // MARK: Overlay
+
+    private var overlaySection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                SectionHeader(icon: "rectangle.on.rectangle.angled", title: "Overlay")
+
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                    GridRow {
+                        Text("Setting")
+                        Text("Value")
+                    }
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+
+                    Divider().gridCellUnsizedAxes(.horizontal)
+
+                    GridRow {
+                        Text("Show Thumbnails")
+                        generalBoolBadge(config?.overlay?.showThumbnails ?? false)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    // MARK: Monitors
+
+    private var monitorsSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                SectionHeader(icon: "display.2", title: "Monitors")
+
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                    GridRow {
+                        Text("Role")
+                        Text("ID")
+                    }
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+
+                    Divider().gridCellUnsizedAxes(.horizontal)
+
+                    if let primary = config?.monitors?.primary {
+                        GridRow {
+                            Text("Primary")
+                                .bold()
+                            Text(primary.id ?? "—")
+                                .font(.system(.body, design: .monospaced))
+                                .foregroundStyle(primary.id != nil ? .primary : .quaternary)
+                        }
+                    }
+
+                    if let secondary = config?.monitors?.secondary {
+                        GridRow {
+                            Text("Secondary")
+                                .bold()
+                            Text(secondary.id ?? "—")
+                                .font(.system(.body, design: .monospaced))
+                                .foregroundStyle(secondary.id != nil ? .primary : .quaternary)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    // MARK: Helpers
+
+    private func generalBoolBadge(_ value: Bool) -> some View {
+        Text(value ? "ON" : "OFF")
+            .font(.caption.bold())
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(
+                value ? Color.green.opacity(0.15) : Color.gray.opacity(0.15),
+                in: Capsule()
+            )
+            .foregroundStyle(value ? .green : .secondary)
+    }
+}
+
+// MARK: - Shortcuts View
+
+private struct ShortcutsView: View {
+    let config: ShitsuraeConfig?
+
+    private var resolved: ResolvedShortcuts {
+        ResolvedShortcuts(from: config?.shortcuts)
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Shortcuts")
+                    .font(.title2).bold()
+
+                focusBySlotSection
+                navigationSection
+                switcherSection
+                globalActionsSection
+                disabledInAppsSection
+            }
+            .padding(20)
+        }
+    }
+
+    private var focusBySlotSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                SectionHeader(icon: "number", title: "Focus by Slot")
+
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                    GridRow {
+                        Text("Slot")
+                        Text("Shortcut")
+                    }
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+
+                    Divider().gridCellUnsizedAxes(.horizontal)
+
+                    ForEach(1 ... 9, id: \.self) { slot in
+                        if let hotkey = resolved.focusBySlot[slot] {
+                            GridRow {
+                                HStack(spacing: 6) {
+                                    Circle()
+                                        .fill(colorForSlot(slot))
+                                        .frame(width: 8, height: 8)
+                                    Text("\(slot)")
+                                        .foregroundStyle(colorForSlot(slot))
+                                }
+                                .font(.system(.body, design: .monospaced))
+
+                                hotkeyLabel(hotkey)
+                            }
+                        }
+                    }
+                }
+
+                if resolved.focusBySlotFallbackEnabled {
+                    Label("Fallback enabled", systemImage: "arrow.uturn.backward")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var navigationSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                SectionHeader(icon: "arrow.up.arrow.down", title: "Window Navigation")
+
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                    GridRow {
+                        Text("Action")
+                        Text("Shortcut")
+                    }
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+
+                    Divider().gridCellUnsizedAxes(.horizontal)
+
+                    GridRow {
+                        Text("Next Window")
+                        hotkeyLabel(resolved.nextWindow)
+                    }
+                    GridRow {
+                        Text("Prev Window")
+                        hotkeyLabel(resolved.prevWindow)
+                    }
+                }
+
+                if !resolved.cycleExcludedApps.isEmpty {
+                    excludedAppsRow("Cycle excluded", apps: resolved.cycleExcludedApps.sorted())
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var switcherSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                SectionHeader(icon: "rectangle.stack", title: "Switcher")
+
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                    GridRow {
+                        Text("Setting")
+                        Text("Value")
+                    }
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+
+                    Divider().gridCellUnsizedAxes(.horizontal)
+
+                    GridRow {
+                        Text("Trigger")
+                        hotkeyLabel(resolved.switcherTrigger)
+                    }
+                    GridRow {
+                        Text("Include All Spaces")
+                        boolBadge(resolved.includeAllSpaces)
+                    }
+                    GridRow {
+                        Text("Prioritize Current Space")
+                        boolBadge(resolved.prioritizeCurrentSpace)
+                    }
+                    GridRow {
+                        Text("Accept on Modifier Release")
+                        boolBadge(resolved.acceptOnModifierRelease)
+                    }
+                    GridRow {
+                        Text("Accept Keys")
+                        Text(resolved.acceptKeys.joined(separator: ", "))
+                            .font(.system(.body, design: .monospaced))
+                    }
+                    GridRow {
+                        Text("Cancel Keys")
+                        Text(resolved.cancelKeys.joined(separator: ", "))
+                            .font(.system(.body, design: .monospaced))
+                    }
+                }
+
+                if !resolved.switcherExcludedApps.isEmpty {
+                    excludedAppsRow("Excluded apps", apps: resolved.switcherExcludedApps.sorted())
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private var globalActionsSection: some View {
+        if !resolved.globalActions.isEmpty {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    SectionHeader(icon: "bolt.fill", title: "Global Actions")
+
+                    Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                        GridRow {
+                            Text("Shortcut")
+                            Text("Action")
+                            Text("Detail")
+                        }
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+
+                        Divider().gridCellUnsizedAxes(.horizontal)
+
+                        ForEach(Array(resolved.globalActions.enumerated()), id: \.offset) { _, action in
+                            GridRow {
+                                hotkeyLabel(HotkeyDefinition(key: action.key, modifiers: action.modifiers))
+
+                                Text(action.action.type.rawValue)
+                                    .font(.system(.body, design: .monospaced))
+
+                                Text(globalActionDetail(action.action))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var disabledInAppsSection: some View {
+        if !resolved.disabledInApps.isEmpty {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    SectionHeader(icon: "xmark.app", title: "Disabled in Apps")
+
+                    ForEach(resolved.disabledInApps.keys.sorted(), id: \.self) { bundleID in
+                        if let shortcuts = resolved.disabledInApps[bundleID] {
+                            HStack(alignment: .top, spacing: 8) {
+                                Text(shortBundleID(bundleID))
+                                    .font(.system(.body, design: .monospaced))
+                                    .bold()
+                                Text(shortcuts.joined(separator: ", "))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private func hotkeyLabel(_ hotkey: HotkeyDefinition) -> some View {
+        HStack(spacing: 4) {
+            ForEach(hotkey.modifiers, id: \.self) { mod in
+                Text(modifierSymbol(mod))
+                    .font(.system(.body))
+            }
+            Text(hotkey.key.uppercased())
+                .font(.system(.body, design: .monospaced))
+                .bold()
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
+    }
+
+    private func boolBadge(_ value: Bool) -> some View {
+        Text(value ? "ON" : "OFF")
+            .font(.caption.bold())
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(
+                value ? Color.green.opacity(0.15) : Color.gray.opacity(0.15),
+                in: Capsule()
+            )
+            .foregroundStyle(value ? .green : .secondary)
+    }
+
+    private func excludedAppsRow(_ label: String, apps: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(apps.map { shortBundleID($0) }.joined(separator: ", "))
+                .font(.system(.caption, design: .monospaced))
+        }
+    }
+
+    private func modifierSymbol(_ mod: String) -> String {
+        switch mod {
+        case "cmd": return "\u{2318}"
+        case "shift": return "\u{21E7}"
+        case "ctrl": return "\u{2303}"
+        case "alt": return "\u{2325}"
+        case "fn": return "fn"
+        default: return mod
+        }
+    }
+
+    private func globalActionDetail(_ action: GlobalActionDefinition) -> String {
+        if let preset = action.preset {
+            return preset.rawValue
+        }
+        var parts: [String] = []
+        if let x = action.x { parts.append("x: \(formatLength(x))") }
+        if let y = action.y { parts.append("y: \(formatLength(y))") }
+        if let w = action.width { parts.append("w: \(formatLength(w))") }
+        if let h = action.height { parts.append("h: \(formatLength(h))") }
+        return parts.joined(separator: ", ")
+    }
+}
+
 // MARK: - Permissions View
 
 private struct PermissionsView: View {
@@ -757,6 +1343,7 @@ private struct VisualLayoutPreview: View {
             .frame(height: previewHeight)
         }
         .aspectRatio(1 / displayAspectRatio, contentMode: .fit)
+        .frame(maxWidth: compact ? 280 : 400)
     }
 }
 

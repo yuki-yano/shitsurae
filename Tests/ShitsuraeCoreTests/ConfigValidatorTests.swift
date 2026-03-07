@@ -137,6 +137,7 @@ final class ConfigValidatorTests: XCTestCase {
                 title: nil,
                 role: nil,
                 subrole: nil,
+                profile: nil,
                 excludeTitleRegex: "[",
                 index: nil
             )
@@ -144,6 +145,40 @@ final class ConfigValidatorTests: XCTestCase {
         let config = baseConfig(spaces: [SpaceDefinition(spaceID: 1, display: nil, windows: [window])])
         let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
         assertHasError(errors, contains: "match.excludeTitleRegex is invalid")
+    }
+
+    func testMatchProfileRequiresChromiumBrowser() {
+        let window = defaultWindowDefinition(
+            windowMatch: WindowMatchRule(
+                bundleID: "com.example.app",
+                title: nil,
+                role: nil,
+                subrole: nil,
+                profile: "Default",
+                excludeTitleRegex: nil,
+                index: nil
+            )
+        )
+        let config = baseConfig(spaces: [SpaceDefinition(spaceID: 1, display: nil, windows: [window])])
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
+        assertHasError(errors, contains: "match.profile is only supported for Chromium-based browsers")
+    }
+
+    func testMatchProfileAllowedForChromiumBrowser() {
+        let window = defaultWindowDefinition(
+            windowMatch: WindowMatchRule(
+                bundleID: "com.google.Chrome",
+                title: nil,
+                role: nil,
+                subrole: nil,
+                profile: "Default",
+                excludeTitleRegex: nil,
+                index: nil
+            )
+        )
+        let config = baseConfig(spaces: [SpaceDefinition(spaceID: 1, display: nil, windows: [window])])
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
+        XCTAssertFalse(errors.contains(where: { $0.message.contains("match.profile") }))
     }
 
     func testFrameLengthParseError() {
@@ -154,6 +189,7 @@ final class ConfigValidatorTests: XCTestCase {
                 title: nil,
                 role: nil,
                 subrole: nil,
+                profile: nil,
                 excludeTitleRegex: nil,
                 index: nil
             ),
@@ -490,6 +526,7 @@ final class ConfigValidatorTests: XCTestCase {
             title: nil,
             role: nil,
             subrole: nil,
+            profile: nil,
             excludeTitleRegex: nil,
             index: nil
         ),
@@ -520,6 +557,7 @@ final class ConfigValidatorTests: XCTestCase {
             title: nil,
             role: nil,
             subrole: nil,
+            profile: nil,
             excludeTitleRegex: nil,
             index: nil
         )

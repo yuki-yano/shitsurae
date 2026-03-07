@@ -149,7 +149,14 @@ public final class ArrangeService {
             }
 
             let launch = windowDef.launch ?? true
-            if launch, !driver.launch(bundleID: windowDef.match.bundleID) {
+            let launchRequest = ApplicationLaunchRequest(
+                bundleID: windowDef.match.bundleID,
+                profileDirectory: windowDef.match.profile
+            )
+            let preLaunchWindowIDs = launch && windowDef.match.profile != nil
+                ? Set(driver.queryWindowsOnAllSpaces().filter { $0.bundleID == windowDef.match.bundleID }.map(\.windowID))
+                : nil
+            if launch, !driver.launch(request: launchRequest) {
                 softErrors.append(
                     ErrorItem(
                         code: ErrorCode.appLaunchFailed.rawValue,
@@ -165,7 +172,8 @@ public final class ArrangeService {
                 rule: windowDef.match,
                 policy: policy,
                 slot: windowDef.slot,
-                spaceID: step.space.spaceID
+                spaceID: step.space.spaceID,
+                preLaunchWindowIDs: preLaunchWindowIDs
             )
 
             switch waitOutcome {
@@ -213,6 +221,7 @@ public final class ArrangeService {
                         source: source,
                         bundleID: windowDef.match.bundleID,
                         title: window.title,
+                        profile: windowDef.match.profile ?? window.profileDirectory,
                         spaceID: step.space.spaceID,
                         displayID: step.display?.id ?? window.displayID,
                         windowID: window.windowID
@@ -303,20 +312,28 @@ public final class ArrangeService {
         rule: WindowMatchRule,
         policy _: ExecutionPolicy,
         slot: Int,
-        spaceID: Int
+        spaceID: Int,
+        preLaunchWindowIDs: Set<UInt32>?
     ) -> WaitOutcome {
         let totalTimeoutMs = 5000
         let deadline = Date().addingTimeInterval(TimeInterval(totalTimeoutMs) / 1000)
+        let preferredWindowID = preferredWindowID(for: rule, slot: slot)
 
         while Date() <= deadline {
             let candidates = driver.queryWindowsOnAllSpaces().filter { $0.bundleID == rule.bundleID }
             let nonFullscreen = candidates.filter { !$0.isFullscreen }
 
-            if let found = WindowMatchEngine.select(rule: rule, candidates: nonFullscreen) {
+            if let preferredWindowID,
+               let preferred = nonFullscreen.first(where: { $0.windowID == preferredWindowID })
+            {
+                return .found(preferred)
+            }
+
+            if let found = selectWindow(rule: rule, candidates: nonFullscreen, preLaunchWindowIDs: preLaunchWindowIDs) {
                 return .found(found)
             }
 
-            if WindowMatchEngine.select(rule: rule, candidates: candidates) != nil {
+            if selectWindow(rule: rule, candidates: candidates, preLaunchWindowIDs: preLaunchWindowIDs) != nil {
                 return .fullscreenExcluded
             }
 
@@ -336,6 +353,44 @@ public final class ArrangeService {
         )
 
         return .notFound
+    }
+
+    private func preferredWindowID(for rule: WindowMatchRule, slot: Int) -> UInt32? {
+        stateStore.load().slots.first {
+            $0.slot == slot && $0.bundleID == rule.bundleID && $0.profile == rule.profile
+        }?.windowID
+    }
+
+    private func selectWindow(
+        rule: WindowMatchRule,
+        candidates: [WindowSnapshot],
+        preLaunchWindowIDs: Set<UInt32>?
+    ) -> WindowSnapshot? {
+        if let found = WindowMatchEngine.select(rule: rule, candidates: candidates) {
+            return found
+        }
+
+        guard rule.profile != nil,
+              let preLaunchWindowIDs
+        else {
+            return nil
+        }
+
+        let newCandidates = candidates.filter { !preLaunchWindowIDs.contains($0.windowID) }
+        guard !newCandidates.isEmpty else {
+            return nil
+        }
+
+        let fallbackRule = WindowMatchRule(
+            bundleID: rule.bundleID,
+            title: rule.title,
+            role: rule.role,
+            subrole: rule.subrole,
+            profile: nil,
+            excludeTitleRegex: rule.excludeTitleRegex,
+            index: rule.index
+        )
+        return WindowMatchEngine.select(rule: fallbackRule, candidates: newCandidates)
     }
 
     private func setFrameWithRetry(

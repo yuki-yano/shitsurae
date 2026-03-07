@@ -24,6 +24,10 @@ final class ConfigSchemaTests: XCTestCase {
         let executionPolicyProperties = try XCTUnwrap(executionPolicy["properties"] as? [String: Any])
         XCTAssertNotNil(executionPolicyProperties["spaceMoveMethod"])
 
+        let windowMatchRule = try XCTUnwrap(defs["windowMatchRule"] as? [String: Any])
+        let windowMatchRuleProperties = try XCTUnwrap(windowMatchRule["properties"] as? [String: Any])
+        XCTAssertNotNil(windowMatchRuleProperties["profile"])
+
         let spaceMoveMethodInApps = try XCTUnwrap(executionPolicyProperties["spaceMoveMethodInApps"] as? [String: Any])
         let additionalProperties = try XCTUnwrap(spaceMoveMethodInApps["additionalProperties"] as? [String: Any])
         XCTAssertEqual(additionalProperties["$ref"] as? String, "#/$defs/spaceMoveMethod")

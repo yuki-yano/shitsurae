@@ -20,6 +20,7 @@ public enum ShortcutCandidateFilter {
                 source: candidate.source,
                 title: candidate.title,
                 bundleID: candidate.bundleID,
+                profile: candidate.profile,
                 spaceID: candidate.spaceID,
                 displayID: candidate.displayID,
                 slot: candidate.slot,
