@@ -62,6 +62,11 @@ public final class ArrangeService {
     private let stateStore: RuntimeStateStore
     private let driver: ArrangeDriver
 
+    private struct SlotStateKey: Hashable {
+        let slot: Int
+        let spaceID: Int?
+    }
+
     public init(
         context: ArrangeContext,
         logger: ShitsuraeLogger,
@@ -255,8 +260,6 @@ public final class ArrangeService {
             }
         }
 
-        stateStore.save(slots: slotEntries)
-
         if let initialFocusSlot = layout.initialFocus?.slot {
             if let entry = slotEntries.first(where: { $0.slot == initialFocusSlot }) {
                 _ = driver.activate(bundleID: entry.bundleID)
@@ -284,6 +287,13 @@ public final class ArrangeService {
             exitCode = ErrorCode.success.rawValue
         }
 
+        persistRuntimeState(
+            layout: layout,
+            arrangedSpaceID: spaceID,
+            slotEntries: slotEntries,
+            preserveUnresolvedSelectedSlots: result != "success"
+        )
+
         let output = ArrangeExecutionJSON(
             schemaVersion: 1,
             layout: layoutName,
@@ -306,6 +316,51 @@ public final class ArrangeService {
         )
 
         return output
+    }
+
+    private func persistRuntimeState(
+        layout: LayoutDefinition,
+        arrangedSpaceID: Int?,
+        slotEntries: [SlotEntry],
+        preserveUnresolvedSelectedSlots: Bool
+    ) {
+        let selectedSpaces = Set(
+            layout.spaces.compactMap { space -> Int? in
+                guard arrangedSpaceID == nil || space.spaceID == arrangedSpaceID else {
+                    return nil
+                }
+                return space.spaceID
+            }
+        )
+        let selectedSlotKeys = Set(
+            layout.spaces.flatMap { space -> [SlotStateKey] in
+                guard arrangedSpaceID == nil || space.spaceID == arrangedSpaceID else {
+                    return []
+                }
+                return space.windows.map { window in
+                    SlotStateKey(slot: window.slot, spaceID: space.spaceID)
+                }
+            }
+        )
+        let registeredKeys = Set(
+            slotEntries.map { entry in
+                SlotStateKey(slot: entry.slot, spaceID: entry.spaceID)
+            }
+        )
+
+        let preservedEntries = stateStore.load().slots.filter { entry in
+            let key = SlotStateKey(slot: entry.slot, spaceID: entry.spaceID)
+
+            if let entrySpaceID = entry.spaceID, selectedSpaces.contains(entrySpaceID) {
+                return preserveUnresolvedSelectedSlots &&
+                    selectedSlotKeys.contains(key) &&
+                    !registeredKeys.contains(key)
+            }
+
+            return arrangedSpaceID != nil
+        }
+
+        stateStore.save(slots: preservedEntries + slotEntries)
     }
 
     private func waitForWindow(

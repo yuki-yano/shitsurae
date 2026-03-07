@@ -540,6 +540,100 @@ final class ArrangeServiceTests: XCTestCase {
         XCTAssertEqual(persisted, report)
     }
 
+    func testPartialArrangePreservesExistingSlotStateForUnresolvedSlots() throws {
+        let driver = FakeArrangeDriver()
+        let secondWindow = sampleWindow(windowID: 20, bundleID: "com.example.second", frontIndex: 1)
+        driver.windowsQueue = [
+            [],
+            [secondWindow],
+            [secondWindow],
+        ]
+
+        let logger = ShitsuraeLogger(logFileURL: tempFile("arrange-log.jsonl"))
+        let store = RuntimeStateStore(stateFileURL: tempFile("state.json"))
+        let initialSlots = [
+            SlotEntry(
+                slot: 1,
+                source: .window,
+                bundleID: "com.example.first",
+                title: "First Persisted",
+                spaceID: 1,
+                displayID: "display-1",
+                windowID: 101
+            ),
+            SlotEntry(
+                slot: 2,
+                source: .window,
+                bundleID: "com.example.second",
+                title: "Second Persisted",
+                spaceID: 1,
+                displayID: "display-1",
+                windowID: 202
+            ),
+        ]
+        store.save(slots: initialSlots)
+
+        let context = ArrangeContext(config: twoWindowPriorityConfig(), supportedBuildCatalogURL: URL(fileURLWithPath: "/tmp/missing.json"))
+        let service = ArrangeService(context: context, logger: logger, stateStore: store, driver: driver)
+
+        let result = try service.execute(layoutName: "priorityWork")
+
+        XCTAssertEqual(result.result, "partial")
+        XCTAssertEqual(result.exitCode, ErrorCode.partialSuccess.rawValue)
+
+        let persisted = store.load().slots
+        XCTAssertEqual(persisted.count, 2)
+        XCTAssertEqual(persisted.first(where: { $0.slot == 1 })?.windowID, 101)
+        XCTAssertEqual(persisted.first(where: { $0.slot == 1 })?.title, "First Persisted")
+        XCTAssertEqual(persisted.first(where: { $0.slot == 2 })?.windowID, 20)
+        XCTAssertEqual(persisted.first(where: { $0.slot == 2 })?.bundleID, "com.example.second")
+    }
+
+    func testScopedArrangePreservesRuntimeStateOutsideRequestedSpace() throws {
+        let driver = FakeArrangeDriver()
+        driver.windowsQueue = Array(repeating: [
+            sampleWindow(windowID: 20, bundleID: "com.example.second", frontIndex: 1, spaceID: 2),
+        ], count: 4)
+        driver.allSpacesWindowsQueue = driver.windowsQueue
+
+        let logger = ShitsuraeLogger(logFileURL: tempFile("arrange-log.jsonl"))
+        let store = RuntimeStateStore(stateFileURL: tempFile("state.json"))
+        let initialSlots = [
+            SlotEntry(
+                slot: 1,
+                source: .window,
+                bundleID: "com.example.first",
+                title: "First Persisted",
+                spaceID: 1,
+                displayID: "display-1",
+                windowID: 101
+            ),
+            SlotEntry(
+                slot: 2,
+                source: .window,
+                bundleID: "com.example.second",
+                title: "Second Persisted",
+                spaceID: 2,
+                displayID: "display-1",
+                windowID: 202
+            ),
+        ]
+        store.save(slots: initialSlots)
+
+        let context = ArrangeContext(config: twoSpaceScopedConfig(), supportedBuildCatalogURL: URL(fileURLWithPath: "/tmp/missing.json"))
+        let service = ArrangeService(context: context, logger: logger, stateStore: store, driver: driver)
+
+        let result = try service.execute(layoutName: "scopedWork", spaceID: 2)
+
+        XCTAssertEqual(result.exitCode, 0)
+
+        let persisted = store.load().slots
+        XCTAssertEqual(persisted.count, 2)
+        XCTAssertEqual(persisted.first(where: { $0.slot == 1 })?.windowID, 101)
+        XCTAssertEqual(persisted.first(where: { $0.slot == 2 })?.windowID, 20)
+        XCTAssertEqual(persisted.first(where: { $0.slot == 2 })?.spaceID, 2)
+    }
+
 
 
     private func makeService(driver: FakeArrangeDriver) -> ArrangeService {
