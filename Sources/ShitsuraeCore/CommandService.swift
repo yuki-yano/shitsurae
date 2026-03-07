@@ -19,7 +19,10 @@ public struct CommandServiceRuntimeHooks: @unchecked Sendable {
     public let listWindows: () -> [WindowSnapshot]
     public let focusedWindow: () -> WindowSnapshot?
     public let activateBundle: (String) -> Bool
+    public let activateWindowWithTitle: (String, String) -> Bool
+    public let focusWindow: (UInt32, String) -> Bool
     public let setFocusedWindowFrame: (ResolvedFrame) -> Bool
+    public let setWindowFrame: (UInt32, String, ResolvedFrame) -> Bool
     public let displays: () -> [DisplayInfo]
     public let runProcess: (String, [String]) -> (exitCode: Int32, output: String)
 
@@ -30,13 +33,21 @@ public struct CommandServiceRuntimeHooks: @unchecked Sendable {
         activateBundle: @escaping (String) -> Bool,
         setFocusedWindowFrame: @escaping (ResolvedFrame) -> Bool,
         displays: @escaping () -> [DisplayInfo],
-        runProcess: @escaping (String, [String]) -> (exitCode: Int32, output: String)
+        runProcess: @escaping (String, [String]) -> (exitCode: Int32, output: String),
+        activateWindowWithTitle: @escaping (String, String) -> Bool = { bundleID, title in
+            WindowQueryService.activate(bundleID: bundleID, preferredWindowTitle: title)
+        },
+        focusWindow: @escaping (UInt32, String) -> Bool = WindowQueryService.focusWindow,
+        setWindowFrame: @escaping (UInt32, String, ResolvedFrame) -> Bool = WindowQueryService.setWindowFrame
     ) {
         self.accessibilityGranted = accessibilityGranted
         self.listWindows = listWindows
         self.focusedWindow = focusedWindow
         self.activateBundle = activateBundle
+        self.activateWindowWithTitle = activateWindowWithTitle
+        self.focusWindow = focusWindow
         self.setFocusedWindowFrame = setFocusedWindowFrame
+        self.setWindowFrame = setWindowFrame
         self.displays = displays
         self.runProcess = runProcess
     }
@@ -89,7 +100,7 @@ public final class CommandService {
     private let autoReloadMonitorEnabled: Bool
     private let environment: [String: String]
     private let configDirectoryOverride: URL?
-private let runtimeHooks: CommandServiceRuntimeHooks
+    private let runtimeHooks: CommandServiceRuntimeHooks
     private let configWatchDebounceMs = 250
 
     private var lastConfigReload: ConfigReloadStatus
@@ -349,24 +360,100 @@ private let runtimeHooks: CommandServiceRuntimeHooks
     }
 
     public func windowMove(x: LengthValue, y: LengthValue) -> CommandResult {
-        mutateCurrentWindow(x: x, y: y, width: nil, height: nil)
+        windowMove(target: nil, x: x, y: y)
+    }
+
+    public func windowMove(target: WindowTargetSelector?, x: LengthValue, y: LengthValue) -> CommandResult {
+        mutateWindow(target: target, x: x, y: y, width: nil, height: nil)
     }
 
     public func windowResize(width: LengthValue, height: LengthValue) -> CommandResult {
-        mutateCurrentWindow(x: nil, y: nil, width: width, height: height)
+        windowResize(target: nil, width: width, height: height)
+    }
+
+    public func windowResize(target: WindowTargetSelector?, width: LengthValue, height: LengthValue) -> CommandResult {
+        mutateWindow(target: target, x: nil, y: nil, width: width, height: height)
     }
 
     public func windowSet(x: LengthValue, y: LengthValue, width: LengthValue, height: LengthValue) -> CommandResult {
-        mutateCurrentWindow(x: x, y: y, width: width, height: height)
+        windowSet(target: nil, x: x, y: y, width: width, height: height)
+    }
+
+    public func windowSet(target: WindowTargetSelector?, x: LengthValue, y: LengthValue, width: LengthValue, height: LengthValue) -> CommandResult {
+        mutateWindow(target: target, x: x, y: y, width: width, height: height)
     }
 
     public func focus(slot: Int) -> CommandResult {
-        guard (1 ... 9).contains(slot) else {
-            return CommandResult(exitCode: Int32(ErrorCode.validationError.rawValue), stderr: "slot must be 1..9\n")
-        }
+        focus(slot: slot, target: nil)
+    }
 
+    public func focus(slot: Int?, target: WindowTargetSelector?) -> CommandResult {
         guard runtimeHooks.accessibilityGranted() else {
             return CommandResult(exitCode: Int32(ErrorCode.missingPermission.rawValue))
+        }
+
+        let normalizedTarget: WindowTargetSelector?
+        do {
+            normalizedTarget = try validateWindowTargetSelector(target)
+        } catch let error as ShitsuraeError {
+            return CommandResult(exitCode: Int32(error.code.rawValue), stderr: error.message + "\n")
+        } catch {
+            return CommandResult(exitCode: Int32(ErrorCode.validationError.rawValue), stderr: error.localizedDescription + "\n")
+        }
+
+        if slot != nil, normalizedTarget != nil {
+            return CommandResult(
+                exitCode: Int32(ErrorCode.validationError.rawValue),
+                stderr: "slot cannot be combined with windowID, bundleID, or title\n"
+            )
+        }
+
+        if let slot {
+            return focusBySlot(slot)
+        }
+
+        guard let normalizedTarget else {
+            return CommandResult(
+                exitCode: Int32(ErrorCode.validationError.rawValue),
+                stderr: "slot, windowID, or bundleID is required\n"
+            )
+        }
+
+        if let windowID = normalizedTarget.windowID {
+            let windows = runtimeHooks.listWindows()
+            guard let window = windows.first(where: { $0.windowID == windowID }) else {
+                return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
+            }
+            guard runtimeHooks.focusWindow(window.windowID, window.bundleID) else {
+                return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
+            }
+            return CommandResult(exitCode: 0)
+        }
+
+        guard let bundleID = normalizedTarget.bundleID else {
+            return CommandResult(
+                exitCode: Int32(ErrorCode.validationError.rawValue),
+                stderr: "slot, windowID, or bundleID is required\n"
+            )
+        }
+
+        let activated: Bool
+        if let title = normalizedTarget.title {
+            activated = runtimeHooks.activateWindowWithTitle(bundleID, title)
+        } else {
+            activated = runtimeHooks.activateBundle(bundleID)
+        }
+
+        guard activated else {
+            return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
+        }
+
+        return CommandResult(exitCode: 0)
+    }
+
+    private func focusBySlot(_ slot: Int) -> CommandResult {
+        guard (1 ... 9).contains(slot) else {
+            return CommandResult(exitCode: Int32(ErrorCode.validationError.rawValue), stderr: "slot must be 1..9\n")
         }
 
         let state = stateStore.load()
@@ -560,7 +647,8 @@ private let runtimeHooks: CommandServiceRuntimeHooks
         return CommandResult(exitCode: 0, stdout: encodeJSON(payload) + "\n")
     }
 
-    private func mutateCurrentWindow(
+    private func mutateWindow(
+        target: WindowTargetSelector?,
         x: LengthValue?,
         y: LengthValue?,
         width: LengthValue?,
@@ -570,8 +658,21 @@ private let runtimeHooks: CommandServiceRuntimeHooks
             return CommandResult(exitCode: Int32(ErrorCode.missingPermission.rawValue))
         }
 
-        guard let window = runtimeHooks.focusedWindow() else {
-            return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
+        let normalizedTarget: WindowTargetSelector?
+        do {
+            normalizedTarget = try validateWindowTargetSelector(target)
+        } catch let error as ShitsuraeError {
+            return CommandResult(exitCode: Int32(error.code.rawValue), stderr: error.message + "\n")
+        } catch {
+            return CommandResult(exitCode: Int32(ErrorCode.validationError.rawValue), stderr: error.localizedDescription + "\n")
+        }
+
+        let window: WindowSnapshot
+        switch resolveTargetWindow(normalizedTarget) {
+        case let .success(resolved):
+            window = resolved
+        case let .failure(result):
+            return result
         }
 
         let displays = runtimeHooks.displays()
@@ -599,7 +700,14 @@ private let runtimeHooks: CommandServiceRuntimeHooks
                 height: nextHeight
             )
 
-            if !runtimeHooks.setFocusedWindowFrame(frame) {
+            let updated: Bool
+            if normalizedTarget == nil {
+                updated = runtimeHooks.setFocusedWindowFrame(frame)
+            } else {
+                updated = runtimeHooks.setWindowFrame(window.windowID, window.bundleID, frame)
+            }
+
+            if !updated {
                 return CommandResult(exitCode: Int32(ErrorCode.operationTimedOut.rawValue))
             }
 
@@ -607,6 +715,76 @@ private let runtimeHooks: CommandServiceRuntimeHooks
         } catch {
             return CommandResult(exitCode: Int32(ErrorCode.validationError.rawValue))
         }
+    }
+
+    private func resolveTargetWindow(_ target: WindowTargetSelector?) -> TargetWindowResolution {
+        if let target {
+            let windows = runtimeHooks.listWindows()
+            if let windowID = target.windowID {
+                guard let window = windows.first(where: { $0.windowID == windowID }) else {
+                    return .failure(CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue)))
+                }
+                return .success(window)
+            }
+
+            guard let bundleID = target.bundleID else {
+                return .failure(
+                    CommandResult(
+                        exitCode: Int32(ErrorCode.validationError.rawValue),
+                        stderr: "window target requires windowID or bundleID\n"
+                    )
+                )
+            }
+
+            let matchedWindow = windows.first { window in
+                guard window.bundleID == bundleID else {
+                    return false
+                }
+                if let title = target.title {
+                    return window.title == title
+                }
+                return true
+            }
+
+            guard let matchedWindow else {
+                return .failure(CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue)))
+            }
+            return .success(matchedWindow)
+        }
+
+        guard let focused = runtimeHooks.focusedWindow() else {
+            return .failure(CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue)))
+        }
+        return .success(focused)
+    }
+
+    private func validateWindowTargetSelector(_ target: WindowTargetSelector?) throws -> WindowTargetSelector? {
+        guard let target, !target.isEmpty else {
+            return nil
+        }
+
+        if let windowID = target.windowID {
+            guard windowID > 0 else {
+                throw ShitsuraeError(.validationError, "windowID must be greater than zero")
+            }
+            guard target.bundleID == nil, target.title == nil else {
+                throw ShitsuraeError(.validationError, "windowID cannot be combined with bundleID or title")
+            }
+            return target
+        }
+
+        guard let bundleID = target.bundleID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !bundleID.isEmpty
+        else {
+            throw ShitsuraeError(.validationError, "title requires bundleID")
+        }
+
+        let title = target.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let title, title.isEmpty {
+            throw ShitsuraeError(.validationError, "title must not be empty")
+        }
+
+        return WindowTargetSelector(windowID: nil, bundleID: bundleID, title: title)
     }
 
     private func resolveSlotWindow(entry: SlotEntry, windows: [WindowSnapshot]) -> WindowSnapshot {
@@ -914,4 +1092,9 @@ private struct InternalCandidate {
 private struct FocusFallbackCandidate: Hashable {
     let source: WindowSource
     let bundleID: String
+}
+
+private enum TargetWindowResolution {
+    case success(WindowSnapshot)
+    case failure(CommandResult)
 }

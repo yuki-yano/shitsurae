@@ -6,10 +6,10 @@ public protocol CommandHandling {
     func diagnostics(json: Bool) -> CommandResult
     func arrange(layoutName: String, spaceID: Int?, dryRun: Bool, verbose: Bool, json: Bool) -> CommandResult
     func windowCurrent(json: Bool) -> CommandResult
-    func windowMove(x: LengthValue, y: LengthValue) -> CommandResult
-    func windowResize(width: LengthValue, height: LengthValue) -> CommandResult
-    func windowSet(x: LengthValue, y: LengthValue, width: LengthValue, height: LengthValue) -> CommandResult
-    func focus(slot: Int) -> CommandResult
+    func windowMove(target: WindowTargetSelector?, x: LengthValue, y: LengthValue) -> CommandResult
+    func windowResize(target: WindowTargetSelector?, width: LengthValue, height: LengthValue) -> CommandResult
+    func windowSet(target: WindowTargetSelector?, x: LengthValue, y: LengthValue, width: LengthValue, height: LengthValue) -> CommandResult
+    func focus(slot: Int?, target: WindowTargetSelector?) -> CommandResult
     func switcherList(json: Bool, includeAllSpacesOverride: Bool?) -> CommandResult
 }
 
@@ -25,6 +25,7 @@ public final class AgentCommandExecutor {
     public func execute(_ request: AgentCommandRequest) -> AgentCommandResponse {
         let commandHandler = resolvedCommandHandler(for: request)
         let result: CommandResult
+        let target = makeWindowTargetSelector(from: request)
 
         switch request.command {
         case .arrange:
@@ -50,22 +51,22 @@ public final class AgentCommandExecutor {
             guard let x = request.x, let y = request.y else {
                 return asResponse(CommandResult(exitCode: Int32(ErrorCode.validationError.rawValue), stderr: "x and y are required\n"))
             }
-            result = commandHandler.windowMove(x: x, y: y)
+            result = commandHandler.windowMove(target: target, x: x, y: y)
         case .windowResize:
             guard let width = request.width, let height = request.height else {
                 return asResponse(CommandResult(exitCode: Int32(ErrorCode.validationError.rawValue), stderr: "width and height are required\n"))
             }
-            result = commandHandler.windowResize(width: width, height: height)
+            result = commandHandler.windowResize(target: target, width: width, height: height)
         case .windowSet:
             guard let x = request.x, let y = request.y, let width = request.width, let height = request.height else {
                 return asResponse(CommandResult(exitCode: Int32(ErrorCode.validationError.rawValue), stderr: "x,y,width,height are required\n"))
             }
-            result = commandHandler.windowSet(x: x, y: y, width: width, height: height)
+            result = commandHandler.windowSet(target: target, x: x, y: y, width: width, height: height)
         case .focus:
-            guard let slot = request.slot else {
-                return asResponse(CommandResult(exitCode: Int32(ErrorCode.validationError.rawValue), stderr: "slot is required\n"))
+            guard request.slot != nil || target != nil else {
+                return asResponse(CommandResult(exitCode: Int32(ErrorCode.validationError.rawValue), stderr: "slot, windowID, or bundleID is required\n"))
             }
-            result = commandHandler.focus(slot: slot)
+            result = commandHandler.focus(slot: request.slot, target: target)
         case .switcherList:
             result = commandHandler.switcherList(
                 json: request.json ?? false,
@@ -95,5 +96,14 @@ public final class AgentCommandExecutor {
             enableAutoReloadMonitor: false,
             configDirectoryOverride: URL(fileURLWithPath: path)
         )
+    }
+
+    private func makeWindowTargetSelector(from request: AgentCommandRequest) -> WindowTargetSelector? {
+        let target = WindowTargetSelector(
+            windowID: request.windowID,
+            bundleID: request.bundleID,
+            title: request.windowTitle
+        )
+        return target.isEmpty ? nil : target
     }
 }

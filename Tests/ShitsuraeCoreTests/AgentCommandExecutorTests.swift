@@ -53,7 +53,39 @@ final class AgentCommandExecutorTests: XCTestCase {
 
         let response = executor.execute(request)
         XCTAssertEqual(response.exitCode, 0)
-        XCTAssertEqual(handler.focusCalls, [3])
+        XCTAssertEqual(handler.focusCalls.count, 1)
+        XCTAssertEqual(handler.focusCalls.first?.slot, 3)
+        XCTAssertNil(handler.focusCalls.first?.target)
+    }
+
+    func testExecuteFocusRoutesWindowSelector() {
+        let handler = StubCommandHandler()
+        handler.focusResult = CommandResult(exitCode: 0)
+        let executor = AgentCommandExecutor(commandHandler: handler)
+
+        let request = AgentCommandRequest(
+            command: .focus,
+            json: nil,
+            dryRun: nil,
+            verbose: nil,
+            layoutName: nil,
+            spaceID: nil,
+            slot: nil,
+            includeAllSpaces: nil,
+            x: nil,
+            y: nil,
+            width: nil,
+            height: nil,
+            windowID: 42,
+            bundleID: nil,
+            windowTitle: nil
+        )
+
+        let response = executor.execute(request)
+        XCTAssertEqual(response.exitCode, 0)
+        XCTAssertEqual(handler.focusCalls.count, 1)
+        XCTAssertNil(handler.focusCalls.first?.slot)
+        XCTAssertEqual(handler.focusCalls.first?.target, WindowTargetSelector(windowID: 42, bundleID: nil, title: nil))
     }
 
     func testExecuteRoutesBasicCommands() {
@@ -107,11 +139,74 @@ final class AgentCommandExecutorTests: XCTestCase {
         XCTAssertEqual(handler.diagnosticsCalls, [true])
         XCTAssertEqual(handler.windowCurrentCalls, [true])
         XCTAssertEqual(handler.windowMoveCalls.count, 1)
+        XCTAssertNil(handler.windowMoveCalls.first?.target)
         XCTAssertEqual(handler.windowResizeCalls.count, 1)
+        XCTAssertNil(handler.windowResizeCalls.first?.target)
         XCTAssertEqual(handler.windowSetCalls.count, 1)
+        XCTAssertNil(handler.windowSetCalls.first?.target)
         XCTAssertEqual(handler.switcherListCalls.count, 1)
         XCTAssertEqual(handler.switcherListCalls.first?.0, true)
         XCTAssertEqual(handler.switcherListCalls.first?.1, false)
+    }
+
+    func testExecuteRoutesWindowCommandsWithSelector() {
+        let handler = StubCommandHandler()
+        handler.windowMoveResult = CommandResult(exitCode: 0)
+        handler.windowResizeResult = CommandResult(exitCode: 0)
+        handler.windowSetResult = CommandResult(exitCode: 0)
+        let executor = AgentCommandExecutor(commandHandler: handler)
+
+        let selector = WindowTargetSelector(
+            windowID: nil,
+            bundleID: "com.apple.TextEdit",
+            title: "Draft"
+        )
+
+        XCTAssertEqual(
+            executor.execute(
+                request(
+                    command: .windowMove,
+                    json: nil,
+                    x: .expression("10%"),
+                    y: .expression("20%"),
+                    bundleID: selector.bundleID,
+                    windowTitle: selector.title
+                )
+            ).exitCode,
+            0
+        )
+        XCTAssertEqual(
+            executor.execute(
+                request(
+                    command: .windowResize,
+                    json: nil,
+                    width: .expression("50%"),
+                    height: .expression("60%"),
+                    bundleID: selector.bundleID,
+                    windowTitle: selector.title
+                )
+            ).exitCode,
+            0
+        )
+        XCTAssertEqual(
+            executor.execute(
+                request(
+                    command: .windowSet,
+                    json: nil,
+                    x: .expression("0%"),
+                    y: .expression("0%"),
+                    width: .expression("100%"),
+                    height: .expression("100%"),
+                    bundleID: selector.bundleID,
+                    windowTitle: selector.title
+                )
+            ).exitCode,
+            0
+        )
+
+        XCTAssertEqual(handler.windowMoveCalls.first?.target, selector)
+        XCTAssertEqual(handler.windowResizeCalls.first?.target, selector)
+        XCTAssertEqual(handler.windowSetCalls.first?.target, selector)
     }
 
     func testExecuteReturnsValidationErrorWhenRequiredFieldsMissing() {
@@ -135,7 +230,10 @@ final class AgentCommandExecutorTests: XCTestCase {
             ).stderr,
             "x,y,width,height are required\n"
         )
-        XCTAssertEqual(executor.execute(request(command: .focus, json: nil, slot: nil)).stderr, "slot is required\n")
+        XCTAssertEqual(
+            executor.execute(request(command: .focus, json: nil, slot: nil)).stderr,
+            "slot, windowID, or bundleID is required\n"
+        )
     }
 
     private func request(
@@ -148,7 +246,10 @@ final class AgentCommandExecutorTests: XCTestCase {
         x: LengthValue? = nil,
         y: LengthValue? = nil,
         width: LengthValue? = nil,
-        height: LengthValue? = nil
+        height: LengthValue? = nil,
+        windowID: UInt32? = nil,
+        bundleID: String? = nil,
+        windowTitle: String? = nil
     ) -> AgentCommandRequest {
         AgentCommandRequest(
             command: command,
@@ -162,7 +263,10 @@ final class AgentCommandExecutorTests: XCTestCase {
             x: x,
             y: y,
             width: width,
-            height: height
+            height: height,
+            windowID: windowID,
+            bundleID: bundleID,
+            windowTitle: windowTitle
         )
     }
 }
@@ -174,6 +278,31 @@ private final class StubCommandHandler: CommandHandling {
         let dryRun: Bool
         let verbose: Bool
         let json: Bool
+    }
+
+    struct FocusCall: Equatable {
+        let slot: Int?
+        let target: WindowTargetSelector?
+    }
+
+    struct WindowMoveCall: Equatable {
+        let target: WindowTargetSelector?
+        let x: LengthValue
+        let y: LengthValue
+    }
+
+    struct WindowResizeCall: Equatable {
+        let target: WindowTargetSelector?
+        let width: LengthValue
+        let height: LengthValue
+    }
+
+    struct WindowSetCall: Equatable {
+        let target: WindowTargetSelector?
+        let x: LengthValue
+        let y: LengthValue
+        let width: LengthValue
+        let height: LengthValue
     }
 
     var arrangeResult = CommandResult(exitCode: 0)
@@ -188,14 +317,14 @@ private final class StubCommandHandler: CommandHandling {
     var switcherListResult = CommandResult(exitCode: 0)
 
     var arrangeCalls: [ArrangeCall] = []
-    var focusCalls: [Int] = []
+    var focusCalls: [FocusCall] = []
     var validateCalls: [Bool] = []
     var layoutsListCalls = 0
     var diagnosticsCalls: [Bool] = []
     var windowCurrentCalls: [Bool] = []
-    var windowMoveCalls: [(LengthValue, LengthValue)] = []
-    var windowResizeCalls: [(LengthValue, LengthValue)] = []
-    var windowSetCalls: [(LengthValue, LengthValue, LengthValue, LengthValue)] = []
+    var windowMoveCalls: [WindowMoveCall] = []
+    var windowResizeCalls: [WindowResizeCall] = []
+    var windowSetCalls: [WindowSetCall] = []
     var switcherListCalls: [(Bool, Bool?)] = []
 
     func validate(json: Bool) -> CommandResult {
@@ -218,18 +347,18 @@ private final class StubCommandHandler: CommandHandling {
         return windowCurrentResult
     }
 
-    func windowMove(x: LengthValue, y: LengthValue) -> CommandResult {
-        windowMoveCalls.append((x, y))
+    func windowMove(target: WindowTargetSelector?, x: LengthValue, y: LengthValue) -> CommandResult {
+        windowMoveCalls.append(.init(target: target, x: x, y: y))
         return windowMoveResult
     }
 
-    func windowResize(width: LengthValue, height: LengthValue) -> CommandResult {
-        windowResizeCalls.append((width, height))
+    func windowResize(target: WindowTargetSelector?, width: LengthValue, height: LengthValue) -> CommandResult {
+        windowResizeCalls.append(.init(target: target, width: width, height: height))
         return windowResizeResult
     }
 
-    func windowSet(x: LengthValue, y: LengthValue, width: LengthValue, height: LengthValue) -> CommandResult {
-        windowSetCalls.append((x, y, width, height))
+    func windowSet(target: WindowTargetSelector?, x: LengthValue, y: LengthValue, width: LengthValue, height: LengthValue) -> CommandResult {
+        windowSetCalls.append(.init(target: target, x: x, y: y, width: width, height: height))
         return windowSetResult
     }
 
@@ -243,8 +372,8 @@ private final class StubCommandHandler: CommandHandling {
         return arrangeResult
     }
 
-    func focus(slot: Int) -> CommandResult {
-        focusCalls.append(slot)
+    func focus(slot: Int?, target: WindowTargetSelector?) -> CommandResult {
+        focusCalls.append(.init(slot: slot, target: target))
         return focusResult
     }
 }

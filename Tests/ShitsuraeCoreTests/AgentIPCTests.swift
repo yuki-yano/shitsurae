@@ -39,6 +39,9 @@ final class AgentIPCTests: XCTestCase {
             y: .pt(20),
             width: .expression("50%"),
             height: .expression("60%"),
+            windowID: 42,
+            bundleID: "com.apple.TextEdit",
+            windowTitle: "Draft",
             configDirectoryPath: "/Users/example/.config/shitsurae"
         )
 
@@ -48,6 +51,9 @@ final class AgentIPCTests: XCTestCase {
         XCTAssertEqual(decoded.spaceID, 3)
         XCTAssertEqual(decoded.x, .expression("10%"))
         XCTAssertEqual(decoded.y, .pt(20))
+        XCTAssertEqual(decoded.windowID, 42)
+        XCTAssertEqual(decoded.bundleID, "com.apple.TextEdit")
+        XCTAssertEqual(decoded.windowTitle, "Draft")
         XCTAssertEqual(decoded.configDirectoryPath, "/Users/example/.config/shitsurae")
     }
 

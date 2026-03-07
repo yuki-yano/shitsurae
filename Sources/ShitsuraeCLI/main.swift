@@ -151,7 +151,16 @@ struct Diagnostics: ParsableCommand {
 
 struct Focus: ParsableCommand {
     @Option(name: .long, help: "slot number 1..9")
-    var slot: Int
+    var slot: Int?
+
+    @Option(name: .long, help: "target window id")
+    var windowID: UInt32?
+
+    @Option(name: .long, help: "target app bundle id")
+    var bundleID: String?
+
+    @Option(name: .long, help: "target window title")
+    var title: String?
 
     mutating func run() throws {
         executeRemote(
@@ -166,7 +175,10 @@ struct Focus: ParsableCommand {
                 x: nil,
                 y: nil,
                 width: nil,
-                height: nil
+                height: nil,
+                windowID: windowID,
+                bundleID: bundleID,
+                windowTitle: title
             )
         )
     }
@@ -208,6 +220,15 @@ struct Window: ParsableCommand {
         @Option(name: .long)
         var y: String
 
+        @Option(name: .long, help: "target window id")
+        var windowID: UInt32?
+
+        @Option(name: .long, help: "target app bundle id")
+        var bundleID: String?
+
+        @Option(name: .long, help: "target window title")
+        var title: String?
+
         mutating func run() throws {
             executeRemote(
                 AgentCommandRequest(
@@ -221,7 +242,10 @@ struct Window: ParsableCommand {
                     x: parseLength(x),
                     y: parseLength(y),
                     width: nil,
-                    height: nil
+                    height: nil,
+                    windowID: windowID,
+                    bundleID: bundleID,
+                    windowTitle: title
                 )
             )
         }
@@ -233,6 +257,15 @@ struct Window: ParsableCommand {
 
         @Option(name: .long)
         var h: String
+
+        @Option(name: .long, help: "target window id")
+        var windowID: UInt32?
+
+        @Option(name: .long, help: "target app bundle id")
+        var bundleID: String?
+
+        @Option(name: .long, help: "target window title")
+        var title: String?
 
         mutating func run() throws {
             executeRemote(
@@ -247,7 +280,10 @@ struct Window: ParsableCommand {
                     x: nil,
                     y: nil,
                     width: parseLength(w),
-                    height: parseLength(h)
+                    height: parseLength(h),
+                    windowID: windowID,
+                    bundleID: bundleID,
+                    windowTitle: title
                 )
             )
         }
@@ -266,6 +302,15 @@ struct Window: ParsableCommand {
         @Option(name: .long)
         var h: String
 
+        @Option(name: .long, help: "target window id")
+        var windowID: UInt32?
+
+        @Option(name: .long, help: "target app bundle id")
+        var bundleID: String?
+
+        @Option(name: .long, help: "target window title")
+        var title: String?
+
         mutating func run() throws {
             executeRemote(
                 AgentCommandRequest(
@@ -279,7 +324,10 @@ struct Window: ParsableCommand {
                     x: parseLength(x),
                     y: parseLength(y),
                     width: parseLength(w),
-                    height: parseLength(h)
+                    height: parseLength(h),
+                    windowID: windowID,
+                    bundleID: bundleID,
+                    windowTitle: title
                 )
             )
         }

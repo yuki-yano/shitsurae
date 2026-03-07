@@ -491,6 +491,94 @@ final class CommandServiceContractTests: XCTestCase {
         XCTAssertEqual(activationCalls, 0)
     }
 
+    func testFocusCanTargetWindowID() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+
+        let windows = [
+            Self.window(windowID: 101, bundleID: "com.apple.TextEdit", title: "Editor", spaceID: 1, frontIndex: 0),
+            Self.window(windowID: 202, bundleID: "com.apple.TextEdit", title: "Draft", spaceID: 1, frontIndex: 1),
+        ]
+        var focusedTargets: [(UInt32, String)] = []
+
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: { windows },
+            focusedWindow: { nil },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { _ in true },
+            displays: { [] },
+            runProcess: { _, _ in (0, "") },
+            focusWindow: { windowID, bundleID in
+                focusedTargets.append((windowID, bundleID))
+                return true
+            }
+        )
+
+        let service = workspace.makeService(runtimeHooks: runtimeHooks)
+        let result = service.focus(slot: nil, target: WindowTargetSelector(windowID: 202, bundleID: nil, title: nil))
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(focusedTargets.map(\.0), [202])
+        XCTAssertEqual(focusedTargets.map(\.1), ["com.apple.TextEdit"])
+    }
+
+    func testFocusCanTargetBundleIDAndTitle() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+
+        var titledActivationCalls: [(String, String)] = []
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: { [] },
+            focusedWindow: { nil },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { _ in true },
+            displays: { [] },
+            runProcess: { _, _ in (0, "") },
+            activateWindowWithTitle: { bundleID, title in
+                titledActivationCalls.append((bundleID, title))
+                return true
+            }
+        )
+
+        let service = workspace.makeService(runtimeHooks: runtimeHooks)
+        let result = service.focus(
+            slot: nil,
+            target: WindowTargetSelector(windowID: nil, bundleID: "com.apple.TextEdit", title: "Draft")
+        )
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(titledActivationCalls.map(\.0), ["com.apple.TextEdit"])
+        XCTAssertEqual(titledActivationCalls.map(\.1), ["Draft"])
+    }
+
+    func testFocusRejectsInvalidSelectorCombinations() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: { [] },
+            focusedWindow: { nil },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { _ in true },
+            displays: { [] },
+            runProcess: { _, _ in (0, "") }
+        )
+
+        let service = workspace.makeService(runtimeHooks: runtimeHooks)
+
+        XCTAssertEqual(
+            service.focus(slot: 1, target: WindowTargetSelector(windowID: 42, bundleID: nil, title: nil)).exitCode,
+            Int32(ErrorCode.validationError.rawValue)
+        )
+        XCTAssertEqual(
+            service.focus(slot: nil, target: WindowTargetSelector(windowID: nil, bundleID: nil, title: "Draft")).exitCode,
+            Int32(ErrorCode.validationError.rawValue)
+        )
+    }
+
 
 
     func testSwitcherListJSONSchemaAndPriorityOrder() throws {
@@ -969,6 +1057,84 @@ final class CommandServiceContractTests: XCTestCase {
             permissionService.windowMove(x: .expression("0%"), y: .expression("0%")).exitCode,
             Int32(ErrorCode.missingPermission.rawValue)
         )
+    }
+
+    func testWindowMoveResizeSetCanTargetExplicitWindowSelector() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+
+        let windows = [
+            Self.window(windowID: 800, bundleID: "com.apple.TextEdit", title: "Editor", spaceID: 1, frontIndex: 0),
+            Self.window(windowID: 801, bundleID: "com.apple.TextEdit", title: "Draft", spaceID: 1, frontIndex: 1),
+        ]
+        let displays = [
+            DisplayInfo(
+                id: "display-a",
+                width: 3200,
+                height: 2000,
+                scale: 2.0,
+                isPrimary: true,
+                frame: CGRect(x: 0, y: 0, width: 1600, height: 1000),
+                visibleFrame: CGRect(x: 0, y: 0, width: 1400, height: 900)
+            ),
+        ]
+        var focusedFrameCalls: [ResolvedFrame] = []
+        var targetedFrameCalls: [(UInt32, String, ResolvedFrame)] = []
+
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: { windows },
+            focusedWindow: { nil },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { frame in
+                focusedFrameCalls.append(frame)
+                return true
+            },
+            displays: { displays },
+            runProcess: { _, _ in (0, "") },
+            setWindowFrame: { windowID, bundleID, frame in
+                targetedFrameCalls.append((windowID, bundleID, frame))
+                return true
+            }
+        )
+
+        let service = workspace.makeService(runtimeHooks: runtimeHooks)
+        let selector = WindowTargetSelector(windowID: nil, bundleID: "com.apple.TextEdit", title: "Draft")
+
+        XCTAssertEqual(service.windowMove(target: selector, x: .expression("10%"), y: .expression("20%")).exitCode, 0)
+        XCTAssertEqual(service.windowResize(target: selector, width: .expression("30%"), height: .expression("40%")).exitCode, 0)
+        XCTAssertEqual(
+            service.windowSet(target: selector, x: .expression("0%"), y: .expression("0%"), width: .expression("50%"), height: .expression("60%")).exitCode,
+            0
+        )
+
+        XCTAssertTrue(focusedFrameCalls.isEmpty)
+        XCTAssertEqual(targetedFrameCalls.count, 3)
+        XCTAssertEqual(targetedFrameCalls.map(\.0), [801, 801, 801])
+        XCTAssertEqual(targetedFrameCalls.map(\.1), ["com.apple.TextEdit", "com.apple.TextEdit", "com.apple.TextEdit"])
+    }
+
+    func testWindowMoveRejectsInvalidExplicitSelector() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: { [] },
+            focusedWindow: { nil },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { _ in true },
+            displays: { [] },
+            runProcess: { _, _ in (0, "") }
+        )
+        let service = workspace.makeService(runtimeHooks: runtimeHooks)
+
+        let result = service.windowMove(
+            target: WindowTargetSelector(windowID: nil, bundleID: nil, title: "Draft"),
+            x: .expression("0%"),
+            y: .expression("0%")
+        )
+        XCTAssertEqual(result.exitCode, Int32(ErrorCode.validationError.rawValue))
     }
 
     func testPermissionBranchReturns20ForWindowCurrentFocusAndArrange() throws {

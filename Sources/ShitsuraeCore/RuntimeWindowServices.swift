@@ -234,6 +234,8 @@ public enum WindowQueryService {
             return false
         }
 
+        _ = running.unhide()
+        _ = running.activate(options: activationOptions())
         let appElement = AXUIElementCreateApplication(running.processIdentifier)
         guard let windowElement = matchingWindowElement(
             windowID: windowID,
@@ -249,10 +251,14 @@ public enum WindowQueryService {
             return false
         }
 
-        _ = AXUIElementSetAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, windowElement)
-        _ = AXUIElementSetAttributeValue(appElement, kAXMainWindowAttribute as CFString, windowElement)
-        _ = AXUIElementSetAttributeValue(windowElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-        _ = AXUIElementPerformAction(windowElement, kAXRaiseAction as CFString)
+        guard focusWindowElement(
+            appElement: appElement,
+            windowElement: windowElement,
+            pid: running.processIdentifier,
+            bundleID: bundleID
+        ) else {
+            return false
+        }
 
         var point = CGPoint(x: frame.x, y: frame.y)
         var size = CGSize(width: frame.width, height: frame.height)
@@ -266,6 +272,38 @@ public enum WindowQueryService {
         let setPosition = AXUIElementSetAttributeValue(windowElement, kAXPositionAttribute as CFString, pointValue)
         let setSize = AXUIElementSetAttributeValue(windowElement, kAXSizeAttribute as CFString, sizeValue)
         return setPosition == .success && setSize == .success
+    }
+
+    @discardableResult
+    public static func focusWindow(windowID: UInt32, bundleID: String) -> Bool {
+        guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first else {
+            return false
+        }
+
+        _ = running.unhide()
+        _ = running.activate(options: activationOptions())
+
+        let appElement = AXUIElementCreateApplication(running.processIdentifier)
+        guard let windowElement = matchingWindowElement(
+            windowID: windowID,
+            appElement: appElement,
+            windowIDResolver: { element in
+                var resolvedWindowID: CGWindowID = 0
+                guard AXUIElementGetWindowID(element, &resolvedWindowID) == .success else {
+                    return nil
+                }
+                return resolvedWindowID
+            }
+        ) else {
+            return false
+        }
+
+        return focusWindowElement(
+            appElement: appElement,
+            windowElement: windowElement,
+            pid: running.processIdentifier,
+            bundleID: bundleID
+        )
     }
 
     @discardableResult
@@ -346,6 +384,21 @@ public enum WindowQueryService {
 
     private static func activationOptions() -> NSApplication.ActivationOptions {
         [.activateAllWindows]
+    }
+
+    @discardableResult
+    private static func focusWindowElement(
+        appElement: AXUIElement,
+        windowElement: AXUIElement,
+        pid: pid_t,
+        bundleID: String?
+    ) -> Bool {
+        _ = AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+        _ = AXUIElementSetAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, windowElement)
+        _ = AXUIElementSetAttributeValue(appElement, kAXMainWindowAttribute as CFString, windowElement)
+        _ = AXUIElementSetAttributeValue(windowElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        _ = AXUIElementPerformAction(windowElement, kAXRaiseAction as CFString)
+        return waitForFrontmost(pid: pid, bundleID: bundleID)
     }
 
     private static func waitForFrontmost(pid: pid_t, bundleID: String?) -> Bool {

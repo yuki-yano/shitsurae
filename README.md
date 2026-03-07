@@ -2,74 +2,129 @@
 
 [日本語版はこちら (README.ja.md)](README.ja.md)
 
-Shitsurae is a macOS workspace arranger for people who want repeatable window layouts.
-You describe your ideal setup in YAML, then apply it with one command.
+**Shitsurae** is a macOS workspace arranger that brings order to your desktop with a single command.
 
-The name comes from a Japanese word that means arranging a room with intention and harmony.
-This project brings that idea to your digital workspace.
+The name comes from the Japanese word *室礼（しつらえ）* — the traditional art of arranging a room with intention and harmony. Just as a physical space is carefully set for its purpose, Shitsurae lets you define and instantly reproduce your ideal digital workspace.
 
 ## What It Solves
 
-- Rebuilding your workspace manually every morning
-- Losing window order when displays are connected or disconnected
-- Slow context switching across apps and windows
-- Repeating the same layout work for different tasks (work, review, meeting, etc.)
+- Rebuilding your window layout manually every morning
+- Losing window positions when displays are connected or disconnected
+- Slow context-switching with `Cmd+Tab` across many windows
+- Repeating the same layout work for different tasks (coding, review, meetings, etc.)
+
+Define your ideal setup in YAML, then apply it with one command:
+
+```bash
+shitsurae arrange work
+```
 
 ## Key Features
 
 ### 1. One-command layout apply (`arrange`)
 
-- Launches apps when needed
-- Moves windows to target Spaces
-- Applies exact frames
-- Optionally sets initial focus after apply
+Define layouts in YAML, and `shitsurae arrange <name>` will:
+
+- Launch apps that aren't running yet (`launch: true`)
+- Move windows to the designated Spaces
+- Position and resize each window to the specified frame
+- Set initial focus after arrangement
+
+Position and size accept flexible units: `%` (screen ratio), `pt` (logical points), `px` (physical pixels), `r` (0.0–1.0 ratio).
 
 ### 2. Keyboard-first workflow
 
-Default shortcuts:
+Every operation is available from the keyboard. Default shortcuts:
 
-- `Cmd+1` ... `Cmd+9`: focus by slot
-- `Cmd+Ctrl+J`: next window
-- `Cmd+Ctrl+K`: previous window
-- `Cmd+Tab`: switcher trigger
+| Action | Default | Description |
+|--------|---------|-------------|
+| Slot focus | `Cmd+1` – `Cmd+9` | Jump directly to a numbered window |
+| Next window | `Cmd+Ctrl+J` | Cycle forward within the current Space |
+| Previous window | `Cmd+Ctrl+K` | Cycle backward within the current Space |
+| Switcher | `Cmd+Tab` | Open the window switcher overlay |
+| Snap presets | Configurable | Left half, right half, thirds, maximize, center, etc. |
 
-All shortcuts are configurable in YAML.
+All shortcuts are fully configurable in YAML. You can also disable specific shortcuts per app to avoid conflicts (e.g., `Cmd+1` in Discord).
 
-### 3. Built-in switcher
+### 3. Built-in window switcher
 
-- Shows window candidates
-- Supports quick keys for one-keystroke selection
-- Can prioritize current Space
+A custom switcher triggered by `Cmd+Tab` (configurable):
 
-### 4. Menu bar + Dock app
+- Prioritizes windows on the current Space
+- Each candidate gets a quick key (`a`, `s`, `d`, `f`, …) for one-keystroke selection
+- Supports `acceptOnModifierRelease` — just release the modifier to confirm
+- Configurable accept/cancel keys, quick key string, and Space scope
 
-- App launches as a normal macOS app (visible in Dock)
-- Menu bar controls are always available
-- Preferences and diagnostics are available from the app
+### 4. Window snap actions
 
-### 5. CLI + automation
+Built-in snap presets for quick window positioning:
 
-Use the same core behavior from shell scripts, terminal workflows, and CI-like local tasks.
+- `leftHalf`, `rightHalf`, `topHalf`, `bottomHalf`
+- `leftThird`, `centerThird`, `rightThird`
+- `maximize`, `center`
 
-### 6. Multi-display aware layouts
+Bind any of these to a global shortcut in your YAML config.
 
-- Display matching by role (`primary` / `secondary`) and conditions
-- First-match layout selection for display-specific definitions
+### 5. Menu bar + GUI app
 
-### 7. Config auto reload
+Shitsurae runs as a standard macOS app with both a menu bar presence and a main window.
 
-- Reads all `*.yml` / `*.yaml` files in config directory (sorted by filename)
-- Watches config changes and auto reloads
+**Menu bar** — always-available controls:
+- Apply any defined layout
+- Open main window
+- Preferences and diagnostics
+- Open config directory
+- Reload config
+
+**Main window** — full GUI with sidebar navigation:
+- Visual layout preview with color-coded slots
+- Arrangement controls with dry-run option
+- Shortcut reference
+- Permission status and diagnostics
+
+### 6. CLI + automation
+
+The CLI exposes the same functionality for shell scripts and automation:
+
+```bash
+shitsurae arrange <layout> --dry-run --json    # Preview the execution plan
+shitsurae arrange <layout> --json              # Apply a layout
+shitsurae arrange <layout> --space 2 --json    # Apply to a specific Space
+shitsurae layouts list                         # List defined layouts
+shitsurae validate --json                      # Validate config files
+shitsurae diagnostics --json                   # Show system diagnostics
+shitsurae window current --json                # Current window info
+shitsurae window set --x 0% --y 0% --w 50% --h 100%   # Move + resize
+shitsurae focus --slot 1                       # Focus by slot number
+shitsurae focus --bundle-id com.apple.TextEdit  # Focus by app
+shitsurae switcher list --json                 # List switcher candidates
+```
+
+`window move`, `window resize`, and `window set` default to the focused window when you omit a selector. Selectors: `--window-id` (exact window), `--bundle-id` (app), `--title` (combined with `--bundle-id`).
+
+### 7. Multi-display support
+
+- Match displays by role (`primary` / `secondary`) or resolution conditions
+- Define multiple resolution-specific layouts for the same Space — the first match is applied
+- Seamless switching between MacBook-only and external-monitor setups without config changes
+
+### 8. Config auto-reload
+
+- Reads all `*.yml` / `*.yaml` files in the config directory (sorted by filename)
+- Watches for file changes and auto-reloads
+- On syntax errors, keeps the last valid config and shows errors in diagnostics
 
 ## Requirements
 
-- macOS 15 or later
+- macOS 15 (Sequoia) or later
 - Accessibility permission (required)
-- Screen Recording permission (required only when thumbnail-style overlay features are enabled)
+- Screen Recording permission (optional — only for thumbnail overlays in the switcher)
 
-Shitsurae does not require external network communication for normal operation.
+No network communication is required for normal operation.
 
-## Build From Source
+## Installation
+
+### Build from source
 
 ```bash
 swift build
@@ -81,7 +136,7 @@ Run tests:
 swift test
 ```
 
-Build app bundle:
+Build the app bundle:
 
 ```bash
 make app
@@ -92,50 +147,101 @@ Output:
 - `dist/Shitsurae.app`
 - Bundled CLI: `dist/Shitsurae.app/Contents/Resources/shitsurae`
 
-## First Launch for Distributed Builds (Not Notarized)
+### First launch (non-notarized builds)
 
-If you distribute the `.app` directly and users download it, remove quarantine on first launch:
+If you distribute the `.app` directly, remove quarantine before first launch:
 
 ```bash
 xattr -dr com.apple.quarantine Shitsurae.app
 open Shitsurae.app
 ```
 
-## Configuration Directory
+## Configuration
 
-Shitsurae resolves config directory in this order:
+### Config directory
+
+Resolved in order:
 
 1. `$XDG_CONFIG_HOME/shitsurae/`
 2. `~/.config/shitsurae/`
 
-Sample configs:
+All `*.yml` / `*.yaml` files are loaded in filename order. Split configs by purpose (`work.yml`, `home.yml`, etc.) as you see fit.
 
-- `samples/xdg-config-home/shitsurae/01-basic-layout.yaml`
+### YAML schema / LSP
 
-## YAML Schema / LSP
-
-You can enable YAML LSP validation and completion by pointing your config file at the schema:
+Enable YAML LSP validation and completion by adding this comment to your config file:
 
 ```yaml
 # yaml-language-server: $schema=https://raw.githubusercontent.com/yuki-yano/shitsurae/refs/heads/main/schemas/shitsurae-config.schema.json
 ```
 
-## Common Commands
+### Basic example
 
-```bash
-shitsurae validate --json
-shitsurae layouts list
-shitsurae arrange <layoutName> --dry-run --json
-shitsurae arrange <layoutName> --json
-shitsurae arrange <layoutName> --space 2 --json
-shitsurae diagnostics --json
-shitsurae window current --json
-shitsurae switcher list --json
+```yaml
+layouts:
+  work:
+    initialFocus:
+      slot: 1
+    spaces:
+      - spaceID: 1
+        windows:
+          - slot: 1
+            launch: false
+            match:
+              bundleID: com.apple.TextEdit
+            frame:
+              x: "0%"
+              y: "0%"
+              width: "50%"
+              height: "100%"
+          - slot: 2
+            launch: false
+            match:
+              bundleID: com.apple.Terminal
+            frame:
+              x: "50%"
+              y: "0%"
+              width: "50%"
+              height: "100%"
 ```
 
-## Space Move Method
+More samples in `samples/`.
 
-Use `executionPolicy.spaceMoveMethod` to set the default backend, and `executionPolicy.spaceMoveMethodInApps` to override it per app bundle ID.
+### Window matching
+
+Windows are matched using `match`:
+
+- `bundleID` (required) — app bundle identifier
+- `title` — match by `equals`, `contains`, or `regex`
+- `profile` — Chromium browser profile directory name
+- `role` / `subrole` — accessibility role
+- `index` — window index within the app (1-based)
+- `excludeTitleRegex` — exclude windows whose title matches
+
+### Chromium browser profiles
+
+For Chrome, Brave, Edge, and Chromium, use `match.profile` to target a specific browser profile:
+
+```yaml
+- slot: 1
+  launch: true
+  match:
+    bundleID: com.google.Chrome
+    profile: Default
+  frame:
+    x: "0%"
+    y: "0%"
+    width: "50%"
+    height: "100%"
+```
+
+- `profile` is the directory name (`Default`, `Profile 1`, etc.), not the display name.
+- With `launch: true`, Shitsurae starts the browser with `--profile-directory=<profile> --new-window`.
+- `shitsurae window current --json` includes a `profile` field when resolvable.
+
+### Space move method
+
+Control how Shitsurae moves windows between Spaces:
 
 ```yaml
 executionPolicy:
@@ -144,61 +250,60 @@ executionPolicy:
     org.alacritty: displayRelay
 ```
 
-Available values:
+- `drag` — drags the window while sending the macOS desktop-switch shortcut
+- `displayRelay` — in multi-monitor `perDisplay` setups, temporarily relocates the window to another display, switches Space, then moves it back
 
-- `drag`: drag the window and send the macOS desktop shortcut
-- `displayRelay`: in multi-monitor `perDisplay` setups, temporarily move the window to another monitor, switch the target space, then move it back
+### Ignore rules
 
-## Chromium Browser Profiles
-
-For `com.google.Chrome`, `com.brave.Browser`, `com.microsoft.edgemac`, and `org.chromium.Chromium`, you can pin a window to a specific browser profile with `match.profile`.
+Exclude apps or windows from arrangement and focus operations:
 
 ```yaml
-layouts:
-  browser:
-    spaces:
-      - spaceID: 1
-        windows:
-          - slot: 1
-            launch: true
-            match:
-              bundleID: com.google.Chrome
-              profile: Default
-            frame:
-              x: "0%"
-              y: "0%"
-              width: "50%"
-              height: "100%"
+ignore:
+  apply:
+    apps:
+      - com.apple.finder
+    windows:
+      - bundleID: com.google.Chrome
+        titleRegex: "^DevTools"
+  focus:
+    apps:
+      - com.apple.SystemPreferences
 ```
 
-- `profile` is the Chromium profile directory name, not the display name.
-- Typical values are `Default`, `Profile 1`, and `Profile 2`.
-- With `launch: true`, Shitsurae starts Chromium with `--profile-directory=<profile> --new-window` and prefers the newly created window for placement.
-- `shitsurae window current --json` includes a `profile` field when Shitsurae can resolve it.
-
-## Slot Focus App Scope / Fallback
-
-Use these `shortcuts` options to control `Cmd+1 ... Cmd+9` behavior:
+### Shortcut customization
 
 ```yaml
 shortcuts:
-  # Enable slot->app fallback when runtime state has no slot entry.
+  # Slot focus fallback when no runtime slot entry exists
   focusBySlotFallbackEnabled: true
 
-  # Per-frontmost-app switch for Cmd+1..9 only (true=enabled, false=disabled).
+  # Per-app enable/disable for Cmd+1..9 only
   focusBySlotEnabledInApps:
     com.hnc.Discord: false
     com.tinyspeck.slackmacgap: false
 
-  # Exclude from Cmd+Ctrl+J / Cmd+Ctrl+K candidates.
+  # Exclude from Cmd+Ctrl+J / K cycling
   cycleExcludedApps:
     - com.hnc.Discord
 
-  # Exclude from Cmd+Tab candidates.
+  # Exclude from Cmd+Tab switcher
   switcherExcludedApps:
     - com.tinyspeck.slackmacgap
+
+  # Snap preset shortcuts
+  globalActions:
+    - key: H
+      modifiers: [cmd, ctrl]
+      action:
+        type: snap
+        preset: leftHalf
+    - key: L
+      modifiers: [cmd, ctrl]
+      action:
+        type: snap
+        preset: rightHalf
 ```
 
-If the slot target is not concretely present at dispatch time, `Cmd+1 ... Cmd+9` is passed through to the frontmost app / macOS instead of being consumed by Shitsurae.
+## License
 
-`disabledInApps` is still available, but `focusBySlotEnabledInApps` is the better fit when you want pass-through for Cmd+1 ... Cmd+9 only.
+MIT

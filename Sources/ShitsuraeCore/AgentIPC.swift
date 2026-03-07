@@ -26,6 +26,9 @@ public struct AgentCommandRequest: Codable {
     public let y: LengthValue?
     public let width: LengthValue?
     public let height: LengthValue?
+    public let windowID: UInt32?
+    public let bundleID: String?
+    public let windowTitle: String?
     public let configDirectoryPath: String?
 
     public init(
@@ -41,6 +44,9 @@ public struct AgentCommandRequest: Codable {
         y: LengthValue?,
         width: LengthValue?,
         height: LengthValue?,
+        windowID: UInt32? = nil,
+        bundleID: String? = nil,
+        windowTitle: String? = nil,
         configDirectoryPath: String? = nil
     ) {
         self.command = command
@@ -55,6 +61,9 @@ public struct AgentCommandRequest: Codable {
         self.y = y
         self.width = width
         self.height = height
+        self.windowID = windowID
+        self.bundleID = bundleID
+        self.windowTitle = windowTitle
         self.configDirectoryPath = configDirectoryPath
     }
 
@@ -72,6 +81,9 @@ public struct AgentCommandRequest: Codable {
             y: y,
             width: width,
             height: height,
+            windowID: windowID,
+            bundleID: bundleID,
+            windowTitle: windowTitle,
             configDirectoryPath: path
         )
     }
