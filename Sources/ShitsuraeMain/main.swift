@@ -954,11 +954,6 @@ private struct ShortcutsView: View {
                     }
                 }
 
-                if resolved.focusBySlotFallbackEnabled {
-                    Label("Fallback enabled", systemImage: "arrow.uturn.backward")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }

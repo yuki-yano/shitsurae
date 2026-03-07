@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="Shitsurae/AssetSources/icon.png" alt="Shitsurae" width="256" />
+</p>
+
 # Shitsurae
 
 [English version (README.md)](README.md)
@@ -272,9 +276,6 @@ ignore:
 
 ```yaml
 shortcuts:
-  # runtime state に slot がない場合の slot->app fallback を有効化
-  focusBySlotFallbackEnabled: true
-
   # 前面アプリ単位で Cmd+1..9 だけの有効/無効を切り替え
   focusBySlotEnabledInApps:
     com.hnc.Discord: false

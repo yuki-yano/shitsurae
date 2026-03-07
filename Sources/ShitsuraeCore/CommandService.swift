@@ -463,30 +463,17 @@ public final class CommandService {
 
         let state = stateStore.load()
         let currentSpaceID = runtimeHooks.focusedWindow()?.spaceID
-        var resolvedEntry = resolveSlotEntry(slot: slot, state: state, currentSpaceID: currentSpaceID)
-        var loadedConfig: LoadedConfig?
-
-        if resolvedEntry == nil {
-            loadedConfig = try? loadConfig(trigger: "manual")
-            if let loadedConfig,
-               loadedConfig.config.resolvedShortcuts.focusBySlotFallbackEnabled
-            {
-                resolvedEntry = fallbackSlotEntry(for: slot, config: loadedConfig.config)
-            }
-        }
-
-        guard let entry = resolvedEntry else {
+        guard let entry = resolveSlotEntry(slot: slot, state: state, currentSpaceID: currentSpaceID) else {
             return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
         }
 
-        if loadedConfig == nil {
-            do {
-                loadedConfig = try loadConfig(trigger: "manual")
-            } catch let error as ConfigLoadError {
-                return CommandResult(exitCode: Int32(error.code.rawValue))
-            } catch {
-                loadedConfig = nil
-            }
+        let loadedConfig: LoadedConfig?
+        do {
+            loadedConfig = try loadConfig(trigger: "manual")
+        } catch let error as ConfigLoadError {
+            return CommandResult(exitCode: Int32(error.code.rawValue))
+        } catch {
+            loadedConfig = nil
         }
 
         let windows = runtimeHooks.listWindows()
@@ -523,27 +510,17 @@ public final class CommandService {
 
         let windows = runtimeHooks.listWindows()
         let state = stateStore.load()
-        var resolvedEntry = state.slots.first(where: { $0.slot == slot })
-        var loadedConfig: LoadedConfig?
-
-        if resolvedEntry == nil {
-            loadedConfig = try? loadConfig(trigger: "manual")
-            if let loadedConfig,
-               loadedConfig.config.resolvedShortcuts.focusBySlotFallbackEnabled
-            {
-                resolvedEntry = fallbackSlotEntry(for: slot, config: loadedConfig.config)
-            }
-        }
-
-        guard let entry = resolvedEntry,
+        guard let entry = resolveSlotEntry(
+            slot: slot,
+            state: state,
+            currentSpaceID: runtimeHooks.focusedWindow()?.spaceID
+        ),
               focusShortcutTargetExists(entry: entry, windows: windows)
         else {
             return false
         }
 
-        if loadedConfig == nil {
-            loadedConfig = try? loadConfig(trigger: "manual")
-        }
+        let loadedConfig = try? loadConfig(trigger: "manual")
 
         if let ignoreRules = loadedConfig?.config.ignore?.focus {
             let targetWindow = resolveSlotWindow(entry: entry, windows: windows)
@@ -873,43 +850,6 @@ public final class CommandService {
         return matching.first
     }
 
-    private func fallbackSlotEntry(for slot: Int, config: ShitsuraeConfig) -> SlotEntry? {
-        var candidates: [FocusFallbackCandidate] = []
-        for (_, layout) in config.layouts.sorted(by: { $0.key < $1.key }) {
-            for space in layout.spaces {
-                for window in space.windows where window.slot == slot {
-                    candidates.append(
-                        FocusFallbackCandidate(
-                            source: window.source ?? .window,
-                            bundleID: window.match.bundleID
-                        )
-                    )
-                }
-            }
-        }
-
-        guard !candidates.isEmpty else {
-            return nil
-        }
-
-        let unique = Set(candidates)
-        guard unique.count == 1,
-              let selected = unique.first
-        else {
-            return nil
-        }
-
-        return SlotEntry(
-            slot: slot,
-            source: selected.source,
-            bundleID: selected.bundleID,
-            title: selected.bundleID,
-            spaceID: nil,
-            displayID: nil,
-            windowID: nil
-        )
-    }
-
     private func orderCandidates(_ candidates: [InternalCandidate], prioritizeCurrentSpace: Bool) -> [InternalCandidate] {
         let baseSorted = candidates.sorted { lhs, rhs in
             if lhs.frontIndex != rhs.frontIndex { return lhs.frontIndex < rhs.frontIndex }
@@ -1114,11 +1054,6 @@ private struct InternalCandidate {
     let frontIndex: Int
     let windowID: UInt32?
     let inCurrentSpace: Bool
-}
-
-private struct FocusFallbackCandidate: Hashable {
-    let source: WindowSource
-    let bundleID: String
 }
 
 private enum TargetWindowResolution {

@@ -65,7 +65,6 @@ public struct ShortcutsDefinition: Codable, Equatable {
     public let globalActions: [GlobalActionShortcut]?
     public let disabledInApps: [String: [String]]?
     public let focusBySlotEnabledInApps: [String: Bool]?
-    public let focusBySlotFallbackEnabled: Bool?
     public let cycleExcludedApps: [String]?
     public let switcherExcludedApps: [String]?
 
@@ -77,7 +76,6 @@ public struct ShortcutsDefinition: Codable, Equatable {
         globalActions: [GlobalActionShortcut]?,
         disabledInApps: [String: [String]]?,
         focusBySlotEnabledInApps: [String: Bool]? = nil,
-        focusBySlotFallbackEnabled: Bool? = nil,
         cycleExcludedApps: [String]? = nil,
         switcherExcludedApps: [String]? = nil
     ) {
@@ -88,7 +86,6 @@ public struct ShortcutsDefinition: Codable, Equatable {
         self.globalActions = globalActions
         self.disabledInApps = disabledInApps
         self.focusBySlotEnabledInApps = focusBySlotEnabledInApps
-        self.focusBySlotFallbackEnabled = focusBySlotFallbackEnabled
         self.cycleExcludedApps = cycleExcludedApps
         self.switcherExcludedApps = switcherExcludedApps
     }
@@ -343,7 +340,6 @@ public extension ShitsuraeConfig {
 public struct ResolvedShortcuts: Equatable {
     public let focusBySlot: [Int: HotkeyDefinition]
     public let focusBySlotEnabledInApps: [String: Bool]
-    public let focusBySlotFallbackEnabled: Bool
     public let cycleExcludedApps: Set<String>
     public let switcherExcludedApps: Set<String>
     public let nextWindow: HotkeyDefinition
@@ -371,7 +367,6 @@ public struct ResolvedShortcuts: Equatable {
         }
         focusBySlot = slots
         focusBySlotEnabledInApps = shortcuts?.focusBySlotEnabledInApps ?? [:]
-        focusBySlotFallbackEnabled = shortcuts?.focusBySlotFallbackEnabled ?? false
         cycleExcludedApps = Set(shortcuts?.cycleExcludedApps ?? [])
         switcherExcludedApps = Set(shortcuts?.switcherExcludedApps ?? [])
 

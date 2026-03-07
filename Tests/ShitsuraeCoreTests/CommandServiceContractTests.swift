@@ -352,22 +352,18 @@ final class CommandServiceContractTests: XCTestCase {
         XCTAssertEqual(focusedTargets.map(\.1), ["com.hnc.Discord"])
     }
 
-    func testFocusFallsBackToConfigSlotDefinitionWhenStateIsEmpty() throws {
-        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.focusFallbackEnabledConfigYAML])
+    func testFocusReturnsNotFoundWhenStateIsEmpty() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
         defer { workspace.cleanup() }
 
         let stateStore = RuntimeStateStore(stateFileURL: workspace.stateFileURL)
         stateStore.save(slots: [])
 
-        var activatedBundleIDs: [String] = []
         let runtimeHooks = CommandServiceRuntimeHooks(
             accessibilityGranted: { true },
             listWindows: { [] },
             focusedWindow: { nil },
-            activateBundle: { bundleID in
-                activatedBundleIDs.append(bundleID)
-                return true
-            },
+            activateBundle: { _ in true },
             setFocusedWindowFrame: { _ in true },
             displays: { [] },
             runProcess: { _, _ in (0, "") }
@@ -375,8 +371,7 @@ final class CommandServiceContractTests: XCTestCase {
 
         let service = workspace.makeService(stateStore: stateStore, runtimeHooks: runtimeHooks)
         let result = service.focus(slot: 1)
-        XCTAssertEqual(result.exitCode, 0)
-        XCTAssertEqual(activatedBundleIDs, ["com.apple.TextEdit"])
+        XCTAssertEqual(result.exitCode, Int32(ErrorCode.targetWindowNotFound.rawValue))
     }
 
     func testFocusSlotUsesTrackedWindowIDWhenAvailable() throws {
@@ -431,8 +426,8 @@ final class CommandServiceContractTests: XCTestCase {
         XCTAssertTrue(activatedBundleIDs.isEmpty)
     }
 
-    func testShouldHandleFocusShortcutReturnsFalseWhenFallbackTargetIsNotPresent() throws {
-        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.focusFallbackEnabledConfigYAML])
+    func testShouldHandleFocusShortcutReturnsFalseWhenSlotStateIsEmpty() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
         defer { workspace.cleanup() }
 
         let stateStore = RuntimeStateStore(stateFileURL: workspace.stateFileURL)
@@ -450,27 +445,6 @@ final class CommandServiceContractTests: XCTestCase {
 
         let service = workspace.makeService(stateStore: stateStore, runtimeHooks: runtimeHooks)
         XCTAssertFalse(service.shouldHandleFocusShortcut(slot: 1))
-    }
-
-    func testShouldHandleFocusShortcutReturnsTrueWhenFallbackTargetExists() throws {
-        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.focusFallbackEnabledConfigYAML])
-        defer { workspace.cleanup() }
-
-        let stateStore = RuntimeStateStore(stateFileURL: workspace.stateFileURL)
-        stateStore.save(slots: [])
-
-        let runtimeHooks = CommandServiceRuntimeHooks(
-            accessibilityGranted: { true },
-            listWindows: { [Self.window(windowID: 201, bundleID: "com.apple.TextEdit", title: "Draft", spaceID: 1, frontIndex: 0)] },
-            focusedWindow: { nil },
-            activateBundle: { _ in true },
-            setFocusedWindowFrame: { _ in true },
-            displays: { [] },
-            runProcess: { _, _ in (0, "") }
-        )
-
-        let service = workspace.makeService(stateStore: stateStore, runtimeHooks: runtimeHooks)
-        XCTAssertTrue(service.shouldHandleFocusShortcut(slot: 1))
     }
 
     func testShouldHandleFocusShortcutReturnsFalseForStaleSlotEntry() throws {
@@ -1322,27 +1296,6 @@ final class CommandServiceContractTests: XCTestCase {
                   width: "50%"
                   height: "100%"
     """
-
-    private static let focusFallbackEnabledConfigYAML = """
-    shortcuts:
-      focusBySlotFallbackEnabled: true
-    layouts:
-      work:
-        spaces:
-          - spaceID: 1
-            windows:
-              - slot: 1
-                launch: false
-                match:
-                  bundleID: com.apple.TextEdit
-                frame:
-                  x: "0%"
-                  y: "0%"
-                  width: "50%"
-                  height: "100%"
-    """
-
-
 
     private static let overlayThumbnailConfigYAML = """
     overlay:

@@ -325,12 +325,11 @@ final class ConfigValidatorTests: XCTestCase {
         XCTAssertEqual(resolved.nextWindow, HotkeyDefinition(key: "j", modifiers: ["cmd", "ctrl"]))
         XCTAssertEqual(resolved.prevWindow, HotkeyDefinition(key: "k", modifiers: ["cmd", "ctrl"]))
         XCTAssertTrue(resolved.focusBySlotEnabledInApps.isEmpty)
-        XCTAssertFalse(resolved.focusBySlotFallbackEnabled)
         XCTAssertTrue(resolved.cycleExcludedApps.isEmpty)
         XCTAssertTrue(resolved.switcherExcludedApps.isEmpty)
     }
 
-    func testFocusBySlotAppSwitchAndFallbackSettingsResolve() {
+    func testFocusBySlotAppSwitchAndExcludedAppsResolve() {
         let config = baseConfig(
             shortcuts: ShortcutsDefinition(
                 focusBySlot: nil,
@@ -343,7 +342,6 @@ final class ConfigValidatorTests: XCTestCase {
                     "com.apple.Terminal": false,
                     "com.apple.TextEdit": true,
                 ],
-                focusBySlotFallbackEnabled: true,
                 cycleExcludedApps: [
                     "com.hnc.Discord",
                 ],
@@ -356,7 +354,6 @@ final class ConfigValidatorTests: XCTestCase {
         let resolved = config.resolvedShortcuts
         XCTAssertEqual(resolved.focusBySlotEnabledInApps["com.apple.Terminal"], false)
         XCTAssertEqual(resolved.focusBySlotEnabledInApps["com.apple.TextEdit"], true)
-        XCTAssertTrue(resolved.focusBySlotFallbackEnabled)
         XCTAssertEqual(resolved.cycleExcludedApps, Set(["com.hnc.Discord"]))
         XCTAssertEqual(resolved.switcherExcludedApps, Set(["com.tinyspeck.slackmacgap"]))
     }

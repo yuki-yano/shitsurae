@@ -3,12 +3,13 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ASSETS_DIR="$ROOT_DIR/Shitsurae/Assets.xcassets"
+ASSET_SOURCES_DIR="$ROOT_DIR/Shitsurae/AssetSources"
 APP_ICONSET_DIR="$ASSETS_DIR/AppIcon.appiconset"
 MENU_ICONSET_DIR="$ASSETS_DIR/MenuBarIcon.imageset"
 
-SOURCE_APP_ICON="$ROOT_DIR/docs/icon.png"
-SOURCE_MENU_16="$ROOT_DIR/docs/menubar-icon-template-16.png"
-SOURCE_MENU_32="$ROOT_DIR/docs/menubar-icon-template-32.png"
+SOURCE_APP_ICON="$ASSET_SOURCES_DIR/icon.png"
+SOURCE_MENU_16="$ASSET_SOURCES_DIR/menubar-icon-template-16.png"
+SOURCE_MENU_32="$ASSET_SOURCES_DIR/menubar-icon-template-32.png"
 
 mkdir -p "$APP_ICONSET_DIR" "$MENU_ICONSET_DIR"
 

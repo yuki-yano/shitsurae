@@ -16,11 +16,11 @@ final class RuntimeWindowServicesTests: XCTestCase {
         XCTAssertEqual(unhideCount, 1)
     }
 
-    func testBundleActivationOptionsActivateAllWindows() {
+    func testBundleActivationOptionsDoesNotActivateAllWindows() {
         let options = WindowQueryService.bundleActivationOptions()
 
-        XCTAssertTrue(options.contains(.activateAllWindows))
-        XCTAssertFalse(options.isEmpty)
+        XCTAssertFalse(options.contains(.activateAllWindows))
+        XCTAssertTrue(options.isEmpty)
     }
 
     func testMakeKeyWindowEventBytesEncodesWindowIDAndEventType() {

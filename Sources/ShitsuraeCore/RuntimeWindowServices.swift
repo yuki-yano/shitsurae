@@ -396,82 +396,51 @@ public enum WindowQueryService {
 
     @discardableResult
     public static func activate(bundleID: String, preferredWindowTitle: String? = nil) -> Bool {
-        if let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
-            _ = running.unhide()
-            _ = running.activate(options: bundleActivationOptions())
-            if waitForFrontmost(pid: running.processIdentifier, bundleID: bundleID) {
-                return true
-            }
-
-            if activateViaAccessibility(
-                pid: running.processIdentifier,
-                preferredWindowTitle: preferredWindowTitle,
-                bundleID: bundleID
-            ), waitForFrontmost(pid: running.processIdentifier, bundleID: bundleID)
-            {
-                return true
-            }
-
+        guard let running = runningApplication(bundleID: bundleID) else {
             return false
+        }
+
+        return activateRunningApplication(running, preferredWindowTitle: preferredWindowTitle)
+    }
+
+    private static func runningApplication(bundleID: String) -> NSRunningApplication? {
+        if let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
+            return running
         }
 
         guard SystemProbe.launchApplication(bundleID: bundleID) else {
-            return false
+            return nil
         }
 
-        if let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
-            _ = running.unhide()
-            _ = running.activate(options: bundleActivationOptions())
-            if waitForFrontmost(pid: running.processIdentifier, bundleID: bundleID) {
-                return true
-            }
-
-            if activateViaAccessibility(
-                pid: running.processIdentifier,
-                preferredWindowTitle: preferredWindowTitle,
-                bundleID: bundleID
-            ), waitForFrontmost(pid: running.processIdentifier, bundleID: bundleID)
-            {
-                return true
-            }
-        }
-
-        return false
+        return NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first
     }
 
-    @discardableResult
-    private static func activateViaAccessibility(pid: pid_t, preferredWindowTitle: String?, bundleID: String?) -> Bool {
-        guard AXIsProcessTrusted() else {
-            return false
+    private static func activateRunningApplication(
+        _ running: NSRunningApplication,
+        preferredWindowTitle: String?
+    ) -> Bool {
+        _ = running.unhide()
+
+        let appElement = AXUIElementCreateApplication(running.processIdentifier)
+        if let preferredWindowTitle,
+           let windowElement = preferredWindowElement(
+               appElement: appElement,
+               preferredWindowTitle: preferredWindowTitle
+           ),
+           focusWindowElement(
+               appElement: appElement,
+               windowElement: windowElement,
+               pid: running.processIdentifier
+           )
+        {
+            return true
         }
 
-        let appElement = AXUIElementCreateApplication(pid)
-
-        var windowsRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-              let windows = windowsRef as? [AXUIElement],
-              !windows.isEmpty
-        else {
-            return false
-        }
-
-        let targetWindow = pickTargetWindow(windows: windows, preferredWindowTitle: preferredWindowTitle)
-
-        _ = AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
-        guard waitForFrontmost(pid: pid, bundleID: bundleID) else {
-            return false
-        }
-
-        _ = AXUIElementSetAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, targetWindow)
-        _ = AXUIElementSetAttributeValue(appElement, kAXMainWindowAttribute as CFString, targetWindow)
-        _ = AXUIElementSetAttributeValue(targetWindow, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-        _ = AXUIElementPerformAction(targetWindow, kAXRaiseAction as CFString)
-
-        return waitForFrontmost(pid: pid, bundleID: bundleID)
+        return running.activate(options: bundleActivationOptions())
     }
 
     static func bundleActivationOptions() -> NSApplication.ActivationOptions {
-        [.activateAllWindows]
+        []
     }
 
     private static func prepareForTargetedWindowInteraction(_ running: NSRunningApplication) {
@@ -604,34 +573,20 @@ public enum WindowQueryService {
         return bytes
     }
 
-    private static func waitForFrontmost(pid: pid_t, bundleID: String?) -> Bool {
-        for _ in 0 ..< 5 {
-            if frontmostMatches(pid: pid, bundleID: bundleID) {
-                return true
-            }
-            Thread.sleep(forTimeInterval: 0.01)
+    private static func preferredWindowElement(
+        appElement: AXUIElement,
+        preferredWindowTitle: String
+    ) -> AXUIElement? {
+        let normalizedTitle = preferredWindowTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTitle.isEmpty else {
+            return nil
         }
-        return frontmostMatches(pid: pid, bundleID: bundleID)
-    }
 
-    private static func frontmostMatches(pid: pid_t, bundleID: String?) -> Bool {
-        guard let frontmost = NSWorkspace.shared.frontmostApplication else {
-            return false
-        }
-        if frontmost.processIdentifier == pid {
-            return true
-        }
-        if let bundleID, frontmost.bundleIdentifier == bundleID {
-            return true
-        }
-        return false
-    }
-
-    private static func pickTargetWindow(windows: [AXUIElement], preferredWindowTitle: String?) -> AXUIElement {
-        guard let preferredWindowTitle,
-              !preferredWindowTitle.isEmpty
+        var windowsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+              let windows = windowsRef as? [AXUIElement]
         else {
-            return windows[0]
+            return nil
         }
 
         for window in windows {
@@ -641,11 +596,13 @@ public enum WindowQueryService {
             else {
                 continue
             }
-            if title == preferredWindowTitle {
+
+            if title == normalizedTitle {
                 return window
             }
         }
-        return windows[0]
+
+        return nil
     }
 
     static func resolveDisplay(for rect: CGRect, displays: [DisplayInfo]) -> DisplayInfo? {

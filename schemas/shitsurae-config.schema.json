@@ -542,9 +542,6 @@
             "type": "boolean"
           }
         },
-        "focusBySlotFallbackEnabled": {
-          "type": "boolean"
-        },
         "cycleExcludedApps": {
           "type": "array",
           "uniqueItems": true,

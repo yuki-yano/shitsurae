@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- dサイズ + cカラー / 背景: 茄子紺（なすこん）— 桜ぼかしなし -->
+  <defs>
+    <linearGradient id="bgU" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#242040" />
+      <stop offset="100%" style="stop-color:#161228" />
+    </linearGradient>
+    <radialGradient id="glU" cx="80%" cy="25%" r="50%">
+      <stop offset="0%" style="stop-color:#EE90B0;stop-opacity:0.13" />
+      <stop offset="100%" style="stop-color:#EE90B0;stop-opacity:0" />
+    </radialGradient>
+    <linearGradient id="tUa" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FFFFFF;stop-opacity:0.95" />
+      <stop offset="100%" style="stop-color:#F5F2FA;stop-opacity:0.9" />
+    </linearGradient>
+    <linearGradient id="tUb" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FFFFFF;stop-opacity:0.6" />
+      <stop offset="100%" style="stop-color:#EBE8F4;stop-opacity:0.5" />
+    </linearGradient>
+    <filter id="sU"><feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#08061A" flood-opacity="0.4" /></filter>
+    <filter id="sUs"><feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#08061A" flood-opacity="0.25" /></filter>
+    <filter id="glUso"><feGaussianBlur stdDeviation="8" /></filter>
+  </defs>
+
+  <rect x="16" y="16" width="480" height="480" rx="96" ry="96" fill="url(#bgU)" />
+  <rect x="16" y="16" width="480" height="480" rx="96" ry="96" fill="url(#glU)" />
+  <circle cx="400" cy="130" r="60" fill="#EE90B0" opacity="0.08" filter="url(#glUso)" />
+  <circle cx="120" cy="380" r="45" fill="#EE90B0" opacity="0.05" filter="url(#glUso)" />
+
+  <path d="M420,25 Q385,90 355,165 Q335,235 342,300" fill="none" stroke="#B87A92" stroke-width="4.5" stroke-linecap="round" opacity="0.65" />
+  <path d="M380,105 Q410,88 440,98" fill="none" stroke="#B87A92" stroke-width="3.5" stroke-linecap="round" opacity="0.6" />
+  <path d="M348,200 Q322,186 305,196" fill="none" stroke="#B87A92" stroke-width="3" stroke-linecap="round" opacity="0.55" />
+  <path d="M360,258 Q388,245 408,258" fill="none" stroke="#B87A92" stroke-width="2.5" stroke-linecap="round" opacity="0.5" />
+  <path d="M45,420 Q78,385 120,368 Q162,352 195,365" fill="none" stroke="#B87A92" stroke-width="3" stroke-linecap="round" opacity="0.5" />
+  <path d="M90,390 Q75,370 82,355" fill="none" stroke="#B87A92" stroke-width="2" stroke-linecap="round" opacity="0.4" />
+
+  <g transform="translate(442,92)"><g opacity="0.85">
+    <circle cx="0" cy="-13" r="12" fill="#EE90B0" /><circle cx="12.5" cy="-4" r="12" fill="#EE90B0" />
+    <circle cx="7.5" cy="10.5" r="12" fill="#EE90B0" /><circle cx="-7.5" cy="10.5" r="12" fill="#EE90B0" />
+    <circle cx="-12.5" cy="-4" r="12" fill="#EE90B0" /><circle cx="0" cy="0" r="6.5" fill="#D86088" />
+  </g></g>
+  <g transform="translate(355,175)"><g opacity="0.8">
+    <circle cx="0" cy="-11" r="10.5" fill="#EE90B0" /><circle cx="10.5" cy="-3.5" r="10.5" fill="#EE90B0" />
+    <circle cx="6.5" cy="9" r="10.5" fill="#EE90B0" /><circle cx="-6.5" cy="9" r="10.5" fill="#EE90B0" />
+    <circle cx="-10.5" cy="-3.5" r="10.5" fill="#EE90B0" /><circle cx="0" cy="0" r="5.5" fill="#D86088" />
+  </g></g>
+  <g transform="translate(300,200)"><g opacity="0.7">
+    <circle cx="0" cy="-8.5" r="8" fill="#EE90B0" /><circle cx="8.5" cy="-3" r="8" fill="#EE90B0" />
+    <circle cx="5" cy="7" r="8" fill="#EE90B0" /><circle cx="-5" cy="7" r="8" fill="#EE90B0" />
+    <circle cx="-8.5" cy="-3" r="8" fill="#EE90B0" /><circle cx="0" cy="0" r="4.5" fill="#D86088" />
+  </g></g>
+  <g transform="translate(410,255)" opacity="0.65">
+    <circle cx="0" cy="-8" r="7.5" fill="#EE90B0" /><circle cx="8" cy="-2.5" r="7.5" fill="#EE90B0" />
+    <circle cx="5" cy="6.5" r="7.5" fill="#EE90B0" /><circle cx="-5" cy="6.5" r="7.5" fill="#EE90B0" />
+    <circle cx="-8" cy="-2.5" r="7.5" fill="#EE90B0" /><circle cx="0" cy="0" r="4" fill="#D86088" />
+  </g>
+  <g transform="translate(120,365)"><g opacity="0.65">
+    <circle cx="0" cy="-9" r="8.5" fill="#EE90B0" /><circle cx="9" cy="-3" r="8.5" fill="#EE90B0" />
+    <circle cx="5.5" cy="7.5" r="8.5" fill="#EE90B0" /><circle cx="-5.5" cy="7.5" r="8.5" fill="#EE90B0" />
+    <circle cx="-9" cy="-3" r="8.5" fill="#EE90B0" /><circle cx="0" cy="0" r="4.5" fill="#D86088" />
+  </g></g>
+  <g transform="translate(192,360)" opacity="0.55">
+    <circle cx="0" cy="-6.5" r="6" fill="#EE90B0" /><circle cx="6.5" cy="-2" r="6" fill="#EE90B0" />
+    <circle cx="4" cy="5.5" r="6" fill="#EE90B0" /><circle cx="-4" cy="5.5" r="6" fill="#EE90B0" />
+    <circle cx="-6.5" cy="-2" r="6" fill="#EE90B0" /><circle cx="0" cy="0" r="3" fill="#D86088" />
+  </g>
+  <g transform="translate(80,352)" opacity="0.45">
+    <circle cx="0" cy="-5.5" r="5" fill="#EE90B0" /><circle cx="5.5" cy="-1.5" r="5" fill="#EE90B0" />
+    <circle cx="3" cy="5" r="5" fill="#EE90B0" /><circle cx="-3" cy="5" r="5" fill="#EE90B0" />
+    <circle cx="-5.5" cy="-1.5" r="5" fill="#EE90B0" /><circle cx="0" cy="0" r="2.5" fill="#D86088" />
+  </g>
+
+  <ellipse cx="448" cy="165" rx="8" ry="12" fill="#EE90B0" fill-opacity="0.55" transform="rotate(18,448,165)" />
+  <ellipse cx="70" cy="210" rx="7" ry="10" fill="#EE90B0" fill-opacity="0.45" transform="rotate(-20,70,210)" />
+  <ellipse cx="470" cy="310" rx="7" ry="11" fill="#EE90B0" fill-opacity="0.4" transform="rotate(32,470,310)" />
+  <ellipse cx="160" cy="435" rx="6.5" ry="10" fill="#EE90B0" fill-opacity="0.4" transform="rotate(-22,160,435)" />
+  <ellipse cx="48" cy="320" rx="6" ry="9" fill="#EE90B0" fill-opacity="0.35" transform="rotate(10,48,320)" />
+  <ellipse cx="350" cy="455" rx="6" ry="9" fill="#EE90B0" fill-opacity="0.32" transform="rotate(-48,350,455)" />
+  <ellipse cx="480" cy="225" rx="5.5" ry="8.5" fill="#EE90B0" fill-opacity="0.38" transform="rotate(52,480,225)" />
+  <ellipse cx="240" cy="470" rx="5.5" ry="8" fill="#EE90B0" fill-opacity="0.28" transform="rotate(-12,240,470)" />
+  <ellipse cx="42" cy="445" rx="5" ry="8" fill="#EE90B0" fill-opacity="0.25" transform="rotate(28,42,445)" />
+  <ellipse cx="465" cy="420" rx="5.5" ry="8" fill="#EE90B0" fill-opacity="0.25" transform="rotate(-38,465,420)" />
+  <ellipse cx="290" cy="48" rx="5" ry="7.5" fill="#EE90B0" fill-opacity="0.22" transform="rotate(15,290,48)" />
+  <ellipse cx="55" cy="150" rx="5" ry="7" fill="#EE90B0" fill-opacity="0.2" transform="rotate(-30,55,150)" />
+
+  <rect x="72" y="72" width="220" height="200" rx="16" ry="16" fill="url(#tUa)" filter="url(#sU)" />
+  <circle cx="96" cy="96" r="6" fill="#FF6B6B" /><circle cx="114" cy="96" r="6" fill="#FECA57" /><circle cx="132" cy="96" r="6" fill="#48DBFB" />
+  <rect x="88" y="120" width="120" height="6" rx="3" fill="#242040" fill-opacity="0.15" />
+  <rect x="88" y="134" width="180" height="6" rx="3" fill="#242040" fill-opacity="0.1" />
+  <rect x="304" y="72" width="136" height="130" rx="14" ry="14" fill="url(#tUb)" filter="url(#sUs)" />
+  <rect x="220" y="284" width="220" height="156" rx="14" ry="14" fill="url(#tUb)" filter="url(#sUs)" />
+  <rect x="72" y="284" width="136" height="156" rx="14" ry="14" fill="url(#tUb)" filter="url(#sUs)" />
+  <rect x="304" y="214" width="136" height="58" rx="12" ry="12" fill="url(#tUb)" filter="url(#sUs)" />
+</svg>

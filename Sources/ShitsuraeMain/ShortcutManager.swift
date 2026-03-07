@@ -993,10 +993,6 @@ final class ShortcutManager {
     }
 
     private func activate(candidate: SwitcherCandidate) {
-        performActivation(candidate: candidate)
-    }
-
-    private func performActivation(candidate: SwitcherCandidate) {
         if let windowID = candidateWindowID(from: candidate.id) {
             let result = commandService.focus(
                 slot: nil,
