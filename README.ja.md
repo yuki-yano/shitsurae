@@ -54,10 +54,12 @@ YAML にレイアウトを定義し、`shitsurae arrange <name>` を実行する
 
 `Cmd+Tab`（カスタマイズ可能）で起動する独自のスイッチャー：
 
-- 現在 Space のウィンドウを優先表示
+- `slot` を無視し、現在 Space のウィンドウを MRU 順で表示
 - デフォルトでは各候補に `1`, `2`, `3`, `4`, … のクイックキーが割り当てられ、1 打鍵で即時切替
-- `acceptOnModifierRelease` 対応——修飾キーを離すだけで選択確定
-- accept/cancel キー、クイックキー文字列、対象 Space の範囲をカスタマイズ可能
+- 修飾キーを離すと常に選択確定
+- トリガー、accept/cancel キー、クイックキー文字列を個別設定可能
+
+一方で `Cmd+Ctrl+J/K` は別順序で動作し、`slot` 付きウィンドウを先頭固定、その後ろに `slot` なしウィンドウをその Space で観測した順に並べます。`shortcuts.cycle.mode: overlay` を指定すると、この順序を使った overlay UI で確定操作できます。
 
 ### 4. ウィンドウスナップ
 
@@ -120,8 +122,8 @@ Shitsurae は通常の macOS アプリとして起動し、メニューバーに
 
 **Shortcuts** — ショートカット一覧：
 - スロットフォーカスキー（`Cmd+1`〜`Cmd+9`）とアプリごとの有効/無効設定
-- ウィンドウナビゲーションキー（次/前）と巡回除外アプリ
-- スイッチャーのトリガーキー・対象範囲（全 Space / 現在 Space 優先）・修飾キーリリースで確定の ON/OFF・accept/cancel キー一覧
+- ウィンドウナビゲーションキー（次/前）、cycle mode、cycle の quick/accept/cancel キー、巡回除外アプリ
+- スイッチャーのトリガーキー、現在 Space 固定スコープ、switcher の quick/accept/cancel キー一覧
 - グローバルアクション一覧（スナッププリセットやカスタムアクションとショートカット）
 
 **Permissions** — システム権限の状態表示：
@@ -353,6 +355,28 @@ shortcuts:
   # Cmd+Tab の候補から除外
   switcherExcludedApps:
     - com.tinyspeck.slackmacgap
+
+  nextWindow:
+    key: j
+    modifiers: [cmd, ctrl]
+
+  prevWindow:
+    key: k
+    modifiers: [cmd, ctrl]
+
+  cycle:
+    mode: overlay # direct | overlay
+    quickKeys: "123456789"
+    acceptKeys: [enter]
+    cancelKeys: [esc]
+
+  switcher:
+    trigger:
+      key: tab
+      modifiers: [cmd]
+    quickKeys: "1234567890qwertyuiopasdfghjklzxcvbnm"
+    acceptKeys: [enter]
+    cancelKeys: [esc]
 
   # スナッププリセットのショートカット
   globalActions:

@@ -260,12 +260,10 @@ final class ConfigValidatorTests: XCTestCase {
                 focusBySlot: nil,
                 nextWindow: nil,
                 prevWindow: nil,
+                cycle: nil,
                 switcher: SwitcherShortcutDefinition(
                     trigger: nil,
-                    includeAllSpaces: nil,
-                    prioritizeCurrentSpace: nil,
                     quickKeys: "aabc",
-                    acceptOnModifierRelease: nil,
                     acceptKeys: nil,
                     cancelKeys: nil,
                     sources: nil
@@ -285,12 +283,10 @@ final class ConfigValidatorTests: XCTestCase {
                 focusBySlot: nil,
                 nextWindow: nil,
                 prevWindow: nil,
+                cycle: nil,
                 switcher: SwitcherShortcutDefinition(
                     trigger: nil,
-                    includeAllSpaces: nil,
-                    prioritizeCurrentSpace: nil,
                     quickKeys: "abC!",
-                    acceptOnModifierRelease: nil,
                     acceptKeys: nil,
                     cancelKeys: nil,
                     sources: nil
@@ -312,6 +308,7 @@ final class ConfigValidatorTests: XCTestCase {
                 ],
                 nextWindow: nil,
                 prevWindow: nil,
+                cycle: nil,
                 switcher: nil,
                 globalActions: nil,
                 disabledInApps: nil
@@ -324,6 +321,10 @@ final class ConfigValidatorTests: XCTestCase {
         XCTAssertEqual(resolved.focusBySlot[9], HotkeyDefinition(key: "9", modifiers: ["cmd"]))
         XCTAssertEqual(resolved.nextWindow, HotkeyDefinition(key: "j", modifiers: ["cmd", "ctrl"]))
         XCTAssertEqual(resolved.prevWindow, HotkeyDefinition(key: "k", modifiers: ["cmd", "ctrl"]))
+        XCTAssertEqual(resolved.cycleMode, .direct)
+        XCTAssertEqual(resolved.cycleQuickKeys, "123456789")
+        XCTAssertEqual(resolved.cycleAcceptKeys, ["enter"])
+        XCTAssertEqual(resolved.cycleCancelKeys, ["esc"])
         XCTAssertTrue(resolved.focusBySlotEnabledInApps.isEmpty)
         XCTAssertTrue(resolved.cycleExcludedApps.isEmpty)
         XCTAssertTrue(resolved.switcherExcludedApps.isEmpty)
@@ -335,6 +336,7 @@ final class ConfigValidatorTests: XCTestCase {
                 focusBySlot: nil,
                 nextWindow: nil,
                 prevWindow: nil,
+                cycle: nil,
                 switcher: nil,
                 globalActions: nil,
                 disabledInApps: nil,
@@ -368,12 +370,15 @@ final class ConfigValidatorTests: XCTestCase {
                 ],
                 nextWindow: HotkeyDefinition(key: "left", modifiers: ["cmd", "shift"]),
                 prevWindow: HotkeyDefinition(key: "home", modifiers: ["ctrl"]),
+                cycle: CycleShortcutDefinition(
+                    mode: .overlay,
+                    quickKeys: "123",
+                    acceptKeys: ["enter", "bad-key"],
+                    cancelKeys: ["esc", "bad-key"]
+                ),
                 switcher: SwitcherShortcutDefinition(
                     trigger: HotkeyDefinition(key: "pagedown", modifiers: ["cmd"]),
-                    includeAllSpaces: nil,
-                    prioritizeCurrentSpace: nil,
                     quickKeys: nil,
-                    acceptOnModifierRelease: nil,
                     acceptKeys: ["enter", "bad-key"],
                     cancelKeys: ["esc", "bad-key"],
                     sources: nil
@@ -389,8 +394,33 @@ final class ConfigValidatorTests: XCTestCase {
         assertHasError(errors, contains: "focusBySlot:2 has invalid key")
         assertHasError(errors, contains: "focusBySlot:2 has duplicate modifiers")
         assertHasError(errors, contains: "focusBySlot:3 has invalid modifier")
+        assertHasError(errors, contains: "cycle.acceptKeys contains invalid key")
+        assertHasError(errors, contains: "cycle.cancelKeys contains invalid key")
         assertHasError(errors, contains: "acceptKeys contains invalid key")
         assertHasError(errors, contains: "cancelKeys contains invalid key")
+    }
+
+    func testCycleQuickKeysConflictsWithNavigationAcceptAndCancelKeys() {
+        let config = baseConfig(
+            shortcuts: ShortcutsDefinition(
+                focusBySlot: nil,
+                nextWindow: HotkeyDefinition(key: "j", modifiers: ["cmd", "ctrl"]),
+                prevWindow: HotkeyDefinition(key: "k", modifiers: ["cmd", "ctrl"]),
+                cycle: CycleShortcutDefinition(
+                    mode: .overlay,
+                    quickKeys: "1jk",
+                    acceptKeys: ["enter", "1"],
+                    cancelKeys: ["esc"]
+                ),
+                switcher: nil,
+                globalActions: nil,
+                disabledInApps: nil
+            )
+        )
+
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
+        assertHasError(errors, contains: "cycle.quickKeys must not contain nextWindow/prevWindow keys")
+        assertHasError(errors, contains: "cycle.quickKeys must not overlap cycle.acceptKeys/cancelKeys")
     }
 
     func testGlobalActionValidationAndDisabledInAppsID() {
@@ -399,6 +429,7 @@ final class ConfigValidatorTests: XCTestCase {
                 focusBySlot: nil,
                 nextWindow: nil,
                 prevWindow: nil,
+                cycle: nil,
                 switcher: nil,
                 globalActions: [
                     GlobalActionShortcut(
@@ -485,12 +516,15 @@ final class ConfigValidatorTests: XCTestCase {
                 focusBySlot: [FocusBySlotShortcut(key: "f20", modifiers: ["fn", "cmd"], slot: 1)],
                 nextWindow: HotkeyDefinition(key: "left", modifiers: ["cmd"]),
                 prevWindow: HotkeyDefinition(key: "right", modifiers: ["cmd"]),
+                cycle: CycleShortcutDefinition(
+                    mode: .overlay,
+                    quickKeys: "123456789",
+                    acceptKeys: ["enter", "space"],
+                    cancelKeys: ["esc"]
+                ),
                 switcher: SwitcherShortcutDefinition(
                     trigger: HotkeyDefinition(key: "tab", modifiers: ["cmd"]),
-                    includeAllSpaces: true,
-                    prioritizeCurrentSpace: true,
                     quickKeys: "asdf",
-                    acceptOnModifierRelease: true,
                     acceptKeys: ["enter", "space"],
                     cancelKeys: ["esc"],
                     sources: [.window]

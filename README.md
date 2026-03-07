@@ -54,10 +54,12 @@ All shortcuts are fully configurable in YAML. You can also disable specific shor
 
 A custom switcher triggered by `Cmd+Tab` (configurable):
 
-- Prioritizes windows on the current Space
+- Ignores slots and lists windows on the current Space in MRU order
 - By default, each candidate gets a quick key (`1`, `2`, `3`, `4`, …) for one-keystroke selection
-- Supports `acceptOnModifierRelease` — just release the modifier to confirm
-- Configurable accept/cancel keys, quick key string, and Space scope
+- Releasing the modifier always confirms the current selection
+- Configurable trigger, accept/cancel keys, and quick key string
+
+`Cmd+Ctrl+J/K` uses a separate cycle order: slotted windows stay fixed first, then non-slotted windows follow in observed order for that Space. With `shortcuts.cycle.mode: overlay`, the same order can be shown in the overlay UI instead of switching immediately on each keypress.
 
 ### 4. Window snap actions
 
@@ -120,8 +122,8 @@ A full GUI with sidebar navigation, organized into the following sections:
 
 **Shortcuts** — full shortcut reference:
 - Focus-by-slot keys (`Cmd+1`–`Cmd+9`) with per-app enable/disable status
-- Window navigation keys (next / prev) and cycle-excluded apps
-- Switcher trigger key, scope options (all Spaces / current Space priority), accept-on-modifier-release toggle, and accept/cancel key lists
+- Window navigation keys (next / prev), cycle mode, cycle quick/accept/cancel keys, and cycle-excluded apps
+- Switcher trigger key, current-Space scope, and switcher quick/accept/cancel keys
 - Global actions table (snap presets and custom actions with their shortcuts)
 
 **Permissions** — system permission status:
@@ -355,6 +357,28 @@ shortcuts:
   # Exclude from Cmd+Tab switcher
   switcherExcludedApps:
     - com.tinyspeck.slackmacgap
+
+  nextWindow:
+    key: j
+    modifiers: [cmd, ctrl]
+
+  prevWindow:
+    key: k
+    modifiers: [cmd, ctrl]
+
+  cycle:
+    mode: overlay # direct | overlay
+    quickKeys: "123456789"
+    acceptKeys: [enter]
+    cancelKeys: [esc]
+
+  switcher:
+    trigger:
+      key: tab
+      modifiers: [cmd]
+    quickKeys: "1234567890qwertyuiopasdfghjklzxcvbnm"
+    acceptKeys: [enter]
+    cancelKeys: [esc]
 
   # Snap preset shortcuts
   globalActions:

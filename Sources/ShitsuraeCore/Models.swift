@@ -61,6 +61,7 @@ public struct ShortcutsDefinition: Codable, Equatable {
     public let focusBySlot: [FocusBySlotShortcut]?
     public let nextWindow: HotkeyDefinition?
     public let prevWindow: HotkeyDefinition?
+    public let cycle: CycleShortcutDefinition?
     public let switcher: SwitcherShortcutDefinition?
     public let globalActions: [GlobalActionShortcut]?
     public let disabledInApps: [String: [String]]?
@@ -72,6 +73,7 @@ public struct ShortcutsDefinition: Codable, Equatable {
         focusBySlot: [FocusBySlotShortcut]?,
         nextWindow: HotkeyDefinition?,
         prevWindow: HotkeyDefinition?,
+        cycle: CycleShortcutDefinition? = nil,
         switcher: SwitcherShortcutDefinition?,
         globalActions: [GlobalActionShortcut]?,
         disabledInApps: [String: [String]]?,
@@ -82,6 +84,7 @@ public struct ShortcutsDefinition: Codable, Equatable {
         self.focusBySlot = focusBySlot
         self.nextWindow = nextWindow
         self.prevWindow = prevWindow
+        self.cycle = cycle
         self.switcher = switcher
         self.globalActions = globalActions
         self.disabledInApps = disabledInApps
@@ -241,15 +244,50 @@ public struct HotkeyDefinition: Codable, Equatable {
     }
 }
 
+public struct CycleShortcutDefinition: Codable, Equatable {
+    public let mode: CyclePresentationMode?
+    public let quickKeys: String?
+    public let acceptKeys: [String]?
+    public let cancelKeys: [String]?
+
+    public init(
+        mode: CyclePresentationMode? = nil,
+        quickKeys: String? = nil,
+        acceptKeys: [String]? = nil,
+        cancelKeys: [String]? = nil
+    ) {
+        self.mode = mode
+        self.quickKeys = quickKeys
+        self.acceptKeys = acceptKeys
+        self.cancelKeys = cancelKeys
+    }
+}
+
+public enum CyclePresentationMode: String, Codable, CaseIterable {
+    case direct
+    case overlay
+}
+
 public struct SwitcherShortcutDefinition: Codable, Equatable {
     public let trigger: HotkeyDefinition?
-    public let includeAllSpaces: Bool?
-    public let prioritizeCurrentSpace: Bool?
     public let quickKeys: String?
-    public let acceptOnModifierRelease: Bool?
     public let acceptKeys: [String]?
     public let cancelKeys: [String]?
     public let sources: [WindowSource]?
+
+    public init(
+        trigger: HotkeyDefinition? = nil,
+        quickKeys: String? = nil,
+        acceptKeys: [String]? = nil,
+        cancelKeys: [String]? = nil,
+        sources: [WindowSource]? = nil
+    ) {
+        self.trigger = trigger
+        self.quickKeys = quickKeys
+        self.acceptKeys = acceptKeys
+        self.cancelKeys = cancelKeys
+        self.sources = sources
+    }
 }
 
 public struct GlobalActionShortcut: Codable, Equatable {
@@ -344,11 +382,12 @@ public struct ResolvedShortcuts: Equatable {
     public let switcherExcludedApps: Set<String>
     public let nextWindow: HotkeyDefinition
     public let prevWindow: HotkeyDefinition
+    public let cycleMode: CyclePresentationMode
+    public let cycleQuickKeys: String
+    public let cycleAcceptKeys: [String]
+    public let cycleCancelKeys: [String]
     public let switcherTrigger: HotkeyDefinition
-    public let includeAllSpaces: Bool
-    public let prioritizeCurrentSpace: Bool
     public let quickKeys: String
-    public let acceptOnModifierRelease: Bool
     public let acceptKeys: [String]
     public let cancelKeys: [String]
     public let sources: [WindowSource]
@@ -373,12 +412,15 @@ public struct ResolvedShortcuts: Equatable {
         nextWindow = shortcuts?.nextWindow ?? HotkeyDefinition(key: "j", modifiers: ["cmd", "ctrl"])
         prevWindow = shortcuts?.prevWindow ?? HotkeyDefinition(key: "k", modifiers: ["cmd", "ctrl"])
 
+        let cycle = shortcuts?.cycle
+        cycleMode = cycle?.mode ?? .direct
+        cycleQuickKeys = cycle?.quickKeys ?? "123456789"
+        cycleAcceptKeys = cycle?.acceptKeys ?? ["enter"]
+        cycleCancelKeys = cycle?.cancelKeys ?? ["esc"]
+
         let switcher = shortcuts?.switcher
         switcherTrigger = switcher?.trigger ?? HotkeyDefinition(key: "tab", modifiers: ["cmd"])
-        includeAllSpaces = switcher?.includeAllSpaces ?? false
-        prioritizeCurrentSpace = switcher?.prioritizeCurrentSpace ?? true
         quickKeys = switcher?.quickKeys ?? "1234567890qwertyuiopasdfghjklzxcvbnm"
-        acceptOnModifierRelease = switcher?.acceptOnModifierRelease ?? true
         acceptKeys = switcher?.acceptKeys ?? ["enter"]
         cancelKeys = switcher?.cancelKeys ?? ["esc"]
         sources = switcher?.sources ?? [.window]

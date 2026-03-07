@@ -982,6 +982,26 @@ private struct ShortcutsView: View {
                         Text("Prev Window")
                         hotkeyLabel(resolved.prevWindow)
                     }
+                    GridRow {
+                        Text("Cycle Mode")
+                        Text(resolved.cycleMode.rawValue)
+                            .font(.system(.body, design: .monospaced))
+                    }
+                    GridRow {
+                        Text("Cycle Quick Keys")
+                        Text(resolved.cycleQuickKeys)
+                            .font(.system(.body, design: .monospaced))
+                    }
+                    GridRow {
+                        Text("Cycle Accept Keys")
+                        Text(resolved.cycleAcceptKeys.joined(separator: ", "))
+                            .font(.system(.body, design: .monospaced))
+                    }
+                    GridRow {
+                        Text("Cycle Cancel Keys")
+                        Text(resolved.cycleCancelKeys.joined(separator: ", "))
+                            .font(.system(.body, design: .monospaced))
+                    }
                 }
 
                 if !resolved.cycleExcludedApps.isEmpty {
@@ -1012,16 +1032,13 @@ private struct ShortcutsView: View {
                         hotkeyLabel(resolved.switcherTrigger)
                     }
                     GridRow {
-                        Text("Include All Spaces")
-                        boolBadge(resolved.includeAllSpaces)
+                        Text("Scope")
+                        Text("Current Space only")
                     }
                     GridRow {
-                        Text("Prioritize Current Space")
-                        boolBadge(resolved.prioritizeCurrentSpace)
-                    }
-                    GridRow {
-                        Text("Accept on Modifier Release")
-                        boolBadge(resolved.acceptOnModifierRelease)
+                        Text("Quick Keys")
+                        Text(resolved.quickKeys)
+                            .font(.system(.body, design: .monospaced))
                     }
                     GridRow {
                         Text("Accept Keys")

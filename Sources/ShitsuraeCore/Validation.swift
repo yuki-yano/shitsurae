@@ -250,6 +250,66 @@ public enum ConfigValidator {
             validateGlobalAction(action.action, sourcePath: sourcePath, errors: &errors)
         }
 
+        if !isQuickKeysValid(shortcuts.cycleQuickKeys) {
+            errors.append(
+                ValidateErrorItem(
+                    code: .validationError,
+                    path: sourcePath,
+                    message: "cycle.quickKeys must be [a-z0-9] with no duplicate characters"
+                )
+            )
+        }
+
+        for key in shortcuts.cycleAcceptKeys where !isKeyValid(key) {
+            errors.append(
+                ValidateErrorItem(
+                    code: .validationError,
+                    path: sourcePath,
+                    message: "cycle.acceptKeys contains invalid key: \(key)"
+                )
+            )
+        }
+
+        for key in shortcuts.cycleCancelKeys where !isKeyValid(key) {
+            errors.append(
+                ValidateErrorItem(
+                    code: .validationError,
+                    path: sourcePath,
+                    message: "cycle.cancelKeys contains invalid key: \(key)"
+                )
+            )
+        }
+
+        let cycleQuickKeySet = Set(shortcuts.cycleQuickKeys.lowercased().map(String.init))
+        let navigationKeys = Set([shortcuts.nextWindow.key.lowercased(), shortcuts.prevWindow.key.lowercased()])
+        if !cycleQuickKeySet.isDisjoint(with: navigationKeys) {
+            errors.append(
+                ValidateErrorItem(
+                    code: .validationError,
+                    path: sourcePath,
+                    message: "cycle.quickKeys must not contain nextWindow/prevWindow keys"
+                )
+            )
+        }
+
+        let cycleCommandKeySet = Set(
+            shortcuts.cycleAcceptKeys
+                .map { $0.lowercased() }
+                .filter { $0.count == 1 }
+            + shortcuts.cycleCancelKeys
+                .map { $0.lowercased() }
+                .filter { $0.count == 1 }
+        )
+        if !cycleQuickKeySet.isDisjoint(with: cycleCommandKeySet) {
+            errors.append(
+                ValidateErrorItem(
+                    code: .validationError,
+                    path: sourcePath,
+                    message: "cycle.quickKeys must not overlap cycle.acceptKeys/cancelKeys"
+                )
+            )
+        }
+
         if !isQuickKeysValid(shortcuts.quickKeys) {
             errors.append(
                 ValidateErrorItem(

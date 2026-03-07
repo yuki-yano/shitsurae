@@ -552,7 +552,7 @@ public final class CommandService {
         }
 
         let shortcuts = loaded?.config.resolvedShortcuts ?? ResolvedShortcuts(from: nil)
-        let includeAllSpaces = includeAllSpacesOverride ?? shortcuts.includeAllSpaces
+        let includeAllSpaces = includeAllSpacesOverride ?? false
         let quickKeys = Array(shortcuts.quickKeys)
         let ignoreFocusRules = loaded?.config.ignore?.focus
 
@@ -605,7 +605,7 @@ public final class CommandService {
             )
         }
 
-        let ordered = orderCandidates(internalCandidates, prioritizeCurrentSpace: shortcuts.prioritizeCurrentSpace)
+        let ordered = orderCandidates(internalCandidates, prioritizeCurrentSpace: true)
         let keyed = ordered.enumerated().map { index, item in
             let quickKey = index < quickKeys.count ? String(quickKeys[index]) : nil
             return SwitcherCandidate(

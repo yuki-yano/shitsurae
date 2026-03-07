@@ -416,6 +416,35 @@
         }
       }
     },
+    "cyclePresentationMode": {
+      "type": "string",
+      "enum": ["direct", "overlay"]
+    },
+    "cycleShortcutDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/cyclePresentationMode"
+        },
+        "quickKeys": {
+          "type": "string",
+          "minLength": 1
+        },
+        "acceptKeys": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/keyName"
+          }
+        },
+        "cancelKeys": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/keyName"
+          }
+        }
+      }
+    },
     "switcherShortcutDefinition": {
       "type": "object",
       "additionalProperties": false,
@@ -423,18 +452,9 @@
         "trigger": {
           "$ref": "#/$defs/hotkeyDefinition"
         },
-        "includeAllSpaces": {
-          "type": "boolean"
-        },
-        "prioritizeCurrentSpace": {
-          "type": "boolean"
-        },
         "quickKeys": {
           "type": "string",
           "minLength": 1
-        },
-        "acceptOnModifierRelease": {
-          "type": "boolean"
         },
         "acceptKeys": {
           "type": "array",
@@ -517,6 +537,9 @@
         },
         "prevWindow": {
           "$ref": "#/$defs/hotkeyDefinition"
+        },
+        "cycle": {
+          "$ref": "#/$defs/cycleShortcutDefinition"
         },
         "switcher": {
           "$ref": "#/$defs/switcherShortcutDefinition"

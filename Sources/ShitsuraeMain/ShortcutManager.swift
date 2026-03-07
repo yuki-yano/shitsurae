@@ -43,15 +43,25 @@ final class ShortcutManager {
         }
     }
 
-    private struct SwitcherSession {
-        let shortcuts: ResolvedShortcuts
+    private enum OverlaySessionKind {
+        case switcher
+        case cycle
+    }
+
+    private struct OverlaySession {
+        let kind: OverlaySessionKind
         var candidates: [SwitcherCandidate]
         var selectedIndex: Int
+        let quickKeys: String
+        let acceptKeys: [String]
+        let cancelKeys: [String]
+        var holdModifiers: Set<String>
     }
 
     private let commandService: CommandService
     private let configLoader = ConfigLoader()
     private let logger = ShitsuraeLogger()
+    private let stateStore = RuntimeStateStore()
 
     private var hotKeyPressedEventHandlerRef: EventHandlerRef?
     private var hotKeyReleasedEventHandlerRef: EventHandlerRef?
@@ -67,18 +77,17 @@ final class ShortcutManager {
     private let overlayController = SwitcherOverlayController()
     private var overlaySelectionObserver: NSObjectProtocol?
     private var activeSpaceObserver: NSObjectProtocol?
-    private var switcherSession: SwitcherSession?
-    private var cycleIndex: Int = -1
-    private var cycleCandidates: [SwitcherCandidate] = []
-    private var lastCycleAt: Date?
+    private var overlaySession: OverlaySession?
+    private var currentIgnoreFocusRules: IgnoreRuleSet?
+    private var spaceCycleStates: [Int: SpaceCycleState] = [:]
     private var lastActiveSpaceChangeAt: Date?
-    private let cycleSessionTimeout: TimeInterval = 1.5
     private let activeSpaceSettleDelay: TimeInterval = 0.15
     private var lastCarbonShortcutID: String?
     private var lastCarbonShortcutAt: Date?
     private let eventTapDuplicateThreshold: TimeInterval = 0.12
-    private var lastEventTapSwitcherAdvanceAt: Date?
-    private let switcherAdvanceDedupeThreshold: TimeInterval = 0.12
+    private var lastEventTapOverlayAdvanceShortcutID: String?
+    private var lastEventTapOverlayAdvanceAt: Date?
+    private let overlayAdvanceDedupeThreshold: TimeInterval = 0.12
 
     private(set) var currentShortcuts = ResolvedShortcuts(from: nil)
 
@@ -93,7 +102,7 @@ final class ShortcutManager {
             guard let candidateID = notification.userInfo?[Self.switcherOverlaySelectionCandidateIDKey] as? String else {
                 return
             }
-            managerBox.manager?.acceptSwitcher(candidateID: candidateID)
+            managerBox.manager?.acceptOverlay(candidateID: candidateID)
         }
     }
 
@@ -115,13 +124,14 @@ final class ShortcutManager {
         stopEventTap()
         stopModifierReleasePolling()
         restoreNativeSwitcherHotKeys()
-        switcherSession = nil
+        overlaySession = nil
         overlayController.hide()
         resetCycleState()
         lastActiveSpaceChangeAt = nil
         lastCarbonShortcutID = nil
         lastCarbonShortcutAt = nil
-        lastEventTapSwitcherAdvanceAt = nil
+        lastEventTapOverlayAdvanceShortcutID = nil
+        lastEventTapOverlayAdvanceAt = nil
     }
 
     func reloadConfiguration() {
@@ -132,9 +142,11 @@ final class ShortcutManager {
         do {
             let loaded = try configLoader.loadFromDefaultDirectory()
             currentShortcuts = loaded.config.resolvedShortcuts
+            currentIgnoreFocusRules = loaded.config.ignore?.focus
             overlayController.setShowsWindowThumbnails(loaded.config.overlay?.showThumbnails == true)
         } catch {
             currentShortcuts = ResolvedShortcuts(from: nil)
+            currentIgnoreFocusRules = nil
             overlayController.setShowsWindowThumbnails(false)
         }
 
@@ -459,7 +471,7 @@ final class ShortcutManager {
             logger.log(level: "error", event: "shortcut.pressed.unknown")
             return noErr
         }
-        if shouldSuppressCarbonSwitcherAdvance(for: action) {
+        if shouldSuppressCarbonOverlayAdvance(for: action) {
             logger.log(
                 event: "shortcut.pressed.suppressed",
                 fields: [
@@ -513,19 +525,27 @@ final class ShortcutManager {
 
         switch action {
         case let .focus(slot):
+            cancelOverlay()
             resetCycleState()
             _ = commandService.focus(slot: slot)
         case .nextWindow:
-            scheduleCycleFocus(forward: true)
+            if currentShortcuts.cycleMode == .direct {
+                cancelOverlay()
+            }
+            scheduleCycleFocus(forward: true, action: action)
         case .prevWindow:
-            scheduleCycleFocus(forward: false)
+            if currentShortcuts.cycleMode == .direct {
+                cancelOverlay()
+            }
+            scheduleCycleFocus(forward: false, action: action)
         case .switcher:
             resetCycleState()
-            presentOrAdvanceSwitcher(forward: true)
+            presentOrAdvanceSwitcher(forward: true, action: action)
         case .switcherReverse:
             resetCycleState()
-            presentOrAdvanceSwitcher(forward: false)
+            presentOrAdvanceSwitcher(forward: false, action: action)
         case let .globalAction(index):
+            cancelOverlay()
             resetCycleState()
             executeGlobalAction(index: index)
         }
@@ -537,9 +557,9 @@ final class ShortcutManager {
         }
 
         switch action {
-        case .switcher, .switcherReverse:
-            handleSwitcherTriggerReleased()
-        case .focus, .nextWindow, .prevWindow, .globalAction:
+        case .nextWindow, .prevWindow, .switcher, .switcherReverse:
+            handleOverlayTriggerReleased(action: action)
+        case .focus, .globalAction:
             return
         }
     }
@@ -557,98 +577,130 @@ final class ShortcutManager {
         )
     }
 
-    private func scheduleCycleFocus(forward: Bool) {
+    private func scheduleCycleFocus(forward: Bool, action: HotkeyAction) {
         let managerBox = WeakShortcutManagerBox(manager: self)
         DispatchQueue.main.async {
-            managerBox.manager?.executeScheduledCycleFocus(forward: forward)
+            managerBox.manager?.executeScheduledCycleFocus(forward: forward, action: action)
         }
     }
 
-    private func executeScheduledCycleFocus(forward: Bool) {
+    private func executeScheduledCycleFocus(forward: Bool, action: HotkeyAction) {
         let now = Date()
-        let delay = CycleFocusTiming(
-            hasCachedCandidates: !cycleCandidates.isEmpty,
-            lastCycleAt: lastCycleAt,
-            lastActiveSpaceChangeAt: lastActiveSpaceChangeAt
-        ).dispatchDelay(now: now, activeSpaceSettleDelay: activeSpaceSettleDelay)
+        let delay = CycleFocusTiming(lastActiveSpaceChangeAt: lastActiveSpaceChangeAt)
+            .dispatchDelay(now: now, activeSpaceSettleDelay: activeSpaceSettleDelay)
 
         guard delay > 0 else {
-            cycleFocus(forward: forward)
+            cycleFocus(forward: forward, action: action)
             return
         }
 
         let managerBox = WeakShortcutManagerBox(manager: self)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            managerBox.manager?.executeScheduledCycleFocus(forward: forward)
+            managerBox.manager?.executeScheduledCycleFocus(forward: forward, action: action)
         }
     }
 
-    private func cycleFocus(forward: Bool) {
-        let now = Date()
-
-        if shouldRefreshCycleCandidates(now: now) {
-            cycleCandidates = fetchSwitcherCandidates(
-                includeAllSpaces: currentShortcuts.includeAllSpaces,
-                excludedBundleIDs: currentShortcuts.cycleExcludedApps
-            )
-            cycleIndex = -1
+    private func cycleFocus(forward: Bool, action: HotkeyAction) {
+        if currentShortcuts.cycleMode == .overlay {
+            presentOrAdvanceCycleOverlay(forward: forward, action: action)
+            return
         }
 
-        let candidates = cycleCandidates
+        let candidates = buildCycleCandidatesForCurrentSpace()
         guard !candidates.isEmpty else {
             logger.log(level: "error", event: "cycle.candidates.empty")
             return
         }
 
-        if cycleIndex < 0 || cycleIndex >= candidates.count {
-            cycleIndex = initialSelectionIndex(candidates: candidates, forward: forward)
-        } else {
-            cycleIndex = forward
-                ? (cycleIndex + 1) % candidates.count
-                : (cycleIndex - 1 + candidates.count) % candidates.count
-        }
-
-        let candidate = candidates[cycleIndex]
+        let selectedIndex = initialSwitcherSelectionIndex(candidates: candidates, forward: forward)
+        let candidate = candidates[selectedIndex]
         logger.log(
             event: "cycle.select",
             fields: [
                 "forward": forward,
-                "selectedIndex": cycleIndex,
+                "selectedIndex": selectedIndex,
                 "candidateID": candidate.id,
                 "candidateBundleID": candidate.bundleID ?? "",
             ]
         )
-        lastCycleAt = now
         activate(candidate: candidate)
     }
 
-    private func presentOrAdvanceSwitcher(forward: Bool) {
-        if var session = switcherSession {
+    private func presentOrAdvanceCycleOverlay(forward: Bool, action: HotkeyAction) {
+        if var session = overlaySession, session.kind == .cycle {
             guard !session.candidates.isEmpty else { return }
             session.selectedIndex = forward
                 ? (session.selectedIndex + 1) % session.candidates.count
                 : (session.selectedIndex - 1 + session.candidates.count) % session.candidates.count
-            switcherSession = session
+            session.holdModifiers = holdModifiers(for: action)
+            overlaySession = session
             overlayController.show(candidates: session.candidates, selectedIndex: session.selectedIndex)
             return
         }
 
-        let candidates = fetchSwitcherCandidates(
-            includeAllSpaces: currentShortcuts.includeAllSpaces,
-            excludedBundleIDs: currentShortcuts.switcherExcludedApps
+        if overlaySession != nil {
+            cancelOverlay()
+        }
+
+        let candidates = buildCycleCandidatesForCurrentSpace()
+        guard !candidates.isEmpty else {
+            logger.log(level: "error", event: "cycle.candidates.empty")
+            return
+        }
+
+        let initialIndex = initialSwitcherSelectionIndex(candidates: candidates, forward: forward)
+        overlaySession = OverlaySession(
+            kind: .cycle,
+            candidates: candidates,
+            selectedIndex: initialIndex,
+            quickKeys: currentShortcuts.cycleQuickKeys,
+            acceptKeys: currentShortcuts.cycleAcceptKeys,
+            cancelKeys: currentShortcuts.cycleCancelKeys,
+            holdModifiers: holdModifiers(for: action)
         )
+        logger.log(
+            event: "cycle.present",
+            fields: [
+                "candidateCount": candidates.count,
+                "selectedIndex": initialIndex,
+                "selectedID": candidates[initialIndex].id,
+            ]
+        )
+        overlayController.show(candidates: candidates, selectedIndex: initialIndex)
+    }
+
+    private func presentOrAdvanceSwitcher(forward: Bool, action: HotkeyAction) {
+        if var session = overlaySession, session.kind == .switcher {
+            guard !session.candidates.isEmpty else { return }
+            session.selectedIndex = forward
+                ? (session.selectedIndex + 1) % session.candidates.count
+                : (session.selectedIndex - 1 + session.candidates.count) % session.candidates.count
+            session.holdModifiers = holdModifiers(for: action)
+            overlaySession = session
+            overlayController.show(candidates: session.candidates, selectedIndex: session.selectedIndex)
+            return
+        }
+
+        if overlaySession != nil {
+            cancelOverlay()
+        }
+
+        let candidates = buildSwitcherCandidatesForCurrentSpace()
         guard !candidates.isEmpty else {
             logger.log(level: "error", event: "switcher.candidates.empty")
             return
         }
 
         let initialIndex = initialSwitcherSelectionIndex(candidates: candidates, forward: forward)
-        let session = SwitcherSession(
-            shortcuts: currentShortcuts,
+        overlaySession = OverlaySession(
+            kind: .switcher,
             candidates: candidates,
-            selectedIndex: initialIndex
+            selectedIndex: initialIndex,
+            quickKeys: currentShortcuts.quickKeys,
+            acceptKeys: currentShortcuts.acceptKeys,
+            cancelKeys: currentShortcuts.cancelKeys,
+            holdModifiers: holdModifiers(for: action)
         )
-        switcherSession = session
         logger.log(
             event: "switcher.present",
             fields: [
@@ -669,8 +721,8 @@ final class ShortcutManager {
         }
 
         if type == .keyDown,
-           switcherSession != nil,
-           handleSwitcherKeyDown(event)
+           overlaySession != nil,
+           handleOverlayKeyDown(event)
         {
             return nil
         }
@@ -695,8 +747,8 @@ final class ShortcutManager {
         }
 
         if type == .flagsChanged,
-           switcherSession != nil,
-           handleSwitcherFlagsChanged(event)
+           overlaySession != nil,
+           handleOverlayFlagsChanged(event)
         {
             return nil
         }
@@ -785,81 +837,106 @@ final class ShortcutManager {
         return Date().timeIntervalSince(lastCarbonShortcutAt) <= eventTapDuplicateThreshold
     }
 
-    private func handleSwitcherKeyDown(_ event: CGEvent) -> Bool {
-        guard var session = switcherSession else { return false }
+    private func handleOverlayKeyDown(_ event: CGEvent) -> Bool {
+        guard var session = overlaySession else { return false }
 
         let key = normalizedKey(from: event)
         let flags = event.flags
         let isAutoRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
 
-        if key == "tab" {
-            // Avoid accidental initial reordering caused by key-repeat after opening the switcher.
-            if isAutoRepeat {
+        switch session.kind {
+        case .switcher:
+            if key == "tab" {
+                if isAutoRepeat {
+                    return true
+                }
+
+                if isRecentlyHandledByCarbon(shortcutID: "switcher") {
+                    return true
+                }
+
+                if flags.contains(.maskShift) {
+                    session.selectedIndex = (session.selectedIndex - 1 + session.candidates.count) % session.candidates.count
+                } else {
+                    session.selectedIndex = (session.selectedIndex + 1) % session.candidates.count
+                }
+
+                overlaySession = session
+                recordEventTapOverlayAdvance(shortcutID: "switcher")
+                overlayController.show(candidates: session.candidates, selectedIndex: session.selectedIndex)
                 return true
             }
+        case .cycle:
+            if let action = actionForEventTap(event) {
+                switch action {
+                case .nextWindow, .prevWindow:
+                    if isAutoRepeat {
+                        return true
+                    }
 
-            if isRecentlyHandledByCarbon(shortcutID: "switcher") {
-                return true
+                    if isRecentlyHandledByCarbon(shortcutID: action.shortcutID) {
+                        return true
+                    }
+
+                    let forward = if case .nextWindow = action { true } else { false }
+                    session.selectedIndex = forward
+                        ? (session.selectedIndex + 1) % session.candidates.count
+                        : (session.selectedIndex - 1 + session.candidates.count) % session.candidates.count
+                    session.holdModifiers = holdModifiers(for: action)
+                    overlaySession = session
+                    recordEventTapOverlayAdvance(shortcutID: action.shortcutID)
+                    overlayController.show(candidates: session.candidates, selectedIndex: session.selectedIndex)
+                    return true
+                case .focus, .switcher, .switcherReverse, .globalAction:
+                    break
+                }
             }
+        }
 
-            if flags.contains(.maskShift) {
-                session.selectedIndex = (session.selectedIndex - 1 + session.candidates.count) % session.candidates.count
-            } else {
-                session.selectedIndex = (session.selectedIndex + 1) % session.candidates.count
-            }
-
-            switcherSession = session
-            lastEventTapSwitcherAdvanceAt = Date()
-            overlayController.show(candidates: session.candidates, selectedIndex: session.selectedIndex)
+        if session.cancelKeys.contains(key) {
+            cancelOverlay()
             return true
         }
 
-        if session.shortcuts.cancelKeys.contains(key) {
-            cancelSwitcher()
-            return true
-        }
-
-        if session.shortcuts.acceptKeys.contains(key) {
-            acceptSwitcher()
+        if session.acceptKeys.contains(key) {
+            acceptOverlay()
             return true
         }
 
         if let quickIndex = session.candidates.firstIndex(where: { $0.quickKey == key }) {
             session.selectedIndex = quickIndex
-            switcherSession = session
-            acceptSwitcher()
+            overlaySession = session
+            acceptOverlay()
             return true
         }
 
         return false
     }
 
-    private func handleSwitcherFlagsChanged(_ event: CGEvent) -> Bool {
-        guard let session = switcherSession,
-              session.shortcuts.acceptOnModifierRelease
-        else {
+    private func handleOverlayFlagsChanged(_ event: CGEvent) -> Bool {
+        guard let session = overlaySession else {
             return false
         }
 
-        if !isSwitcherHoldModifierActive(flags: event.flags) {
-            acceptSwitcher()
+        if !areHoldModifiersActive(session.holdModifiers, flags: event.flags) {
+            acceptOverlay()
             return true
         }
 
         return false
     }
 
-    private func acceptSwitcher() {
-        guard let session = switcherSession,
+    private func acceptOverlay() {
+        guard let session = overlaySession,
               session.candidates.indices.contains(session.selectedIndex)
         else {
-            cancelSwitcher()
+            cancelOverlay()
             return
         }
 
         let candidate = session.candidates[session.selectedIndex]
         logger.log(
-            event: "switcher.accept",
+            event: session.kind == .switcher ? "switcher.accept" : "cycle.accept",
             fields: [
                 "selectedIndex": session.selectedIndex,
                 "selectedID": candidate.id,
@@ -867,37 +944,41 @@ final class ShortcutManager {
             ]
         )
         activate(candidate: candidate)
-        switcherSession = nil
+        overlaySession = nil
         stopModifierReleasePolling()
         overlayController.hide()
     }
 
-    private func acceptSwitcher(candidateID: String) {
-        guard let session = switcherSession,
+    private func acceptOverlay(candidateID: String) {
+        guard let session = overlaySession,
               let selectedIndex = session.candidates.firstIndex(where: { $0.id == candidateID })
         else {
-            cancelSwitcher()
+            cancelOverlay()
             return
         }
 
-        switcherSession = SwitcherSession(
-            shortcuts: session.shortcuts,
+        overlaySession = OverlaySession(
+            kind: session.kind,
             candidates: session.candidates,
-            selectedIndex: selectedIndex
+            selectedIndex: selectedIndex,
+            quickKeys: session.quickKeys,
+            acceptKeys: session.acceptKeys,
+            cancelKeys: session.cancelKeys,
+            holdModifiers: session.holdModifiers
         )
-        acceptSwitcher()
+        acceptOverlay()
     }
 
-    private func cancelSwitcher() {
-        switcherSession = nil
+    private func cancelOverlay() {
+        overlaySession = nil
         stopModifierReleasePolling()
         overlayController.hide()
         resetCycleState()
     }
 
-    private func handleSwitcherTriggerReleased() {
-        guard switcherSession != nil,
-              currentShortcuts.acceptOnModifierRelease
+    private func handleOverlayTriggerReleased(action: HotkeyAction) {
+        guard let session = overlaySession,
+              session.kind == overlayKind(for: action)
         else {
             return
         }
@@ -906,8 +987,8 @@ final class ShortcutManager {
             return
         }
 
-        if !isSwitcherHoldModifierActive(flags: CGEventSource.flagsState(.combinedSessionState)) {
-            acceptSwitcher()
+        if !areHoldModifiersActive(session.holdModifiers, flags: CGEventSource.flagsState(.combinedSessionState)) {
+            acceptOverlay()
             return
         }
 
@@ -933,70 +1014,107 @@ final class ShortcutManager {
     }
 
     private func pollModifierRelease() {
-        guard switcherSession != nil else {
+        guard let session = overlaySession else {
             stopModifierReleasePolling()
             return
         }
 
-        if !isSwitcherHoldModifierActive(flags: CGEventSource.flagsState(.combinedSessionState)) {
-            acceptSwitcher()
+        if !areHoldModifiersActive(session.holdModifiers, flags: CGEventSource.flagsState(.combinedSessionState)) {
+            acceptOverlay()
         }
     }
 
-    private func shouldSuppressCarbonSwitcherAdvance(for action: HotkeyAction) -> Bool {
+    private func shouldSuppressCarbonOverlayAdvance(for action: HotkeyAction) -> Bool {
         switch action {
-        case .switcher, .switcherReverse:
-            guard let lastEventTapSwitcherAdvanceAt else {
+        case .nextWindow, .prevWindow, .switcher, .switcherReverse:
+            guard lastEventTapOverlayAdvanceShortcutID == action.shortcutID,
+                  let lastEventTapOverlayAdvanceAt
+            else {
                 return false
             }
-            return Date().timeIntervalSince(lastEventTapSwitcherAdvanceAt) <= switcherAdvanceDedupeThreshold
-        case .focus, .nextWindow, .prevWindow, .globalAction:
+            return Date().timeIntervalSince(lastEventTapOverlayAdvanceAt) <= overlayAdvanceDedupeThreshold
+        case .focus, .globalAction:
             return false
         }
     }
 
-    private func isSwitcherHoldModifierActive(flags: CGEventFlags) -> Bool {
-        guard let holdModifier = switcherHoldModifier else {
-            return false
-        }
-
-        switch holdModifier {
-        case "cmd":
-            return flags.contains(.maskCommand)
-        case "shift":
-            return flags.contains(.maskShift)
-        case "ctrl":
-            return flags.contains(.maskControl)
-        case "alt":
-            return flags.contains(.maskAlternate)
-        case "fn":
-            return flags.contains(.maskSecondaryFn)
-        default:
-            return false
-        }
+    private func recordEventTapOverlayAdvance(shortcutID: String) {
+        lastEventTapOverlayAdvanceShortcutID = shortcutID
+        lastEventTapOverlayAdvanceAt = Date()
     }
 
-    private var switcherHoldModifier: String? {
-        let modifiers = normalizedModifiers(currentShortcuts.switcherTrigger.modifiers)
-        if modifiers.contains("cmd") { return "cmd" }
-        if modifiers.contains("alt") { return "alt" }
-        if modifiers.contains("ctrl") { return "ctrl" }
-        if modifiers.contains("shift") { return "shift" }
-        if modifiers.contains("fn") { return "fn" }
-        return nil
+    private func areHoldModifiersActive(_ modifiers: Set<String>, flags: CGEventFlags) -> Bool {
+        for modifier in modifiers {
+            switch modifier {
+            case "cmd":
+                if !flags.contains(.maskCommand) { return false }
+            case "shift":
+                if !flags.contains(.maskShift) { return false }
+            case "ctrl":
+                if !flags.contains(.maskControl) { return false }
+            case "alt":
+                if !flags.contains(.maskAlternate) { return false }
+            case "fn":
+                if !flags.contains(.maskSecondaryFn) { return false }
+            default:
+                return false
+            }
+        }
+        return true
     }
 
-    private func fetchSwitcherCandidates(includeAllSpaces: Bool?, excludedBundleIDs: Set<String>) -> [SwitcherCandidate] {
-        let result = commandService.switcherList(json: true, includeAllSpacesOverride: includeAllSpaces)
-        guard result.exitCode == 0,
-              let data = result.stdout.data(using: .utf8),
-              let payload = try? JSONDecoder().decode(SwitcherListJSON.self, from: data)
-        else {
+    private func holdModifiers(for action: HotkeyAction) -> Set<String> {
+        switch action {
+        case .nextWindow:
+            return normalizedModifiers(currentShortcuts.nextWindow.modifiers)
+        case .prevWindow:
+            return normalizedModifiers(currentShortcuts.prevWindow.modifiers)
+        case .switcher:
+            return normalizedModifiers(currentShortcuts.switcherTrigger.modifiers)
+        case .switcherReverse:
+            return Set(["cmd", "shift"])
+        case .focus, .globalAction:
             return []
         }
-        return ShortcutCandidateFilter.filter(
-            candidates: payload.candidates,
-            excludedBundleIDs: excludedBundleIDs,
+    }
+
+    private func overlayKind(for action: HotkeyAction) -> OverlaySessionKind? {
+        switch action {
+        case .nextWindow, .prevWindow:
+            return .cycle
+        case .switcher, .switcherReverse:
+            return .switcher
+        case .focus, .globalAction:
+            return nil
+        }
+    }
+
+    private func buildCycleCandidatesForCurrentSpace() -> [SwitcherCandidate] {
+        let currentSpaceID = WindowQueryService.focusedWindow()?.spaceID
+        let result = ShortcutCandidateOrdering.cycleCandidates(
+            windows: WindowQueryService.listWindows(),
+            currentSpaceID: currentSpaceID,
+            slotEntries: stateStore.load().slots,
+            ignoreFocusRules: currentIgnoreFocusRules,
+            excludedBundleIDs: currentShortcuts.cycleExcludedApps,
+            quickKeys: currentShortcuts.cycleQuickKeys,
+            state: currentSpaceID.flatMap { spaceCycleStates[$0] }
+        )
+
+        if let state = result.state {
+            spaceCycleStates[state.spaceID] = state
+        }
+
+        return result.candidates
+    }
+
+    private func buildSwitcherCandidatesForCurrentSpace() -> [SwitcherCandidate] {
+        ShortcutCandidateOrdering.switcherCandidates(
+            windows: WindowQueryService.listWindows(),
+            currentSpaceID: WindowQueryService.focusedWindow()?.spaceID,
+            slotEntries: stateStore.load().slots,
+            ignoreFocusRules: currentIgnoreFocusRules,
+            excludedBundleIDs: currentShortcuts.switcherExcludedApps,
             quickKeys: currentShortcuts.quickKeys
         )
     }
@@ -1112,65 +1230,22 @@ final class ShortcutManager {
         _ = commandService.windowMove(x: .pt(relativeX), y: .pt(relativeY))
     }
 
-    private func shouldRefreshCycleCandidates(now: Date) -> Bool {
-        CycleFocusTiming(
-            hasCachedCandidates: !cycleCandidates.isEmpty,
-            lastCycleAt: lastCycleAt,
-            lastActiveSpaceChangeAt: lastActiveSpaceChangeAt
-        ).shouldRefreshCandidates(now: now, cycleSessionTimeout: cycleSessionTimeout)
-    }
-
-    private func initialSelectionIndex(candidates: [SwitcherCandidate], forward: Bool) -> Int {
-        guard let frontmostBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else {
-            return forward ? 0 : candidates.count - 1
-        }
-
-        if forward {
-            return candidates.firstIndex(where: { $0.bundleID != frontmostBundleID }) ?? 0
-        }
-
-        return candidates.lastIndex(where: { $0.bundleID != frontmostBundleID }) ?? (candidates.count - 1)
-    }
-
     private func initialSwitcherSelectionIndex(candidates: [SwitcherCandidate], forward: Bool) -> Int {
-        guard !candidates.isEmpty else {
-            return 0
-        }
-        guard candidates.count > 1 else {
-            return 0
-        }
-
-        if let focusedWindow = WindowQueryService.focusedWindow(),
-           let firstCandidate = candidates.first,
-           candidateWindowID(from: firstCandidate.id) == focusedWindow.windowID
-        {
-            return forward ? 1 : (candidates.count - 1)
-        }
-
-        if let frontmostBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
-           candidates.first?.bundleID == frontmostBundleID
-        {
-            return forward ? 1 : (candidates.count - 1)
-        }
-
-        return initialSelectionIndex(candidates: candidates, forward: forward)
+        SwitcherCandidateSelection.initialIndex(
+            candidates: candidates,
+            focusedWindowID: WindowQueryService.focusedWindow()?.windowID,
+            frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+            forward: forward
+        )
     }
 
     private func candidateWindowID(from candidateID: String) -> UInt32? {
-        let parts = candidateID.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
-        guard parts.count == 2,
-              parts[0] == "window",
-              let rawID = UInt32(parts[1])
-        else {
-            return nil
-        }
-        return rawID
+        SwitcherCandidateSelection.candidateWindowID(from: candidateID)
     }
 
     private func resetCycleState() {
-        cycleIndex = -1
-        cycleCandidates = []
-        lastCycleAt = nil
+        lastEventTapOverlayAdvanceShortcutID = nil
+        lastEventTapOverlayAdvanceAt = nil
     }
 
     private func startObservingWorkspaceChanges() {
@@ -1190,6 +1265,9 @@ final class ShortcutManager {
 
     private func handleActiveSpaceDidChange() {
         lastActiveSpaceChangeAt = Date()
+        if overlaySession?.kind == .cycle {
+            cancelOverlay()
+        }
         resetCycleState()
         logger.log(event: "workspace.activeSpace.changed")
     }

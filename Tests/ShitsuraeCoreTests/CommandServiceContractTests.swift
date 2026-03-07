@@ -651,7 +651,7 @@ final class CommandServiceContractTests: XCTestCase {
 
 
     func testSwitcherListJSONSchemaAndPriorityOrder() throws {
-        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.switcherPriorityConfigYAML])
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.switcherConfigYAML])
         defer { workspace.cleanup() }
 
         let stateStore = RuntimeStateStore(stateFileURL: workspace.stateFileURL)
@@ -686,7 +686,7 @@ final class CommandServiceContractTests: XCTestCase {
         )
 
         let service = workspace.makeService(stateStore: stateStore, runtimeHooks: runtimeHooks)
-        let result = service.switcherList(json: true, includeAllSpacesOverride: nil)
+        let result = service.switcherList(json: true, includeAllSpacesOverride: true)
         XCTAssertEqual(result.exitCode, 0)
         XCTAssertTrue(result.stderr.isEmpty)
 
@@ -700,15 +700,15 @@ final class CommandServiceContractTests: XCTestCase {
         XCTAssertEqual(payload.candidates.first(where: { $0.id == "window:103" })?.slot, 3)
     }
 
-    func testSwitcherListOrderWithoutCurrentSpacePriorityUsesFrontToBack() throws {
-        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.switcherNoPriorityConfigYAML])
+    func testSwitcherListOrdersFrontToBackWithinCurrentSpace() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.switcherConfigYAML])
         defer { workspace.cleanup() }
         let stateStore = RuntimeStateStore(stateFileURL: workspace.stateFileURL)
         stateStore.save(slots: [])
         let windows = [
-            Self.window(windowID: 101, bundleID: "com.example.notes", title: "A", spaceID: 1, frontIndex: 0),
-            Self.window(windowID: 102, bundleID: "com.example.chat", title: "B", spaceID: 2, frontIndex: 1),
-            Self.window(windowID: 103, bundleID: "com.example.mail", title: "C", spaceID: 2, frontIndex: 2),
+            Self.window(windowID: 101, bundleID: "com.example.notes", title: "A", spaceID: 2, frontIndex: 1),
+            Self.window(windowID: 102, bundleID: "com.example.chat", title: "B", spaceID: 2, frontIndex: 0),
+            Self.window(windowID: 103, bundleID: "com.example.mail", title: "C", spaceID: 1, frontIndex: 2),
         ]
 
         let runtimeHooks = CommandServiceRuntimeHooks(
@@ -726,7 +726,7 @@ final class CommandServiceContractTests: XCTestCase {
         XCTAssertEqual(result.exitCode, 0)
 
         let payload = try decode(SwitcherListJSON.self, from: result.stdout)
-        XCTAssertEqual(payload.candidates.map(\.id), ["window:101", "window:102", "window:103"])
+        XCTAssertEqual(payload.candidates.map(\.id), ["window:102", "window:101"])
     }
 
     func testSwitcherListAccessibilityMissingReturnsCode20JSON() throws {
@@ -755,7 +755,7 @@ final class CommandServiceContractTests: XCTestCase {
 
 
     func testSwitcherListExcludesHiddenWindowCandidates() throws {
-        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.switcherPriorityConfigYAML])
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.switcherConfigYAML])
         defer { workspace.cleanup() }
 
         let windows = [
@@ -811,8 +811,8 @@ final class CommandServiceContractTests: XCTestCase {
 
 
 
-    func testSwitcherListOverrideHasPriorityOverConfigValue() throws {
-        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.switcherPriorityConfigYAML])
+    func testSwitcherListDefaultTargetsCurrentSpaceAndOverrideCanIncludeAllSpaces() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.switcherConfigYAML])
         defer { workspace.cleanup() }
         let windows = [
             Self.window(windowID: 1001, bundleID: "com.example.current", title: "Current", spaceID: 2, frontIndex: 0),
@@ -834,53 +834,14 @@ final class CommandServiceContractTests: XCTestCase {
         let byConfig = service.switcherList(json: true, includeAllSpacesOverride: nil)
         XCTAssertEqual(byConfig.exitCode, 0)
         let byConfigPayload = try decode(SwitcherListJSON.self, from: byConfig.stdout)
-        XCTAssertTrue(byConfigPayload.includeAllSpaces)
-        XCTAssertEqual(byConfigPayload.candidates.map(\.id), ["window:1001", "window:1002"])
-
-        let byOverrideFalse = service.switcherList(json: true, includeAllSpacesOverride: false)
-        XCTAssertEqual(byOverrideFalse.exitCode, 0)
-        let byOverrideFalsePayload = try decode(SwitcherListJSON.self, from: byOverrideFalse.stdout)
-        XCTAssertFalse(byOverrideFalsePayload.includeAllSpaces)
-        XCTAssertEqual(byOverrideFalsePayload.candidates.map(\.id), ["window:1001"])
+        XCTAssertFalse(byConfigPayload.includeAllSpaces)
+        XCTAssertEqual(byConfigPayload.candidates.map(\.id), ["window:1001"])
 
         let byOverrideTrue = service.switcherList(json: true, includeAllSpacesOverride: true)
         XCTAssertEqual(byOverrideTrue.exitCode, 0)
         let byOverrideTruePayload = try decode(SwitcherListJSON.self, from: byOverrideTrue.stdout)
         XCTAssertTrue(byOverrideTruePayload.includeAllSpaces)
         XCTAssertEqual(byOverrideTruePayload.candidates.map(\.id), ["window:1001", "window:1002"])
-    }
-
-    func testSwitcherListConfigIncludeAllSpacesFalseStillTargetsFocusedSpace() throws {
-        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.switcherIncludeAllSpacesFalseConfigYAML])
-        defer { workspace.cleanup() }
-        let windows = [
-            Self.window(windowID: 1101, bundleID: "com.example.current", title: "Current", spaceID: 2, frontIndex: 0),
-            Self.window(windowID: 1102, bundleID: "com.example.other", title: "Other", spaceID: 1, frontIndex: 1),
-        ]
-
-        let runtimeHooks = CommandServiceRuntimeHooks(
-            accessibilityGranted: { true },
-            listWindows: { windows },
-            focusedWindow: { windows[0] },
-            activateBundle: { _ in true },
-            setFocusedWindowFrame: { _ in true },
-            displays: { [] },
-            runProcess: { _, _ in (0, "") }
-        )
-
-        let service = workspace.makeService(runtimeHooks: runtimeHooks)
-
-        let byConfig = service.switcherList(json: true, includeAllSpacesOverride: nil)
-        XCTAssertEqual(byConfig.exitCode, 0)
-        let byConfigPayload = try decode(SwitcherListJSON.self, from: byConfig.stdout)
-        XCTAssertFalse(byConfigPayload.includeAllSpaces)
-        XCTAssertEqual(byConfigPayload.candidates.map(\.id), ["window:1101"])
-
-        let byOverrideTrue = service.switcherList(json: true, includeAllSpacesOverride: true)
-        XCTAssertEqual(byOverrideTrue.exitCode, 0)
-        let byOverrideTruePayload = try decode(SwitcherListJSON.self, from: byOverrideTrue.stdout)
-        XCTAssertTrue(byOverrideTruePayload.includeAllSpaces)
-        XCTAssertEqual(byOverrideTruePayload.candidates.map(\.id), ["window:1101", "window:1102"])
     }
 
     func testSwitcherListWithoutConfigHonorsOverrideAndOrdersSlotFirst() throws {
@@ -1316,57 +1277,9 @@ final class CommandServiceContractTests: XCTestCase {
                   height: "100%"
     """
 
-    private static let switcherPriorityConfigYAML = """
+    private static let switcherConfigYAML = """
     shortcuts:
       switcher:
-        includeAllSpaces: true
-        prioritizeCurrentSpace: true
-        quickKeys: "abc"
-        sources: ["window"]
-    layouts:
-      work:
-        spaces:
-          - spaceID: 1
-            windows:
-              - slot: 1
-                launch: false
-                match:
-                  bundleID: com.apple.TextEdit
-                frame:
-                  x: "0%"
-                  y: "0%"
-                  width: "50%"
-                  height: "100%"
-    """
-
-    private static let switcherNoPriorityConfigYAML = """
-    shortcuts:
-      switcher:
-        includeAllSpaces: true
-        prioritizeCurrentSpace: false
-        quickKeys: "abc"
-        sources: ["window"]
-    layouts:
-      work:
-        spaces:
-          - spaceID: 1
-            windows:
-              - slot: 1
-                launch: false
-                match:
-                  bundleID: com.apple.TextEdit
-                frame:
-                  x: "0%"
-                  y: "0%"
-                  width: "50%"
-                  height: "100%"
-    """
-
-    private static let switcherIncludeAllSpacesFalseConfigYAML = """
-    shortcuts:
-      switcher:
-        includeAllSpaces: false
-        prioritizeCurrentSpace: true
         quickKeys: "abc"
         sources: ["window"]
     layouts:

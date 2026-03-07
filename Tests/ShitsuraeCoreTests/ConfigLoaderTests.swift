@@ -179,6 +179,32 @@ final class ConfigLoaderTests: XCTestCase {
         }
     }
 
+    func testRemovedSwitcherKeysAreIgnoredAtRuntime() throws {
+        let yaml = """
+        shortcuts:
+          switcher:
+            trigger: { key: "tab", modifiers: ["cmd"] }
+            includeAllSpaces: true
+            prioritizeCurrentSpace: false
+            acceptOnModifierRelease: false
+            quickKeys: "asdf"
+        layouts:
+          work:
+            spaces:
+              - spaceID: 1
+                windows:
+                  - match:
+                      bundleID: "com.example.app"
+                    slot: 1
+                    frame: { x: "0%", y: "0%", width: "100%", height: "100%" }
+        """
+        try write(yaml: yaml, named: "config.yaml")
+
+        let loaded = try ConfigLoader().load(from: tempDirectory)
+        XCTAssertEqual(loaded.config.resolvedShortcuts.switcherTrigger, HotkeyDefinition(key: "tab", modifiers: ["cmd"]))
+        XCTAssertEqual(loaded.config.resolvedShortcuts.quickKeys, "asdf")
+    }
+
     private func write(yaml: String, named: String) throws {
         let fileURL = tempDirectory.appendingPathComponent(named)
         try yaml.write(to: fileURL, atomically: true, encoding: .utf8)

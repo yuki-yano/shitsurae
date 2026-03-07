@@ -31,5 +31,15 @@ final class ConfigSchemaTests: XCTestCase {
         let spaceMoveMethodInApps = try XCTUnwrap(executionPolicyProperties["spaceMoveMethodInApps"] as? [String: Any])
         let additionalProperties = try XCTUnwrap(spaceMoveMethodInApps["additionalProperties"] as? [String: Any])
         XCTAssertEqual(additionalProperties["$ref"] as? String, "#/$defs/spaceMoveMethod")
+
+        let shortcuts = try XCTUnwrap(defs["shortcutsDefinition"] as? [String: Any])
+        let shortcutProperties = try XCTUnwrap(shortcuts["properties"] as? [String: Any])
+        XCTAssertNotNil(shortcutProperties["cycle"])
+
+        let switcher = try XCTUnwrap(defs["switcherShortcutDefinition"] as? [String: Any])
+        let switcherProperties = try XCTUnwrap(switcher["properties"] as? [String: Any])
+        XCTAssertNil(switcherProperties["includeAllSpaces"])
+        XCTAssertNil(switcherProperties["prioritizeCurrentSpace"])
+        XCTAssertNil(switcherProperties["acceptOnModifierRelease"])
     }
 }
