@@ -132,10 +132,13 @@ final class ShortcutManager {
         do {
             let loaded = try configLoader.loadFromDefaultDirectory()
             currentShortcuts = loaded.config.resolvedShortcuts
+            overlayController.setShowsWindowThumbnails(loaded.config.overlay?.showThumbnails == true)
         } catch {
             currentShortcuts = ResolvedShortcuts(from: nil)
+            overlayController.setShowsWindowThumbnails(false)
         }
 
+        scheduleBrowserProfileCachePrewarm()
         syncNativeSwitcherHotKeys()
         startEventTap()
         installHotkeyHandlersIfNeeded()
@@ -370,6 +373,12 @@ final class ShortcutManager {
                 "modifiers": modifiers,
             ]
         )
+    }
+
+    private func scheduleBrowserProfileCachePrewarm() {
+        Task.detached(priority: .utility) {
+            WindowQueryService.prewarmBrowserProfileDirectoryCache()
+        }
     }
 
     private func unregisterHotkeys() {
@@ -1547,6 +1556,7 @@ private final class SwitcherOverlayController {
     private var previewCache: [String: NSImage] = [:]
     private var pendingPreviewIDs: Set<String> = []
     private var previewCaptureMaxPixels: CGFloat = 0
+    private var showsWindowThumbnails = false
 
     init() {
         let components: SwitcherOverlayComponents
@@ -1610,6 +1620,25 @@ private final class SwitcherOverlayController {
         }
     }
 
+    func setShowsWindowThumbnails(_ enabled: Bool) {
+        let managerBox = WeakSwitcherOverlayControllerBox(controller: self)
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                managerBox.controller?.setShowsWindowThumbnailsOnMain(enabled)
+            }
+            return
+        }
+
+        DispatchQueue.main.async {
+            guard let controller = managerBox.controller else {
+                return
+            }
+            MainActor.assumeIsolated {
+                controller.setShowsWindowThumbnailsOnMain(enabled)
+            }
+        }
+    }
+
     @MainActor
     private func showOnMain(candidates: [SwitcherCandidate], selectedIndex: Int) {
         let isInitialPresentation = !panel.isVisible
@@ -1652,6 +1681,23 @@ private final class SwitcherOverlayController {
     }
 
     @MainActor
+    private func setShowsWindowThumbnailsOnMain(_ enabled: Bool) {
+        guard showsWindowThumbnails != enabled else {
+            return
+        }
+
+        showsWindowThumbnails = enabled
+        guard !enabled else {
+            return
+        }
+
+        previewCache.removeAll(keepingCapacity: true)
+        pendingPreviewIDs.removeAll(keepingCapacity: true)
+        previewCaptureMaxPixels = 0
+        viewModel.clearPreviews()
+    }
+
+    @MainActor
     private func prefetchAssets(
         for candidates: [SwitcherCandidate],
         metrics: SwitcherOverlayMetrics,
@@ -1688,6 +1734,10 @@ private final class SwitcherOverlayController {
         maxPixels: CGFloat,
         forceRefreshVisiblePreviews: Bool
     ) {
+        guard showsWindowThumbnails else {
+            return
+        }
+
         let effectiveMaxPixels = min(
             SwitcherOverlayLayout.thumbnailMaxPixels,
             max(SwitcherOverlayLayout.minPreviewCapturePixels, maxPixels)
@@ -1704,6 +1754,7 @@ private final class SwitcherOverlayController {
             candidates: candidates,
             cachedPreviewIDs: Set(self.previewCache.keys),
             pendingPreviewIDs: self.pendingPreviewIDs,
+            thumbnailsEnabled: showsWindowThumbnails,
             forceRefreshVisiblePreviews: forceRefreshVisiblePreviews
         ).reduce(into: [String: CGWindowID]()) { partialResult, item in
             partialResult[item.key] = CGWindowID(item.value)
@@ -1731,6 +1782,10 @@ private final class SwitcherOverlayController {
 
                 for candidateID in jobs.keys {
                     controller.pendingPreviewIDs.remove(candidateID)
+                }
+
+                guard controller.showsWindowThumbnails else {
+                    return
                 }
 
                 if requestedMaxPixels + 1 < controller.previewCaptureMaxPixels {
@@ -2074,6 +2129,10 @@ private final class SwitcherOverlayViewModel: ObservableObject {
         shouldAnimateSelection = false
         candidates = []
         selectedIndex = 0
+    }
+
+    func clearPreviews() {
+        previewsByID = [:]
     }
 
     func setPreviews(_ previews: [String: NSImage], for candidateIDs: Set<String>) {

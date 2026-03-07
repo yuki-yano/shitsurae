@@ -113,12 +113,96 @@ public struct WindowSnapshot: Codable, Equatable {
 }
 
 public enum WindowQueryService {
+    private struct ProfileDirectoryCacheKey: Hashable {
+        let bundleID: String
+        let pid: Int
+    }
+
+    private struct CachedProfileDirectoryResolution {
+        let profileDirectory: String?
+    }
+
+    private final class ProfileDirectoryCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var entries: [ProfileDirectoryCacheKey: CachedProfileDirectoryResolution] = [:]
+
+        func value(bundleID: String, pid: Int) -> CachedProfileDirectoryResolution? {
+            lock.lock()
+            defer { lock.unlock() }
+            return entries[ProfileDirectoryCacheKey(bundleID: bundleID, pid: pid)]
+        }
+
+        func set(_ profileDirectory: String?, bundleID: String, pid: Int) {
+            lock.lock()
+            entries[ProfileDirectoryCacheKey(bundleID: bundleID, pid: pid)] = CachedProfileDirectoryResolution(
+                profileDirectory: profileDirectory
+            )
+            lock.unlock()
+        }
+
+        func removeAll() {
+            lock.lock()
+            entries.removeAll(keepingCapacity: false)
+            lock.unlock()
+        }
+    }
+
+    private final class ProfileDirectoryPrewarmState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var isRunning = false
+
+        func begin() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !isRunning else {
+                return false
+            }
+            isRunning = true
+            return true
+        }
+
+        func end() {
+            lock.lock()
+            isRunning = false
+            lock.unlock()
+        }
+
+        func reset() {
+            lock.lock()
+            isRunning = false
+            lock.unlock()
+        }
+    }
+
+    private static let profileDirectoryCache = ProfileDirectoryCache()
+    private static let profileDirectoryPrewarmState = ProfileDirectoryPrewarmState()
+
     public static func listWindows(displays: [DisplayInfo] = SystemProbe.displays()) -> [WindowSnapshot] {
         listWindows(displays: displays, options: [.optionOnScreenOnly, .excludeDesktopElements])
     }
 
     public static func listWindowsOnAllSpaces(displays: [DisplayInfo] = SystemProbe.displays()) -> [WindowSnapshot] {
         listWindows(displays: displays, options: [.optionAll, .excludeDesktopElements])
+    }
+
+    public static func prewarmBrowserProfileDirectoryCache() {
+        guard profileDirectoryPrewarmState.begin() else {
+            return
+        }
+        defer { profileDirectoryPrewarmState.end() }
+
+        guard let raw = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+        else {
+            return
+        }
+
+        prewarmBrowserProfileDirectoryCache(
+            rawWindowInfo: raw,
+            appResolver: { pid in
+                NSRunningApplication(processIdentifier: pid_t(pid))?.bundleIdentifier
+            },
+            profileResolver: SystemProbe.browserProfileDirectory(bundleID:pid:)
+        )
     }
 
     private static func listWindows(
@@ -193,8 +277,16 @@ public enum WindowQueryService {
                 profileDirectory = cached
             } else if unresolvedPIDs.contains(pid) {
                 profileDirectory = nil
+            } else if let cached = cachedProfileDirectory(bundleID: app.bundleID, pid: pid) {
+                if let profileDirectory = cached.profileDirectory {
+                    resolvedProfiles[pid] = profileDirectory
+                } else {
+                    unresolvedPIDs.insert(pid)
+                }
+                profileDirectory = cached.profileDirectory
             } else {
                 let resolved = profileResolver(app.bundleID, pid)
+                cacheProfileDirectory(resolved, bundleID: app.bundleID, pid: pid)
                 if let resolved {
                     resolvedProfiles[pid] = resolved
                 } else {
@@ -227,6 +319,42 @@ public enum WindowQueryService {
             if lhs.frontIndex != rhs.frontIndex { return lhs.frontIndex < rhs.frontIndex }
             return lhs.windowID < rhs.windowID
         }
+    }
+
+    static func prewarmBrowserProfileDirectoryCache(
+        rawWindowInfo: [[String: Any]],
+        appResolver: (Int) -> String?,
+        profileResolver: (String, Int) -> String? = { _, _ in nil }
+    ) {
+        var resolvedPIDs = Set<Int>()
+
+        for info in rawWindowInfo {
+            let layer = info[kCGWindowLayer as String] as? Int ?? 0
+            if layer != 0 {
+                continue
+            }
+
+            guard let pidNumber = info[kCGWindowOwnerPID as String] as? NSNumber else {
+                continue
+            }
+
+            let pid = pidNumber.intValue
+            guard resolvedPIDs.insert(pid).inserted,
+                  let bundleID = appResolver(pid),
+                  ChromiumProfileSupport.supports(bundleID: bundleID),
+                  cachedProfileDirectory(bundleID: bundleID, pid: pid) == nil
+            else {
+                continue
+            }
+
+            let profileDirectory = profileResolver(bundleID, pid)
+            cacheProfileDirectory(profileDirectory, bundleID: bundleID, pid: pid)
+        }
+    }
+
+    static func resetProfileDirectoryCacheForTesting() {
+        profileDirectoryCache.removeAll()
+        profileDirectoryPrewarmState.reset()
     }
 
     public static func focusedWindow(displays: [DisplayInfo] = SystemProbe.displays()) -> WindowSnapshot? {
@@ -671,6 +799,14 @@ public enum WindowQueryService {
         }
 
         return candidates.first(where: { windowIDResolver($0) == windowID })
+    }
+
+    private static func cachedProfileDirectory(bundleID: String, pid: Int) -> CachedProfileDirectoryResolution? {
+        profileDirectoryCache.value(bundleID: bundleID, pid: pid)
+    }
+
+    private static func cacheProfileDirectory(_ profileDirectory: String?, bundleID: String, pid: Int) {
+        profileDirectoryCache.set(profileDirectory, bundleID: bundleID, pid: pid)
     }
 
     private typealias MainConnectionIDFn = @convention(c) () -> UInt32

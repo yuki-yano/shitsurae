@@ -93,4 +93,29 @@ final class SwitcherPreviewCapturePlannerTests: XCTestCase {
 
         XCTAssertTrue(jobs.isEmpty)
     }
+
+    func testPlannedJobsReturnsEmptyWhenThumbnailsDisabled() {
+        let candidates = [
+            SwitcherCandidate(
+                id: "window:101",
+                source: .window,
+                title: "Editor",
+                bundleID: "com.example.editor",
+                spaceID: 1,
+                displayID: "display-a",
+                slot: 1,
+                quickKey: "a"
+            ),
+        ]
+
+        let jobs = SwitcherPreviewCapturePlanner.plannedJobs(
+            candidates: candidates,
+            cachedPreviewIDs: [],
+            pendingPreviewIDs: [],
+            thumbnailsEnabled: false,
+            forceRefreshVisiblePreviews: true
+        )
+
+        XCTAssertTrue(jobs.isEmpty)
+    }
 }

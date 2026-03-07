@@ -219,6 +219,229 @@ final class RuntimeWindowServicesTests: XCTestCase {
         XCTAssertEqual(windows.first?.spaceID, 4)
     }
 
+    func testListWindowsCachesResolvedProfileDirectoryAcrossCalls() {
+        WindowQueryService.resetProfileDirectoryCacheForTesting()
+        defer { WindowQueryService.resetProfileDirectoryCacheForTesting() }
+
+        let display = DisplayInfo(
+            id: "display-a",
+            width: 3000,
+            height: 2000,
+            scale: 2.0,
+            isPrimary: true,
+            frame: CGRect(x: 0, y: 0, width: 1500, height: 1000),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1400, height: 900)
+        )
+
+        let raw: [[String: Any]] = [[
+            kCGWindowLayer as String: 0,
+            kCGWindowNumber as String: NSNumber(value: 102),
+            kCGWindowOwnerPID as String: NSNumber(value: 2),
+            kCGWindowName as String: "Chrome",
+            "kCGWindowWorkspace": 2,
+            kCGWindowBounds as String: boundsDictionary(CGRect(x: 50, y: 60, width: 500, height: 400)),
+        ]]
+
+        var resolveCalls = 0
+        let profileResolver: (String, Int) -> String? = { _, _ in
+            resolveCalls += 1
+            return "Default"
+        }
+
+        let first = WindowQueryService.listWindows(
+            rawWindowInfo: raw,
+            displays: [display],
+            appResolver: { _ in (bundleID: "com.google.Chrome", isHidden: false) },
+            profileResolver: profileResolver,
+            spaceResolver: { _, _ in nil }
+        )
+        let second = WindowQueryService.listWindows(
+            rawWindowInfo: raw,
+            displays: [display],
+            appResolver: { _ in (bundleID: "com.google.Chrome", isHidden: false) },
+            profileResolver: profileResolver,
+            spaceResolver: { _, _ in nil }
+        )
+
+        XCTAssertEqual(first.first?.profileDirectory, "Default")
+        XCTAssertEqual(second.first?.profileDirectory, "Default")
+        XCTAssertEqual(resolveCalls, 1)
+    }
+
+    func testListWindowsCachesNilProfileDirectoryAcrossCalls() {
+        WindowQueryService.resetProfileDirectoryCacheForTesting()
+        defer { WindowQueryService.resetProfileDirectoryCacheForTesting() }
+
+        let display = DisplayInfo(
+            id: "display-a",
+            width: 3000,
+            height: 2000,
+            scale: 2.0,
+            isPrimary: true,
+            frame: CGRect(x: 0, y: 0, width: 1500, height: 1000),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1400, height: 900)
+        )
+
+        let raw: [[String: Any]] = [[
+            kCGWindowLayer as String: 0,
+            kCGWindowNumber as String: NSNumber(value: 102),
+            kCGWindowOwnerPID as String: NSNumber(value: 2),
+            kCGWindowName as String: "Chrome",
+            "kCGWindowWorkspace": 2,
+            kCGWindowBounds as String: boundsDictionary(CGRect(x: 50, y: 60, width: 500, height: 400)),
+        ]]
+
+        var resolveCalls = 0
+        let profileResolver: (String, Int) -> String? = { _, _ in
+            resolveCalls += 1
+            return nil
+        }
+
+        let first = WindowQueryService.listWindows(
+            rawWindowInfo: raw,
+            displays: [display],
+            appResolver: { _ in (bundleID: "com.google.Chrome", isHidden: false) },
+            profileResolver: profileResolver,
+            spaceResolver: { _, _ in nil }
+        )
+        let second = WindowQueryService.listWindows(
+            rawWindowInfo: raw,
+            displays: [display],
+            appResolver: { _ in (bundleID: "com.google.Chrome", isHidden: false) },
+            profileResolver: profileResolver,
+            spaceResolver: { _, _ in nil }
+        )
+
+        XCTAssertNil(first.first?.profileDirectory)
+        XCTAssertNil(second.first?.profileDirectory)
+        XCTAssertEqual(resolveCalls, 1)
+    }
+
+    func testPrewarmBrowserProfileDirectoryCacheSeedsCacheForSubsequentListWindows() {
+        WindowQueryService.resetProfileDirectoryCacheForTesting()
+        defer { WindowQueryService.resetProfileDirectoryCacheForTesting() }
+
+        let display = DisplayInfo(
+            id: "display-a",
+            width: 3000,
+            height: 2000,
+            scale: 2.0,
+            isPrimary: true,
+            frame: CGRect(x: 0, y: 0, width: 1500, height: 1000),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1400, height: 900)
+        )
+
+        let raw: [[String: Any]] = [
+            [
+                kCGWindowLayer as String: 0,
+                kCGWindowNumber as String: NSNumber(value: 201),
+                kCGWindowOwnerPID as String: NSNumber(value: 2),
+                kCGWindowName as String: "Chrome",
+                "kCGWindowWorkspace": 2,
+                kCGWindowBounds as String: boundsDictionary(CGRect(x: 50, y: 60, width: 500, height: 400)),
+            ],
+            [
+                kCGWindowLayer as String: 0,
+                kCGWindowNumber as String: NSNumber(value: 202),
+                kCGWindowOwnerPID as String: NSNumber(value: 3),
+                kCGWindowName as String: "Edge",
+                "kCGWindowWorkspace": 2,
+                kCGWindowBounds as String: boundsDictionary(CGRect(x: 80, y: 90, width: 480, height: 360)),
+            ],
+        ]
+
+        let appResolver: (Int) -> (bundleID: String, isHidden: Bool)? = { pid in
+            switch pid {
+            case 2: return (bundleID: "com.google.Chrome", isHidden: false)
+            case 3: return (bundleID: "com.microsoft.edgemac", isHidden: false)
+            default: return nil
+            }
+        }
+
+        var prewarmCalls: [(String, Int)] = []
+        WindowQueryService.prewarmBrowserProfileDirectoryCache(
+            rawWindowInfo: raw,
+            appResolver: { pid in appResolver(pid)?.bundleID },
+            profileResolver: { bundleID, pid in
+                prewarmCalls.append((bundleID, pid))
+                return pid == 2 ? "Default" : "Profile 1"
+            }
+        )
+
+        var listResolveCalls = 0
+        let windows = WindowQueryService.listWindows(
+            rawWindowInfo: raw,
+            displays: [display],
+            appResolver: appResolver,
+            profileResolver: { _, _ in
+                listResolveCalls += 1
+                return nil
+            },
+            spaceResolver: { _, _ in nil }
+        )
+
+        XCTAssertEqual(prewarmCalls.map(\.1), [2, 3])
+        XCTAssertEqual(listResolveCalls, 0)
+        XCTAssertEqual(windows.map(\.profileDirectory), ["Default", "Profile 1"])
+    }
+
+    func testPrewarmBrowserProfileDirectoryCacheSkipsUnsupportedDuplicateAndCachedPIDs() {
+        WindowQueryService.resetProfileDirectoryCacheForTesting()
+        defer { WindowQueryService.resetProfileDirectoryCacheForTesting() }
+
+        let raw: [[String: Any]] = [
+            [
+                kCGWindowLayer as String: 0,
+                kCGWindowNumber as String: NSNumber(value: 201),
+                kCGWindowOwnerPID as String: NSNumber(value: 2),
+            ],
+            [
+                kCGWindowLayer as String: 0,
+                kCGWindowNumber as String: NSNumber(value: 202),
+                kCGWindowOwnerPID as String: NSNumber(value: 2),
+            ],
+            [
+                kCGWindowLayer as String: 0,
+                kCGWindowNumber as String: NSNumber(value: 203),
+                kCGWindowOwnerPID as String: NSNumber(value: 3),
+            ],
+            [
+                kCGWindowLayer as String: 1,
+                kCGWindowNumber as String: NSNumber(value: 204),
+                kCGWindowOwnerPID as String: NSNumber(value: 4),
+            ],
+        ]
+
+        WindowQueryService.prewarmBrowserProfileDirectoryCache(
+            rawWindowInfo: [[
+                kCGWindowLayer as String: 0,
+                kCGWindowNumber as String: NSNumber(value: 200),
+                kCGWindowOwnerPID as String: NSNumber(value: 2),
+            ]],
+            appResolver: { _ in "com.google.Chrome" },
+            profileResolver: { _, _ in "Default" }
+        )
+
+        var resolveCalls: [(String, Int)] = []
+        WindowQueryService.prewarmBrowserProfileDirectoryCache(
+            rawWindowInfo: raw,
+            appResolver: { pid in
+                switch pid {
+                case 2: return "com.google.Chrome"
+                case 3: return "com.apple.Safari"
+                case 4: return "com.microsoft.edgemac"
+                default: return nil
+                }
+            },
+            profileResolver: { bundleID, pid in
+                resolveCalls.append((bundleID, pid))
+                return "Profile \(pid)"
+            }
+        )
+
+        XCTAssertEqual(resolveCalls.map(\.1), [])
+    }
+
     func testResolveFocusedWindowPrefersPIDThenBundleFallback() {
         let byPID = WindowSnapshot(
             windowID: 1,

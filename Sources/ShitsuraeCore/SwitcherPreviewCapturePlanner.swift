@@ -5,8 +5,13 @@ public enum SwitcherPreviewCapturePlanner {
         candidates: [SwitcherCandidate],
         cachedPreviewIDs: Set<String>,
         pendingPreviewIDs: Set<String>,
+        thumbnailsEnabled: Bool = true,
         forceRefreshVisiblePreviews: Bool
     ) -> [String: UInt32] {
+        guard thumbnailsEnabled else {
+            return [:]
+        }
+
         var jobs: [String: UInt32] = [:]
 
         for candidate in candidates {
