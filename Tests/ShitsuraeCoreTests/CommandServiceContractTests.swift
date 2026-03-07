@@ -1450,6 +1450,7 @@ private struct TestConfigWorkspace {
     let xdgConfigHome: URL
     let configDirectory: URL
     let stateFileURL: URL
+    let supportedBuildCatalogURL: URL
 
     init(files: [String: String]) throws {
         let fm = FileManager.default
@@ -1465,24 +1466,35 @@ private struct TestConfigWorkspace {
         }
 
         let stateFileURL = tempBase.appendingPathComponent("runtime-state.json")
+        let supportedBuildCatalogURL = tempBase.appendingPathComponent("supported-build-catalog.json")
+        let currentBuildVersion = SystemProbe.currentBuildVersion() ?? "UNKNOWN_BUILD"
+        try """
+        {
+          "allowStatusesForRuntime": ["supported"],
+          "builds": [
+            { "productVersion": "0.0.0", "productBuildVersion": "\(currentBuildVersion)", "status": "supported" }
+          ]
+        }
+        """.write(to: supportedBuildCatalogURL, atomically: true, encoding: .utf8)
 
         self.root = tempBase
         self.xdgConfigHome = xdgConfigHome
         self.configDirectory = configDirectory
         self.stateFileURL = stateFileURL
+        self.supportedBuildCatalogURL = supportedBuildCatalogURL
     }
 
     func makeService(
         stateStore: RuntimeStateStore = RuntimeStateStore(),
-        supportedBuildCatalogURL: URL = CommandService.bundledSupportedBuildCatalogURL,
-        arrangeDriver: ArrangeDriver = LiveArrangeDriver(),
+        supportedBuildCatalogURL: URL? = nil,
+        arrangeDriver: ArrangeDriver = ContractTestArrangeDriver(),
         arrangeRequestDeduplicator: ArrangeRequestDeduplicating? = nil,
         runtimeHooks: CommandServiceRuntimeHooks = .live,
         configDirectoryOverride: URL? = nil
     ) -> CommandService {
         CommandService(
             stateStore: stateStore,
-            supportedBuildCatalogURL: supportedBuildCatalogURL,
+            supportedBuildCatalogURL: supportedBuildCatalogURL ?? self.supportedBuildCatalogURL,
             arrangeDriver: arrangeDriver,
             arrangeRequestDeduplicator: arrangeRequestDeduplicator,
             enableAutoReloadMonitor: false,
@@ -1498,6 +1510,40 @@ private struct TestConfigWorkspace {
     func cleanup() {
         try? FileManager.default.removeItem(at: root)
     }
+}
+
+private struct ContractTestArrangeDriver: ArrangeDriver {
+    func displays() -> [DisplayInfo] {
+        [
+            DisplayInfo(
+                id: "display-a",
+                width: 1440,
+                height: 900,
+                scale: 2.0,
+                isPrimary: true,
+                frame: CGRect(x: 0, y: 0, width: 1440, height: 900),
+                visibleFrame: CGRect(x: 0, y: 0, width: 1440, height: 900)
+            ),
+        ]
+    }
+
+    func queryWindows() -> [WindowSnapshot] { [] }
+    func queryWindowsOnAllSpaces() -> [WindowSnapshot] { [] }
+    func launch(request _: ApplicationLaunchRequest) -> Bool { true }
+    func moveWindowToSpace(
+        windowID _: UInt32,
+        bundleID _: String,
+        displayID _: String?,
+        spaceID _: Int,
+        spacesMode _: SpacesMode,
+        method _: SpaceMoveMethod
+    ) -> Bool { true }
+    func setWindowFrame(windowID _: UInt32, bundleID _: String, frame _: ResolvedFrame) -> Bool { true }
+    func activate(bundleID _: String) -> Bool { true }
+    func sleep(milliseconds _: Int) {}
+    func accessibilityGranted() -> Bool { true }
+    func actualSpacesMode() -> SpacesMode? { .perDisplay }
+    func backendAvailable(catalogURL _: URL) -> (Bool, String?) { (true, nil) }
 }
 
 private struct BackendUnavailableArrangeDriver: ArrangeDriver {
