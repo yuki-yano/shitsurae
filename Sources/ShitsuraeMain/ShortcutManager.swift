@@ -1432,81 +1432,6 @@ private func canonicalHotkeyKey(_ key: String) -> String {
     }
 }
 
-private func keyCode(for key: String) -> Int? {
-    switch canonicalHotkeyKey(key) {
-    case "a": return Int(kVK_ANSI_A)
-    case "b": return Int(kVK_ANSI_B)
-    case "c": return Int(kVK_ANSI_C)
-    case "d": return Int(kVK_ANSI_D)
-    case "e": return Int(kVK_ANSI_E)
-    case "f": return Int(kVK_ANSI_F)
-    case "g": return Int(kVK_ANSI_G)
-    case "h": return Int(kVK_ANSI_H)
-    case "i": return Int(kVK_ANSI_I)
-    case "j": return Int(kVK_ANSI_J)
-    case "k": return Int(kVK_ANSI_K)
-    case "l": return Int(kVK_ANSI_L)
-    case "m": return Int(kVK_ANSI_M)
-    case "n": return Int(kVK_ANSI_N)
-    case "o": return Int(kVK_ANSI_O)
-    case "p": return Int(kVK_ANSI_P)
-    case "q": return Int(kVK_ANSI_Q)
-    case "r": return Int(kVK_ANSI_R)
-    case "s": return Int(kVK_ANSI_S)
-    case "t": return Int(kVK_ANSI_T)
-    case "u": return Int(kVK_ANSI_U)
-    case "v": return Int(kVK_ANSI_V)
-    case "w": return Int(kVK_ANSI_W)
-    case "x": return Int(kVK_ANSI_X)
-    case "y": return Int(kVK_ANSI_Y)
-    case "z": return Int(kVK_ANSI_Z)
-    case "0": return Int(kVK_ANSI_0)
-    case "1": return Int(kVK_ANSI_1)
-    case "2": return Int(kVK_ANSI_2)
-    case "3": return Int(kVK_ANSI_3)
-    case "4": return Int(kVK_ANSI_4)
-    case "5": return Int(kVK_ANSI_5)
-    case "6": return Int(kVK_ANSI_6)
-    case "7": return Int(kVK_ANSI_7)
-    case "8": return Int(kVK_ANSI_8)
-    case "9": return Int(kVK_ANSI_9)
-    case "grave": return Int(kVK_ANSI_Grave)
-    case "tab": return Int(kVK_Tab)
-    case "enter": return Int(kVK_Return)
-    case "esc": return Int(kVK_Escape)
-    case "space": return Int(kVK_Space)
-    case "left": return Int(kVK_LeftArrow)
-    case "right": return Int(kVK_RightArrow)
-    case "up": return Int(kVK_UpArrow)
-    case "down": return Int(kVK_DownArrow)
-    case "home": return Int(kVK_Home)
-    case "end": return Int(kVK_End)
-    case "pageup": return Int(kVK_PageUp)
-    case "pagedown": return Int(kVK_PageDown)
-    case "f1": return Int(kVK_F1)
-    case "f2": return Int(kVK_F2)
-    case "f3": return Int(kVK_F3)
-    case "f4": return Int(kVK_F4)
-    case "f5": return Int(kVK_F5)
-    case "f6": return Int(kVK_F6)
-    case "f7": return Int(kVK_F7)
-    case "f8": return Int(kVK_F8)
-    case "f9": return Int(kVK_F9)
-    case "f10": return Int(kVK_F10)
-    case "f11": return Int(kVK_F11)
-    case "f12": return Int(kVK_F12)
-    case "f13": return Int(kVK_F13)
-    case "f14": return Int(kVK_F14)
-    case "f15": return Int(kVK_F15)
-    case "f16": return Int(kVK_F16)
-    case "f17": return Int(kVK_F17)
-    case "f18": return Int(kVK_F18)
-    case "f19": return Int(kVK_F19)
-    case "f20": return Int(kVK_F20)
-    default: return nil
-    }
-}
-
 private func carbonModifiers(_ modifiers: [String]) -> UInt32 {
     var result: UInt32 = 0
     for modifier in modifiers {
@@ -1529,8 +1454,9 @@ private func carbonModifiers(_ modifiers: [String]) -> UInt32 {
 }
 
 private func normalizedKey(from event: CGEvent) -> String {
-    if let special = specialKey(for: event) {
-        return special
+    let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
+    if let key = overlayCommandKeyName(forKeyCode: keyCode) {
+        return key
     }
 
     var chars = [UniChar](repeating: 0, count: 4)
@@ -1538,80 +1464,6 @@ private func normalizedKey(from event: CGEvent) -> String {
     event.keyboardGetUnicodeString(maxStringLength: chars.count, actualStringLength: &length, unicodeString: &chars)
     guard length > 0 else { return "" }
     return String(utf16CodeUnits: chars, count: length).lowercased()
-}
-
-private func specialKey(for event: CGEvent) -> String? {
-    let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
-    switch keyCode {
-    case Int(kVK_ANSI_Grave):
-        return "grave"
-    case Int(kVK_Tab):
-        return "tab"
-    case Int(kVK_Return):
-        return "enter"
-    case Int(kVK_Escape):
-        return "esc"
-    case Int(kVK_Space):
-        return "space"
-    case Int(kVK_LeftArrow):
-        return "left"
-    case Int(kVK_RightArrow):
-        return "right"
-    case Int(kVK_UpArrow):
-        return "up"
-    case Int(kVK_DownArrow):
-        return "down"
-    case Int(kVK_Home):
-        return "home"
-    case Int(kVK_End):
-        return "end"
-    case Int(kVK_PageUp):
-        return "pageup"
-    case Int(kVK_PageDown):
-        return "pagedown"
-    case Int(kVK_F1):
-        return "f1"
-    case Int(kVK_F2):
-        return "f2"
-    case Int(kVK_F3):
-        return "f3"
-    case Int(kVK_F4):
-        return "f4"
-    case Int(kVK_F5):
-        return "f5"
-    case Int(kVK_F6):
-        return "f6"
-    case Int(kVK_F7):
-        return "f7"
-    case Int(kVK_F8):
-        return "f8"
-    case Int(kVK_F9):
-        return "f9"
-    case Int(kVK_F10):
-        return "f10"
-    case Int(kVK_F11):
-        return "f11"
-    case Int(kVK_F12):
-        return "f12"
-    case Int(kVK_F13):
-        return "f13"
-    case Int(kVK_F14):
-        return "f14"
-    case Int(kVK_F15):
-        return "f15"
-    case Int(kVK_F16):
-        return "f16"
-    case Int(kVK_F17):
-        return "f17"
-    case Int(kVK_F18):
-        return "f18"
-    case Int(kVK_F19):
-        return "f19"
-    case Int(kVK_F20):
-        return "f20"
-    default:
-        return nil
-    }
 }
 
 private final class WeakSwitcherOverlayControllerBox: @unchecked Sendable {
