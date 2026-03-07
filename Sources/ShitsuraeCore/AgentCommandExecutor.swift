@@ -5,6 +5,10 @@ public protocol CommandHandling {
     func layoutsList() -> CommandResult
     func diagnostics(json: Bool) -> CommandResult
     func arrange(layoutName: String, spaceID: Int?, dryRun: Bool, verbose: Bool, json: Bool) -> CommandResult
+    func displayList(json: Bool) -> CommandResult
+    func displayCurrent(json: Bool) -> CommandResult
+    func spaceList(json: Bool) -> CommandResult
+    func spaceCurrent(json: Bool) -> CommandResult
     func windowCurrent(json: Bool) -> CommandResult
     func windowMove(target: WindowTargetSelector?, x: LengthValue, y: LengthValue) -> CommandResult
     func windowResize(target: WindowTargetSelector?, width: LengthValue, height: LengthValue) -> CommandResult
@@ -45,6 +49,14 @@ public final class AgentCommandExecutor {
             result = commandHandler.validate(json: request.json ?? false)
         case .diagnostics:
             result = commandHandler.diagnostics(json: request.json ?? false)
+        case .displayList:
+            result = commandHandler.displayList(json: request.json ?? false)
+        case .displayCurrent:
+            result = commandHandler.displayCurrent(json: request.json ?? false)
+        case .spaceList:
+            result = commandHandler.spaceList(json: request.json ?? false)
+        case .spaceCurrent:
+            result = commandHandler.spaceCurrent(json: request.json ?? false)
         case .windowCurrent:
             result = commandHandler.windowCurrent(json: request.json ?? false)
         case .windowMove:

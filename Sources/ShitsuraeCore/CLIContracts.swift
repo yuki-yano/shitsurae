@@ -2,6 +2,7 @@ import Foundation
 
 public struct WindowCurrentJSON: Codable {
     public let schemaVersion: Int
+    public let windowID: UInt32
     public let bundleID: String
     public let pid: Int
     public let title: String
@@ -17,6 +18,7 @@ public struct WindowCurrentJSON: Codable {
 
     public init(
         schemaVersion: Int,
+        windowID: UInt32,
         bundleID: String,
         pid: Int,
         title: String,
@@ -31,6 +33,7 @@ public struct WindowCurrentJSON: Codable {
         slot: Int?
     ) {
         self.schemaVersion = schemaVersion
+        self.windowID = windowID
         self.bundleID = bundleID
         self.pid = pid
         self.title = title
@@ -43,6 +46,99 @@ public struct WindowCurrentJSON: Codable {
         self.isMinimized = isMinimized
         self.frame = frame
         self.slot = slot
+    }
+}
+
+public struct DisplaySummaryJSON: Codable, Equatable {
+    public let id: String
+    public let isPrimary: Bool
+    public let scale: Double
+    public let pixelWidth: Int
+    public let pixelHeight: Int
+    public let frame: ResolvedFrame
+    public let visibleFrame: ResolvedFrame
+
+    public init(
+        id: String,
+        isPrimary: Bool,
+        scale: Double,
+        pixelWidth: Int,
+        pixelHeight: Int,
+        frame: ResolvedFrame,
+        visibleFrame: ResolvedFrame
+    ) {
+        self.id = id
+        self.isPrimary = isPrimary
+        self.scale = scale
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+        self.frame = frame
+        self.visibleFrame = visibleFrame
+    }
+}
+
+public struct DisplayListJSON: Codable {
+    public let schemaVersion: Int
+    public let displays: [DisplaySummaryJSON]
+
+    public init(schemaVersion: Int, displays: [DisplaySummaryJSON]) {
+        self.schemaVersion = schemaVersion
+        self.displays = displays
+    }
+}
+
+public struct DisplayCurrentJSON: Codable {
+    public let schemaVersion: Int
+    public let display: DisplaySummaryJSON
+
+    public init(schemaVersion: Int, display: DisplaySummaryJSON) {
+        self.schemaVersion = schemaVersion
+        self.display = display
+    }
+}
+
+public struct SpaceSummaryJSON: Codable, Equatable {
+    public let spaceID: Int
+    public let displayID: String?
+    public let isVisible: Bool
+    public let isNativeFullscreen: Bool
+    public let hasFocus: Bool
+    public let windowIDs: [UInt32]
+
+    public init(
+        spaceID: Int,
+        displayID: String?,
+        isVisible: Bool,
+        isNativeFullscreen: Bool,
+        hasFocus: Bool,
+        windowIDs: [UInt32]
+    ) {
+        self.spaceID = spaceID
+        self.displayID = displayID
+        self.isVisible = isVisible
+        self.isNativeFullscreen = isNativeFullscreen
+        self.hasFocus = hasFocus
+        self.windowIDs = windowIDs
+    }
+}
+
+public struct SpaceListJSON: Codable {
+    public let schemaVersion: Int
+    public let spaces: [SpaceSummaryJSON]
+
+    public init(schemaVersion: Int, spaces: [SpaceSummaryJSON]) {
+        self.schemaVersion = schemaVersion
+        self.spaces = spaces
+    }
+}
+
+public struct SpaceCurrentJSON: Codable {
+    public let schemaVersion: Int
+    public let space: SpaceSummaryJSON
+
+    public init(schemaVersion: Int, space: SpaceSummaryJSON) {
+        self.schemaVersion = schemaVersion
+        self.space = space
     }
 }
 

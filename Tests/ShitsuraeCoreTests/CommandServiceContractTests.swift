@@ -933,6 +933,287 @@ final class CommandServiceContractTests: XCTestCase {
         XCTAssertEqual(payload.code, ErrorCode.targetWindowNotFound.rawValue)
     }
 
+    func testDisplayListRequiresJSONFlag() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+        let service = workspace.makeService()
+
+        let result = service.displayList(json: false)
+        XCTAssertEqual(result.exitCode, Int32(ErrorCode.validationError.rawValue))
+        XCTAssertTrue(result.stdout.isEmpty)
+        XCTAssertEqual(result.stderr, "display list supports --json only\n")
+    }
+
+    func testDisplayListReturnsDisplaysJSON() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+        let displays = [
+            DisplayInfo(
+                id: "display-a",
+                width: 3200,
+                height: 2000,
+                scale: 2.0,
+                isPrimary: true,
+                frame: CGRect(x: 0, y: 0, width: 1600, height: 1000),
+                visibleFrame: CGRect(x: 0, y: 23, width: 1600, height: 977)
+            ),
+            DisplayInfo(
+                id: "display-b",
+                width: 2560,
+                height: 1440,
+                scale: 2.0,
+                isPrimary: false,
+                frame: CGRect(x: 1600, y: 0, width: 1280, height: 720),
+                visibleFrame: CGRect(x: 1600, y: 0, width: 1280, height: 680)
+            ),
+        ]
+
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: { [] },
+            focusedWindow: { nil },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { _ in true },
+            displays: { displays },
+            runProcess: { _, _ in (0, "") }
+        )
+        let service = workspace.makeService(runtimeHooks: runtimeHooks)
+
+        let result = service.displayList(json: true)
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stderr.isEmpty)
+
+        let payload = try decode(DisplayListJSON.self, from: result.stdout)
+        XCTAssertEqual(payload.schemaVersion, 1)
+        XCTAssertEqual(payload.displays.map(\.id), ["display-a", "display-b"])
+        XCTAssertEqual(payload.displays.map(\.pixelWidth), [3200, 2560])
+        XCTAssertEqual(payload.displays.map(\.frame.width), [1600, 1280])
+        XCTAssertEqual(payload.displays.map(\.visibleFrame.height), [977, 680])
+    }
+
+    func testDisplayCurrentRequiresJSONFlag() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+        let service = workspace.makeService()
+
+        let result = service.displayCurrent(json: false)
+        XCTAssertEqual(result.exitCode, Int32(ErrorCode.validationError.rawValue))
+        XCTAssertTrue(result.stdout.isEmpty)
+        XCTAssertEqual(result.stderr, "display current supports --json only\n")
+    }
+
+    func testDisplayCurrentReturnsTargetWindowDisplayJSON() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+        let window = Self.window(windowID: 700, bundleID: "com.apple.TextEdit", title: "Editor", spaceID: 2, frontIndex: 0)
+        let displays = [
+            DisplayInfo(
+                id: "display-a",
+                width: 3200,
+                height: 2000,
+                scale: 2.0,
+                isPrimary: true,
+                frame: CGRect(x: 0, y: 0, width: 1600, height: 1000),
+                visibleFrame: CGRect(x: 0, y: 23, width: 1600, height: 977)
+            ),
+            DisplayInfo(
+                id: "display-b",
+                width: 2560,
+                height: 1440,
+                scale: 2.0,
+                isPrimary: false,
+                frame: CGRect(x: 1600, y: 0, width: 1280, height: 720),
+                visibleFrame: CGRect(x: 1600, y: 0, width: 1280, height: 680)
+            ),
+        ]
+        let windowOnDisplayB = WindowSnapshot(
+            windowID: window.windowID,
+            bundleID: window.bundleID,
+            pid: window.pid,
+            title: window.title,
+            role: window.role,
+            subrole: window.subrole,
+            minimized: window.minimized,
+            hidden: window.hidden,
+            frame: window.frame,
+            spaceID: window.spaceID,
+            displayID: "display-b",
+            isFullscreen: window.isFullscreen,
+            frontIndex: window.frontIndex
+        )
+
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: { [windowOnDisplayB] },
+            focusedWindow: { windowOnDisplayB },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { _ in true },
+            displays: { displays },
+            runProcess: { _, _ in (0, "") }
+        )
+        let service = workspace.makeService(runtimeHooks: runtimeHooks)
+
+        let result = service.displayCurrent(json: true)
+        XCTAssertEqual(result.exitCode, 0)
+
+        let payload = try decode(DisplayCurrentJSON.self, from: result.stdout)
+        XCTAssertEqual(payload.schemaVersion, 1)
+        XCTAssertEqual(payload.display.id, "display-b")
+        XCTAssertFalse(payload.display.isPrimary)
+        XCTAssertEqual(payload.display.visibleFrame.width, 1280)
+    }
+
+    func testDisplayCurrentMissingDisplayReturns40JSON() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+        let window = Self.window(windowID: 700, bundleID: "com.apple.TextEdit", title: "Editor", spaceID: 2, frontIndex: 0)
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: { [window] },
+            focusedWindow: { window },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { _ in true },
+            displays: { [] },
+            runProcess: { _, _ in (0, "") }
+        )
+        let service = workspace.makeService(runtimeHooks: runtimeHooks)
+
+        let result = service.displayCurrent(json: true)
+        XCTAssertEqual(result.exitCode, Int32(ErrorCode.targetWindowNotFound.rawValue))
+        let payload = try decode(CommonErrorJSON.self, from: result.stdout)
+        XCTAssertEqual(payload.code, ErrorCode.targetWindowNotFound.rawValue)
+    }
+
+    func testSpaceListRequiresJSONFlag() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+        let service = workspace.makeService()
+
+        let result = service.spaceList(json: false)
+        XCTAssertEqual(result.exitCode, Int32(ErrorCode.validationError.rawValue))
+        XCTAssertTrue(result.stdout.isEmpty)
+        XCTAssertEqual(result.stderr, "space list supports --json only\n")
+    }
+
+    func testSpaceListReturnsRuntimeSpacesJSON() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+        let focused = Self.window(windowID: 801, bundleID: "com.apple.TextEdit", title: "Editor", spaceID: 2, frontIndex: 0)
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: {
+                [
+                    Self.window(windowID: 800, bundleID: "com.apple.Notes", title: "Notes", spaceID: 1, frontIndex: 1),
+                    focused,
+                    Self.window(windowID: 900, bundleID: "com.apple.Terminal", title: "Shell", spaceID: 1, frontIndex: 2),
+                ]
+            },
+            focusedWindow: { focused },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { _ in true },
+            displays: {
+                [
+                    DisplayInfo(
+                        id: "display-a",
+                        width: 3200,
+                        height: 2000,
+                        scale: 2.0,
+                        isPrimary: true,
+                        frame: CGRect(x: 0, y: 0, width: 1600, height: 1000),
+                        visibleFrame: CGRect(x: 0, y: 23, width: 1600, height: 977)
+                    ),
+                ]
+            },
+            runProcess: { _, _ in (0, "") },
+            spaces: {
+                [
+                    SpaceInfo(spaceID: 1, displayID: "display-a", isVisible: true, isNativeFullscreen: false),
+                    SpaceInfo(spaceID: 2, displayID: "display-a", isVisible: true, isNativeFullscreen: false),
+                ]
+            },
+            listWindowsOnAllSpaces: {
+                [
+                    Self.window(windowID: 800, bundleID: "com.apple.Notes", title: "Notes", spaceID: 1, frontIndex: 1),
+                    focused,
+                    Self.window(windowID: 900, bundleID: "com.apple.Terminal", title: "Shell", spaceID: 1, frontIndex: 2),
+                ]
+            }
+        )
+        let service = workspace.makeService(runtimeHooks: runtimeHooks)
+
+        let result = service.spaceList(json: true)
+        XCTAssertEqual(result.exitCode, 0)
+        let payload = try decode(SpaceListJSON.self, from: result.stdout)
+        XCTAssertEqual(payload.schemaVersion, 1)
+        XCTAssertEqual(payload.spaces.map(\.spaceID), [1, 2])
+        XCTAssertEqual(payload.spaces.map(\.displayID), ["display-a", "display-a"])
+        XCTAssertEqual(payload.spaces.map(\.windowIDs), [[800, 900], [801]])
+        XCTAssertEqual(payload.spaces.map(\.hasFocus), [false, true])
+    }
+
+    func testSpaceCurrentRequiresJSONFlag() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+        let service = workspace.makeService()
+
+        let result = service.spaceCurrent(json: false)
+        XCTAssertEqual(result.exitCode, Int32(ErrorCode.validationError.rawValue))
+        XCTAssertTrue(result.stdout.isEmpty)
+        XCTAssertEqual(result.stderr, "space current supports --json only\n")
+    }
+
+    func testSpaceCurrentReturnsFocusedWindowSpaceJSON() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+        let focused = Self.window(windowID: 801, bundleID: "com.apple.TextEdit", title: "Editor", spaceID: 2, frontIndex: 0)
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: { [focused] },
+            focusedWindow: { focused },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { _ in true },
+            displays: { [] },
+            runProcess: { _, _ in (0, "") },
+            spaces: {
+                [
+                    SpaceInfo(spaceID: 2, displayID: "display-a", isVisible: true, isNativeFullscreen: false),
+                ]
+            },
+            listWindowsOnAllSpaces: { [focused] }
+        )
+        let service = workspace.makeService(runtimeHooks: runtimeHooks)
+
+        let result = service.spaceCurrent(json: true)
+        XCTAssertEqual(result.exitCode, 0)
+        let payload = try decode(SpaceCurrentJSON.self, from: result.stdout)
+        XCTAssertEqual(payload.schemaVersion, 1)
+        XCTAssertEqual(payload.space.spaceID, 2)
+        XCTAssertEqual(payload.space.displayID, "display-a")
+        XCTAssertTrue(payload.space.hasFocus)
+        XCTAssertEqual(payload.space.windowIDs, [801])
+    }
+
+    func testSpaceCurrentMissingFocusedWindowReturns40JSON() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: { [] },
+            focusedWindow: { nil },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { _ in true },
+            displays: { [] },
+            runProcess: { _, _ in (0, "") },
+            spaces: { [] }
+        )
+        let service = workspace.makeService(runtimeHooks: runtimeHooks)
+
+        let result = service.spaceCurrent(json: true)
+        XCTAssertEqual(result.exitCode, Int32(ErrorCode.targetWindowNotFound.rawValue))
+        let payload = try decode(CommonErrorJSON.self, from: result.stdout)
+        XCTAssertEqual(payload.code, ErrorCode.targetWindowNotFound.rawValue)
+    }
+
     func testWindowCurrentReturnsSlotNullWhenUnassigned() throws {
         let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
         defer { workspace.cleanup() }
@@ -955,6 +1236,7 @@ final class CommandServiceContractTests: XCTestCase {
         XCTAssertEqual(result.exitCode, 0)
         let payload = try decode(WindowCurrentJSON.self, from: result.stdout)
         XCTAssertNil(payload.slot)
+        XCTAssertEqual(payload.windowID, 700)
     }
 
     func testWindowCurrentReturnsProfileWhenTrackedInRuntimeState() throws {
@@ -992,6 +1274,7 @@ final class CommandServiceContractTests: XCTestCase {
         XCTAssertEqual(result.exitCode, 0)
         let payload = try decode(WindowCurrentJSON.self, from: result.stdout)
         XCTAssertEqual(payload.profile, "Default")
+        XCTAssertEqual(payload.windowID, 700)
     }
 
     func testSwitcherRequiresJSONFlag() throws {

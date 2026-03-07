@@ -57,6 +57,15 @@ final class AgentIPCTests: XCTestCase {
         XCTAssertEqual(decoded.configDirectoryPath, "/Users/example/.config/shitsurae")
     }
 
+    func testAgentCommandCodableSupportsDisplayAndSpaceCommands() throws {
+        let commands: [AgentCommand] = [.displayList, .displayCurrent, .spaceList, .spaceCurrent]
+
+        let encoded = try JSONEncoder().encode(commands)
+        let decoded = try JSONDecoder().decode([AgentCommand].self, from: encoded)
+
+        XCTAssertEqual(decoded, commands)
+    }
+
     func testLaunchAgentPlistURLUsesLaunchAgentLabel() {
         let url = AgentXPCConstants.launchAgentPlistURL.path
         XCTAssertTrue(url.hasSuffix("/Library/LaunchAgents/\(AgentXPCConstants.launchAgentLabel).plist"))

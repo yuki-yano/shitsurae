@@ -5,6 +5,10 @@ public enum AgentCommand: String, Codable {
     case layoutsList
     case validate
     case diagnostics
+    case displayList
+    case displayCurrent
+    case spaceList
+    case spaceCurrent
     case windowCurrent
     case windowMove
     case windowResize

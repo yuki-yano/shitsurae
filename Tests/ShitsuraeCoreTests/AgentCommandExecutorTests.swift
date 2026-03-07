@@ -93,6 +93,10 @@ final class AgentCommandExecutorTests: XCTestCase {
         handler.validateResult = CommandResult(exitCode: 11)
         handler.layoutsListResult = CommandResult(exitCode: 0, stdout: "work\n")
         handler.diagnosticsResult = CommandResult(exitCode: 0, stdout: "{ }\n")
+        handler.displayListResult = CommandResult(exitCode: 0, stdout: "{ \"displays\": [] }\n")
+        handler.displayCurrentResult = CommandResult(exitCode: 40)
+        handler.spaceListResult = CommandResult(exitCode: 0, stdout: "{ \"spaces\": [] }\n")
+        handler.spaceCurrentResult = CommandResult(exitCode: 40)
         handler.windowCurrentResult = CommandResult(exitCode: 40)
         handler.windowMoveResult = CommandResult(exitCode: 50)
         handler.windowResizeResult = CommandResult(exitCode: 51)
@@ -103,6 +107,10 @@ final class AgentCommandExecutorTests: XCTestCase {
         XCTAssertEqual(executor.execute(request(command: .validate, json: true)).exitCode, 11)
         XCTAssertEqual(executor.execute(request(command: .layoutsList, json: nil)).stdout, "work\n")
         XCTAssertEqual(executor.execute(request(command: .diagnostics, json: true)).exitCode, 0)
+        XCTAssertEqual(executor.execute(request(command: .displayList, json: true)).exitCode, 0)
+        XCTAssertEqual(executor.execute(request(command: .displayCurrent, json: true)).exitCode, 40)
+        XCTAssertEqual(executor.execute(request(command: .spaceList, json: true)).exitCode, 0)
+        XCTAssertEqual(executor.execute(request(command: .spaceCurrent, json: true)).exitCode, 40)
         XCTAssertEqual(executor.execute(request(command: .windowCurrent, json: true)).exitCode, 40)
         XCTAssertEqual(
             executor.execute(
@@ -137,6 +145,10 @@ final class AgentCommandExecutorTests: XCTestCase {
         XCTAssertEqual(handler.validateCalls, [true])
         XCTAssertEqual(handler.layoutsListCalls, 1)
         XCTAssertEqual(handler.diagnosticsCalls, [true])
+        XCTAssertEqual(handler.displayListCalls, [true])
+        XCTAssertEqual(handler.displayCurrentCalls, [true])
+        XCTAssertEqual(handler.spaceListCalls, [true])
+        XCTAssertEqual(handler.spaceCurrentCalls, [true])
         XCTAssertEqual(handler.windowCurrentCalls, [true])
         XCTAssertEqual(handler.windowMoveCalls.count, 1)
         XCTAssertNil(handler.windowMoveCalls.first?.target)
@@ -310,6 +322,10 @@ private final class StubCommandHandler: CommandHandling {
     var validateResult = CommandResult(exitCode: 0)
     var layoutsListResult = CommandResult(exitCode: 0)
     var diagnosticsResult = CommandResult(exitCode: 0)
+    var displayListResult = CommandResult(exitCode: 0)
+    var displayCurrentResult = CommandResult(exitCode: 0)
+    var spaceListResult = CommandResult(exitCode: 0)
+    var spaceCurrentResult = CommandResult(exitCode: 0)
     var windowCurrentResult = CommandResult(exitCode: 0)
     var windowMoveResult = CommandResult(exitCode: 0)
     var windowResizeResult = CommandResult(exitCode: 0)
@@ -321,6 +337,10 @@ private final class StubCommandHandler: CommandHandling {
     var validateCalls: [Bool] = []
     var layoutsListCalls = 0
     var diagnosticsCalls: [Bool] = []
+    var displayListCalls: [Bool] = []
+    var displayCurrentCalls: [Bool] = []
+    var spaceListCalls: [Bool] = []
+    var spaceCurrentCalls: [Bool] = []
     var windowCurrentCalls: [Bool] = []
     var windowMoveCalls: [WindowMoveCall] = []
     var windowResizeCalls: [WindowResizeCall] = []
@@ -340,6 +360,26 @@ private final class StubCommandHandler: CommandHandling {
     func diagnostics(json: Bool) -> CommandResult {
         diagnosticsCalls.append(json)
         return diagnosticsResult
+    }
+
+    func displayList(json: Bool) -> CommandResult {
+        displayListCalls.append(json)
+        return displayListResult
+    }
+
+    func displayCurrent(json: Bool) -> CommandResult {
+        displayCurrentCalls.append(json)
+        return displayCurrentResult
+    }
+
+    func spaceList(json: Bool) -> CommandResult {
+        spaceListCalls.append(json)
+        return spaceListResult
+    }
+
+    func spaceCurrent(json: Bool) -> CommandResult {
+        spaceCurrentCalls.append(json)
+        return spaceCurrentResult
     }
 
     func windowCurrent(json: Bool) -> CommandResult {

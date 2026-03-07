@@ -11,6 +11,8 @@ struct ShitsuraeCLI: ParsableCommand {
             Arrange.self,
             Layouts.self,
             Validate.self,
+            Display.self,
+            Space.self,
             Window.self,
             Focus.self,
             Switcher.self,
@@ -146,6 +148,112 @@ struct Diagnostics: ParsableCommand {
                 height: nil
             )
         )
+    }
+}
+
+struct Display: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Display related commands",
+        subcommands: [List.self, Current.self]
+    )
+
+    struct List: ParsableCommand {
+        @Flag(name: .long, help: "JSON output")
+        var json = false
+
+        mutating func run() throws {
+            executeRemote(
+                AgentCommandRequest(
+                    command: .displayList,
+                    json: json,
+                    dryRun: nil,
+                    verbose: nil,
+                    layoutName: nil,
+                    slot: nil,
+                    includeAllSpaces: nil,
+                    x: nil,
+                    y: nil,
+                    width: nil,
+                    height: nil
+                )
+            )
+        }
+    }
+
+    struct Current: ParsableCommand {
+        @Flag(name: .long, help: "JSON output")
+        var json = false
+
+        mutating func run() throws {
+            executeRemote(
+                AgentCommandRequest(
+                    command: .displayCurrent,
+                    json: json,
+                    dryRun: nil,
+                    verbose: nil,
+                    layoutName: nil,
+                    slot: nil,
+                    includeAllSpaces: nil,
+                    x: nil,
+                    y: nil,
+                    width: nil,
+                    height: nil
+                )
+            )
+        }
+    }
+}
+
+struct Space: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Space related commands",
+        subcommands: [List.self, Current.self]
+    )
+
+    struct List: ParsableCommand {
+        @Flag(name: .long, help: "JSON output")
+        var json = false
+
+        mutating func run() throws {
+            executeRemote(
+                AgentCommandRequest(
+                    command: .spaceList,
+                    json: json,
+                    dryRun: nil,
+                    verbose: nil,
+                    layoutName: nil,
+                    slot: nil,
+                    includeAllSpaces: nil,
+                    x: nil,
+                    y: nil,
+                    width: nil,
+                    height: nil
+                )
+            )
+        }
+    }
+
+    struct Current: ParsableCommand {
+        @Flag(name: .long, help: "JSON output")
+        var json = false
+
+        mutating func run() throws {
+            executeRemote(
+                AgentCommandRequest(
+                    command: .spaceCurrent,
+                    json: json,
+                    dryRun: nil,
+                    verbose: nil,
+                    layoutName: nil,
+                    slot: nil,
+                    includeAllSpaces: nil,
+                    x: nil,
+                    y: nil,
+                    width: nil,
+                    height: nil
+                )
+            )
+        }
     }
 }
 

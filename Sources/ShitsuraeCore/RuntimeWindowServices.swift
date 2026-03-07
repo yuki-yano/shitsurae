@@ -112,6 +112,25 @@ public struct WindowSnapshot: Codable, Equatable {
     }
 }
 
+public struct SpaceInfo: Codable, Equatable {
+    public let spaceID: Int
+    public let displayID: String?
+    public let isVisible: Bool
+    public let isNativeFullscreen: Bool
+
+    public init(
+        spaceID: Int,
+        displayID: String?,
+        isVisible: Bool,
+        isNativeFullscreen: Bool
+    ) {
+        self.spaceID = spaceID
+        self.displayID = displayID
+        self.isVisible = isVisible
+        self.isNativeFullscreen = isNativeFullscreen
+    }
+}
+
 public enum WindowQueryService {
     private struct ProfileDirectoryCacheKey: Hashable {
         let bundleID: String
@@ -183,6 +202,13 @@ public enum WindowQueryService {
 
     public static func listWindowsOnAllSpaces(displays: [DisplayInfo] = SystemProbe.displays()) -> [WindowSnapshot] {
         listWindows(displays: displays, options: [.optionAll, .excludeDesktopElements])
+    }
+
+    public static func listSpaces(displays: [DisplayInfo] = SystemProbe.displays()) -> [SpaceInfo] {
+        listSpaces(
+            displays: displays,
+            managedDisplaySpaces: managedDisplaySpaces()
+        )
     }
 
     public static func prewarmBrowserProfileDirectoryCache() {
@@ -350,6 +376,53 @@ public enum WindowQueryService {
             let profileDirectory = profileResolver(bundleID, pid)
             cacheProfileDirectory(profileDirectory, bundleID: bundleID, pid: pid)
         }
+    }
+
+    static func listSpaces(
+        displays: [DisplayInfo],
+        managedDisplaySpaces: [[String: Any]]?
+    ) -> [SpaceInfo] {
+        guard let managedDisplaySpaces else {
+            return []
+        }
+
+        let displayOrder = Dictionary(uniqueKeysWithValues: displays.enumerated().map { ($0.element.id, $0.offset) })
+        var result: [(displayOrder: Int, spaceOrder: Int, info: SpaceInfo)] = []
+
+        for displayEntry in managedDisplaySpaces {
+            let displayID = displayEntry["Display Identifier"] as? String
+            let currentManagedSpaceID = managedSpaceID(from: displayEntry["Current Space"] as? [String: Any])
+            let spaces = (displayEntry["Spaces"] as? [[String: Any]] ?? [])
+                .filter { spaceType(from: $0) == 0 }
+
+            for (index, space) in spaces.enumerated() {
+                guard let managedSpaceID = managedSpaceID(from: space) else {
+                    continue
+                }
+
+                result.append(
+                    (
+                        displayOrder[displayID ?? ""] ?? Int.max,
+                        index,
+                        SpaceInfo(
+                            spaceID: index + 1,
+                            displayID: displayID,
+                            isVisible: managedSpaceID == currentManagedSpaceID,
+                            isNativeFullscreen: false
+                        )
+                    )
+                )
+            }
+        }
+
+        return result
+            .sorted {
+                if $0.displayOrder != $1.displayOrder {
+                    return $0.displayOrder < $1.displayOrder
+                }
+                return $0.spaceOrder < $1.spaceOrder
+            }
+            .map(\.info)
     }
 
     static func resetProfileDirectoryCacheForTesting() {
@@ -840,6 +913,17 @@ public enum WindowQueryService {
         return unsafeBitCast(symbol, to: CopyManagedDisplaySpacesFn.self)
     }()
 
+    private static func managedDisplaySpaces() -> [[String: Any]]? {
+        guard let mainConnectionID,
+              let copyManagedDisplaySpaces
+        else {
+            return nil
+        }
+
+        let connection = mainConnectionID()
+        return copyManagedDisplaySpaces(connection)?.takeRetainedValue() as? [[String: Any]]
+    }
+
     private static func resolvedSpaceID(for windowID: UInt32, displayID: String?) -> Int? {
         guard let mainConnectionID,
               let copySpacesForWindows,
@@ -878,6 +962,21 @@ public enum WindowQueryService {
         }
 
         return nil
+    }
+
+    private static func managedSpaceID(from space: [String: Any]?) -> Int? {
+        guard let space else {
+            return nil
+        }
+
+        return (space["ManagedSpaceID"] as? Int)
+            ?? (space["ManagedSpaceID"] as? NSNumber)?.intValue
+            ?? (space["id64"] as? Int)
+            ?? (space["id64"] as? NSNumber)?.intValue
+    }
+
+    private static func spaceType(from space: [String: Any]) -> Int {
+        (space["type"] as? Int) ?? (space["type"] as? NSNumber)?.intValue ?? 0
     }
 }
 

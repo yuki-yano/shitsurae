@@ -17,6 +17,7 @@ public struct CommandResult {
 public struct CommandServiceRuntimeHooks: @unchecked Sendable {
     public let accessibilityGranted: () -> Bool
     public let listWindows: () -> [WindowSnapshot]
+    public let listWindowsOnAllSpaces: () -> [WindowSnapshot]
     public let focusedWindow: () -> WindowSnapshot?
     public let activateBundle: (String) -> Bool
     public let activateWindowWithTitle: (String, String) -> Bool
@@ -24,6 +25,7 @@ public struct CommandServiceRuntimeHooks: @unchecked Sendable {
     public let setFocusedWindowFrame: (ResolvedFrame) -> Bool
     public let setWindowFrame: (UInt32, String, ResolvedFrame) -> Bool
     public let displays: () -> [DisplayInfo]
+    public let spaces: () -> [SpaceInfo]
     public let runProcess: (String, [String]) -> (exitCode: Int32, output: String)
 
     public init(
@@ -38,10 +40,13 @@ public struct CommandServiceRuntimeHooks: @unchecked Sendable {
             WindowQueryService.activate(bundleID: bundleID, preferredWindowTitle: title)
         },
         focusWindow: @escaping (UInt32, String) -> Bool = WindowQueryService.focusWindow,
-        setWindowFrame: @escaping (UInt32, String, ResolvedFrame) -> Bool = WindowQueryService.setWindowFrame
+        setWindowFrame: @escaping (UInt32, String, ResolvedFrame) -> Bool = WindowQueryService.setWindowFrame,
+        spaces: @escaping () -> [SpaceInfo] = { WindowQueryService.listSpaces() },
+        listWindowsOnAllSpaces: @escaping () -> [WindowSnapshot] = { WindowQueryService.listWindowsOnAllSpaces() }
     ) {
         self.accessibilityGranted = accessibilityGranted
         self.listWindows = listWindows
+        self.listWindowsOnAllSpaces = listWindowsOnAllSpaces
         self.focusedWindow = focusedWindow
         self.activateBundle = activateBundle
         self.activateWindowWithTitle = activateWindowWithTitle
@@ -49,6 +54,7 @@ public struct CommandServiceRuntimeHooks: @unchecked Sendable {
         self.setFocusedWindowFrame = setFocusedWindowFrame
         self.setWindowFrame = setWindowFrame
         self.displays = displays
+        self.spaces = spaces
         self.runProcess = runProcess
     }
 
@@ -79,7 +85,9 @@ public struct CommandServiceRuntimeHooks: @unchecked Sendable {
             let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
             let output = String(data: outputData, encoding: .utf8) ?? ""
             return (process.terminationStatus, output)
-        }
+        },
+        spaces: { WindowQueryService.listSpaces() },
+        listWindowsOnAllSpaces: { WindowQueryService.listWindowsOnAllSpaces() }
     )
 }
 
@@ -337,6 +345,7 @@ public final class CommandService {
 
         let payload = WindowCurrentJSON(
             schemaVersion: 1,
+            windowID: focused.windowID,
             bundleID: focused.bundleID,
             pid: focused.pid,
             title: focused.title,
@@ -351,6 +360,90 @@ public final class CommandService {
             slot: slotEntry?.slot
         )
 
+        return CommandResult(exitCode: 0, stdout: encodeJSON(payload) + "\n")
+    }
+
+    public func displayList(json: Bool) -> CommandResult {
+        guard json else {
+            return CommandResult(
+                exitCode: Int32(ErrorCode.validationError.rawValue),
+                stderr: "display list supports --json only\n"
+            )
+        }
+
+        let payload = DisplayListJSON(
+            schemaVersion: 1,
+            displays: runtimeHooks.displays().map(displaySummary)
+        )
+        return CommandResult(exitCode: 0, stdout: encodeJSON(payload) + "\n")
+    }
+
+    public func displayCurrent(json: Bool) -> CommandResult {
+        guard json else {
+            return CommandResult(
+                exitCode: Int32(ErrorCode.validationError.rawValue),
+                stderr: "display current supports --json only\n"
+            )
+        }
+
+        guard let focused = runtimeHooks.focusedWindow() else {
+            return commonJSONError(.targetWindowNotFound, "focused window not found", toStdErr: false)
+        }
+
+        let displays = runtimeHooks.displays()
+        guard let display = resolveDisplay(for: focused, displays: displays) else {
+            return commonJSONError(.targetWindowNotFound, "current display not found", toStdErr: false)
+        }
+
+        let payload = DisplayCurrentJSON(schemaVersion: 1, display: displaySummary(display))
+        return CommandResult(exitCode: 0, stdout: encodeJSON(payload) + "\n")
+    }
+
+    public func spaceList(json: Bool) -> CommandResult {
+        guard json else {
+            return CommandResult(
+                exitCode: Int32(ErrorCode.validationError.rawValue),
+                stderr: "space list supports --json only\n"
+            )
+        }
+
+        let windows = runtimeHooks.listWindowsOnAllSpaces()
+        let focused = runtimeHooks.focusedWindow()
+        let payload = SpaceListJSON(
+            schemaVersion: 1,
+            spaces: runtimeHooks.spaces().map { space in
+                spaceSummary(space, windows: windows, focused: focused)
+            }
+        )
+        return CommandResult(exitCode: 0, stdout: encodeJSON(payload) + "\n")
+    }
+
+    public func spaceCurrent(json: Bool) -> CommandResult {
+        guard json else {
+            return CommandResult(
+                exitCode: Int32(ErrorCode.validationError.rawValue),
+                stderr: "space current supports --json only\n"
+            )
+        }
+
+        guard let focused = runtimeHooks.focusedWindow() else {
+            return commonJSONError(.targetWindowNotFound, "focused window not found", toStdErr: false)
+        }
+
+        guard let targetSpaceID = focused.spaceID else {
+            return commonJSONError(.targetWindowNotFound, "current space not found", toStdErr: false)
+        }
+
+        let windows = runtimeHooks.listWindowsOnAllSpaces()
+        let spaces = runtimeHooks.spaces()
+        guard let space = spaces.first(where: { matches(space: $0, spaceID: targetSpaceID, displayID: focused.displayID) }) else {
+            return commonJSONError(.targetWindowNotFound, "current space not found", toStdErr: false)
+        }
+
+        let payload = SpaceCurrentJSON(
+            schemaVersion: 1,
+            space: spaceSummary(space, windows: windows, focused: focused)
+        )
         return CommandResult(exitCode: 0, stdout: encodeJSON(payload) + "\n")
     }
 
@@ -843,6 +936,82 @@ public final class CommandService {
         }
 
         return matching.first
+    }
+
+    private func displaySummary(_ display: DisplayInfo) -> DisplaySummaryJSON {
+        DisplaySummaryJSON(
+            id: display.id,
+            isPrimary: display.isPrimary,
+            scale: display.scale,
+            pixelWidth: display.width,
+            pixelHeight: display.height,
+            frame: resolvedFrame(display.frame),
+            visibleFrame: resolvedFrame(display.visibleFrame)
+        )
+    }
+
+    private func resolveDisplay(for window: WindowSnapshot, displays: [DisplayInfo]) -> DisplayInfo? {
+        if let displayID = window.displayID,
+           let exact = displays.first(where: { $0.id == displayID })
+        {
+            return exact
+        }
+
+        if displays.count == 1 {
+            return displays[0]
+        }
+
+        return nil
+    }
+
+    private func spaceSummary(_ space: SpaceInfo, windows: [WindowSnapshot], focused: WindowSnapshot?) -> SpaceSummaryJSON {
+        let windowIDs = windows
+            .filter { matches(space: space, window: $0) }
+            .map(\.windowID)
+            .sorted()
+        let hasFocus = focused.map { matches(space: space, window: $0) } ?? false
+
+        return SpaceSummaryJSON(
+            spaceID: space.spaceID,
+            displayID: space.displayID,
+            isVisible: space.isVisible,
+            isNativeFullscreen: space.isNativeFullscreen,
+            hasFocus: hasFocus,
+            windowIDs: windowIDs
+        )
+    }
+
+    private func matches(space: SpaceInfo, window: WindowSnapshot) -> Bool {
+        guard window.spaceID == space.spaceID else {
+            return false
+        }
+
+        if let displayID = space.displayID {
+            return window.displayID == displayID
+        }
+
+        return true
+    }
+
+    private func matches(space: SpaceInfo, spaceID: Int, displayID targetDisplayID: String?) -> Bool {
+        guard space.spaceID == spaceID else {
+            return false
+        }
+
+        if let displayID = space.displayID {
+            return displayID == targetDisplayID
+        }
+
+        return true
+    }
+
+    private func resolvedFrame(_ rect: CGRect) -> ResolvedFrame {
+        ResolvedFrame(
+            x: rect.origin.x,
+            y: rect.origin.y,
+            width: rect.width,
+            height: rect.height
+        )
     }
 
     private func orderCandidates(_ candidates: [InternalCandidate], prioritizeCurrentSpace: Bool) -> [InternalCandidate] {
