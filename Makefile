@@ -1,4 +1,4 @@
-.PHONY: icons build test app
+.PHONY: icons build test app release-asset bump-version
 
 CONFIGURATION ?= release
 
@@ -13,3 +13,10 @@ test:
 
 app:
 	CONFIGURATION=$(CONFIGURATION) ./Scripts/build-app-bundle.sh
+
+release-asset:
+	./Scripts/create-release-asset.sh
+
+bump-version:
+	@test -n "$(KIND)" || (echo "usage: make bump-version KIND={patch|minor|major}" >&2; exit 1)
+	./Scripts/bump-version.sh "$(KIND)"

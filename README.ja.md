@@ -55,7 +55,7 @@ YAML にレイアウトを定義し、`shitsurae arrange <name>` を実行する
 `Cmd+Tab`（カスタマイズ可能）で起動する独自のスイッチャー：
 
 - 現在 Space のウィンドウを優先表示
-- 各候補に `a`, `s`, `d`, `f`, … のクイックキーが割り当てられ、1 打鍵で即時切替
+- デフォルトでは各候補に `1`, `2`, `3`, `4`, … のクイックキーが割り当てられ、1 打鍵で即時切替
 - `acceptOnModifierRelease` 対応——修飾キーを離すだけで選択確定
 - accept/cancel キー、クイックキー文字列、対象 Space の範囲をカスタマイズ可能
 
@@ -128,30 +128,32 @@ shitsurae switcher list --json                 # スイッチャー候補一覧
 
 ## インストール
 
-### ソースからビルド
+### Homebrew Cask でインストール
 
 ```bash
-swift build
+brew tap yuki-yano/shitsurae
+brew install --cask shitsurae
+xattr -dr com.apple.quarantine /Applications/Shitsurae.app
+open /Applications/Shitsurae.app
 ```
 
-テスト実行：
+この構成では次が入ります：
+
+- `Shitsurae.app` が `/Applications` に配置される
+- `shitsurae` CLI が Homebrew の `bin` 配下に symlink され、通常の `PATH` から呼べる
+
+> [!WARNING]
+> Homebrew で入れた配布版は、初回起動前に `xattr -dr com.apple.quarantine /Applications/Shitsurae.app` の実行が必須です。
+> これは未署名アプリに対する macOS Gatekeeper の quarantine を外す操作なので、`https://github.com/yuki-yano/shitsurae` を信頼できる場合だけ実行してください。
+
+削除するときは次を使います：
 
 ```bash
-swift test
+brew uninstall --cask shitsurae
+brew zap shitsurae    # 任意: 設定とログも削除
 ```
 
-アプリバンドル生成：
-
-```bash
-make app
-```
-
-出力先：
-
-- `dist/Shitsurae.app`
-- 同梱 CLI：`dist/Shitsurae.app/Contents/Resources/shitsurae`
-
-### 配布版の初回起動（Notarize なし）
+### `.app` を直接配布した場合の初回起動（Notarize なし）
 
 `.app` をそのまま配布した場合、初回は quarantine を外して起動してください。
 
@@ -302,6 +304,29 @@ shortcuts:
         type: snap
         preset: rightHalf
 ```
+
+## ソースからビルド
+
+```bash
+swift build
+```
+
+テスト実行：
+
+```bash
+swift test
+```
+
+アプリバンドル生成：
+
+```bash
+make app
+```
+
+出力先：
+
+- `dist/Shitsurae.app`
+- 同梱 CLI：`dist/Shitsurae.app/Contents/Resources/shitsurae`
 
 ## ライセンス
 

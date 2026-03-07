@@ -3,6 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIGURATION="${CONFIGURATION:-release}"
+VERSION_FILE="${VERSION_FILE:-$ROOT_DIR/VERSION}"
+APP_VERSION="${APP_VERSION:-}"
+APP_BUILD_VERSION="${APP_BUILD_VERSION:-}"
 APP_NAME="Shitsurae"
 BUNDLE_NAME="${BUNDLE_NAME:-Shitsurae}"
 AGENT_NAME="ShitsuraeAgent"
@@ -20,6 +23,44 @@ APP_PLIST_PATH="$APP_CONTENTS_PATH/Info.plist"
 APP_BUNDLE_ID=""
 AGENT_BUNDLE_ID="com.yuki-yano.shitsurae.agent"
 CLI_BUNDLE_ID="com.yuki-yano.shitsurae.cli"
+
+resolve_default_version() {
+  if [[ ! -f "$VERSION_FILE" ]]; then
+    echo "error: missing version file: $VERSION_FILE" >&2
+    exit 1
+  fi
+
+  local resolved
+  resolved="$(tr -d '[:space:]' < "$VERSION_FILE")"
+
+  if [[ -z "$resolved" ]]; then
+    echo "error: empty version in $VERSION_FILE" >&2
+    exit 1
+  fi
+
+  printf '%s' "$resolved"
+}
+
+validate_version() {
+  local label="$1"
+  local value="$2"
+
+  if [[ ! "$value" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+    echo "error: $label must contain only digits and dots: $value" >&2
+    exit 1
+  fi
+}
+
+if [[ -z "$APP_VERSION" ]]; then
+  APP_VERSION="$(resolve_default_version)"
+fi
+
+if [[ -z "$APP_BUILD_VERSION" ]]; then
+  APP_BUILD_VERSION="$APP_VERSION"
+fi
+
+validate_version "APP_VERSION" "$APP_VERSION"
+validate_version "APP_BUILD_VERSION" "$APP_BUILD_VERSION"
 
 cd "$ROOT_DIR"
 
@@ -107,6 +148,10 @@ iconutil -c icns "$ICONSET_DIR" -o "$APP_RESOURCES_PATH/${ICON_NAME}.icns"
   /usr/libexec/PlistBuddy -c "Add :CFBundleName string $BUNDLE_NAME" "$APP_PLIST_PATH"
 /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $BUNDLE_NAME" "$APP_PLIST_PATH" 2>/dev/null || \
   /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string $BUNDLE_NAME" "$APP_PLIST_PATH"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" "$APP_PLIST_PATH" 2>/dev/null || \
+  /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $APP_VERSION" "$APP_PLIST_PATH"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_BUILD_VERSION" "$APP_PLIST_PATH" 2>/dev/null || \
+  /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $APP_BUILD_VERSION" "$APP_PLIST_PATH"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile $ICON_NAME" "$APP_PLIST_PATH" 2>/dev/null || \
   /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string $ICON_NAME" "$APP_PLIST_PATH"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIconName $ICON_NAME" "$APP_PLIST_PATH" 2>/dev/null || \
@@ -139,3 +184,4 @@ codesign --force --sign - \
   "$APP_BUNDLE_PATH"
 
 echo "Built app bundle: $APP_BUNDLE_PATH"
+echo "App version: $APP_VERSION ($APP_BUILD_VERSION)"

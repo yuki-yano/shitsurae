@@ -55,7 +55,7 @@ All shortcuts are fully configurable in YAML. You can also disable specific shor
 A custom switcher triggered by `Cmd+Tab` (configurable):
 
 - Prioritizes windows on the current Space
-- Each candidate gets a quick key (`a`, `s`, `d`, `f`, …) for one-keystroke selection
+- By default, each candidate gets a quick key (`1`, `2`, `3`, `4`, …) for one-keystroke selection
 - Supports `acceptOnModifierRelease` — just release the modifier to confirm
 - Configurable accept/cancel keys, quick key string, and Space scope
 
@@ -128,30 +128,32 @@ No network communication is required for normal operation.
 
 ## Installation
 
-### Build from source
+### Install with Homebrew Cask
 
 ```bash
-swift build
+brew tap yuki-yano/shitsurae
+brew install --cask shitsurae
+xattr -dr com.apple.quarantine /Applications/Shitsurae.app
+open /Applications/Shitsurae.app
 ```
 
-Run tests:
+This installs:
+
+- `Shitsurae.app` to `/Applications`
+- `shitsurae` CLI to Homebrew's `bin` directory so it is available on your shell `PATH`
+
+> [!WARNING]
+> `xattr -dr com.apple.quarantine /Applications/Shitsurae.app` is currently a required step for Homebrew installs.
+> It removes macOS Gatekeeper quarantine for this unsigned app, so only run it if you trust `https://github.com/yuki-yano/shitsurae`.
+
+Remove the app later with:
 
 ```bash
-swift test
+brew uninstall --cask shitsurae
+brew zap shitsurae    # optional: also remove config and logs
 ```
 
-Build the app bundle:
-
-```bash
-make app
-```
-
-Output:
-
-- `dist/Shitsurae.app`
-- Bundled CLI: `dist/Shitsurae.app/Contents/Resources/shitsurae`
-
-### First launch (non-notarized builds)
+### Direct app bundle launch (non-notarized builds)
 
 If you distribute the `.app` directly, remove quarantine before first launch:
 
@@ -304,6 +306,29 @@ shortcuts:
         type: snap
         preset: rightHalf
 ```
+
+## Build from source
+
+```bash
+swift build
+```
+
+Run tests:
+
+```bash
+swift test
+```
+
+Build the app bundle:
+
+```bash
+make app
+```
+
+Output:
+
+- `dist/Shitsurae.app`
+- Bundled CLI: `dist/Shitsurae.app/Contents/Resources/shitsurae`
 
 ## License
 

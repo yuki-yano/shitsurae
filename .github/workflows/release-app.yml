@@ -1,0 +1,114 @@
+name: release-app
+
+on:
+  push:
+    tags:
+      - "app-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing app tag to release (e.g. app-v0.0.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag
+        id: release_tag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "value=${TAG}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify tag exists
+        run: git rev-parse "${{ steps.release_tag.outputs.value }}" >/dev/null
+
+      - name: Validate app tag format
+        run: |
+          TAG="${{ steps.release_tag.outputs.value }}"
+          if [[ ! "${TAG}" =~ ^app-v[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "unexpected app tag format: ${TAG}" >&2
+            exit 1
+          fi
+
+      - name: Checkout release tag commit
+        run: git checkout --detach "${{ steps.release_tag.outputs.value }}"
+
+      - name: Resolve version
+        id: app_version
+        run: |
+          TAG="${{ steps.release_tag.outputs.value }}"
+          VERSION="${TAG#app-v}"
+          FILE_VERSION="$(tr -d '[:space:]' < VERSION)"
+
+          if [[ "${FILE_VERSION}" != "${VERSION}" ]]; then
+            echo "VERSION file (${FILE_VERSION}) does not match release tag (${VERSION})" >&2
+            exit 1
+          fi
+
+          echo "value=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run Swift tests
+        run: env -u LIBRARY_PATH swift test
+
+      - name: Build app release asset
+        run: |
+          APP_VERSION="${{ steps.app_version.outputs.value }}" \
+          APP_BUILD_VERSION="${{ steps.app_version.outputs.value }}" \
+            ./Scripts/create-release-asset.sh
+
+      - name: Upload GitHub release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_tag.outputs.value }}
+          files: Shitsurae.app.tar.gz
+          overwrite_files: true
+          generate_release_notes: true
+
+      - name: Resolve cask metadata
+        id: cask_metadata
+        run: |
+          VERSION="${{ steps.app_version.outputs.value }}"
+          SHA256="$(shasum -a 256 Shitsurae.app.tar.gz | awk '{ print $1 }')"
+
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "sha256=${SHA256}" >> "${GITHUB_OUTPUT}"
+
+      - name: Dispatch homebrew tap update
+        env:
+          DISPATCH_TOKEN: ${{ secrets.HOMEBREW_TAP_DISPATCH_TOKEN }}
+          TAP_REPOSITORY: yuki-yano/homebrew-shitsurae
+          VERSION: ${{ steps.cask_metadata.outputs.version }}
+          SHA256: ${{ steps.cask_metadata.outputs.sha256 }}
+        run: |
+          if [[ -z "${DISPATCH_TOKEN}" ]]; then
+            echo "HOMEBREW_TAP_DISPATCH_TOKEN is required to update ${TAP_REPOSITORY}" >&2
+            exit 1
+          fi
+
+          curl -fsSL -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+            "https://api.github.com/repos/${TAP_REPOSITORY}/dispatches" \
+            -d @- <<JSON
+          {
+            "event_type": "update-shitsurae-cask",
+            "client_payload": {
+              "version": "${VERSION}",
+              "sha256": "${SHA256}"
+            }
+          }
+          JSON
