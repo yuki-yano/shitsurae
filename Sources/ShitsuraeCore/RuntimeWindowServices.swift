@@ -1,10 +1,67 @@
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import Darwin
 import Foundation
 
 @_silgen_name("_AXUIElementGetWindow")
 private func AXUIElementGetWindowID(_ element: AXUIElement, _ idOut: UnsafeMutablePointer<CGWindowID>) -> AXError
+
+@_silgen_name("GetProcessForPID")
+@discardableResult
+private func LegacyGetProcessForPID(_ pid: pid_t, _ psn: UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus
+
+private enum SLPSMode: UInt32 {
+    case userGenerated = 0x200
+}
+
+private typealias CSetFrontProcessWithOptionsFn = @convention(c) (
+    UnsafeMutablePointer<ProcessSerialNumber>,
+    CGWindowID,
+    UInt32
+) -> CGError
+
+private typealias CPostEventRecordToFn = @convention(c) (
+    UnsafeMutablePointer<ProcessSerialNumber>,
+    UnsafeMutablePointer<UInt8>
+) -> CGError
+
+typealias SetFrontProcessWithOptionsCall = (UnsafeMutablePointer<ProcessSerialNumber>, CGWindowID, UInt32) -> CGError
+typealias PostEventRecordToCall = (UnsafeMutablePointer<ProcessSerialNumber>, UnsafeMutablePointer<UInt8>) -> CGError
+
+private enum SkyLightSymbols {
+    private static let frameworkPath = "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight"
+
+    static func setFrontProcessWithOptions() -> SetFrontProcessWithOptionsCall? {
+        guard let function = resolve("_SLPSSetFrontProcessWithOptions", as: CSetFrontProcessWithOptionsFn.self) else {
+            return nil
+        }
+
+        return { psn, windowID, mode in
+            function(psn, windowID, mode)
+        }
+    }
+
+    static func postEventRecordTo() -> PostEventRecordToCall? {
+        guard let function = resolve("SLPSPostEventRecordTo", as: CPostEventRecordToFn.self) else {
+            return nil
+        }
+
+        return { psn, bytes in
+            function(psn, bytes)
+        }
+    }
+
+    private static func resolve<T>(_ symbol: String, as _: T.Type) -> T? {
+        guard let handle = dlopen(frameworkPath, RTLD_LAZY),
+              let raw = dlsym(handle, symbol)
+        else {
+            return nil
+        }
+
+        return unsafeBitCast(raw, to: T.self)
+    }
+}
 
 public struct WindowSnapshot: Codable, Equatable {
     public let windowID: UInt32
@@ -183,16 +240,51 @@ public enum WindowQueryService {
         return resolveFocusedWindow(
             frontmostPID: Int(app.processIdentifier),
             frontmostBundleID: bundleID,
+            focusedWindowID: frontmostWindowID(pid: app.processIdentifier),
             windows: windows
         )
     }
 
-    static func resolveFocusedWindow(frontmostPID: Int, frontmostBundleID: String, windows: [WindowSnapshot]) -> WindowSnapshot? {
+    static func resolveFocusedWindow(
+        frontmostPID: Int,
+        frontmostBundleID: String,
+        focusedWindowID: UInt32?,
+        windows: [WindowSnapshot]
+    ) -> WindowSnapshot? {
+        if let focusedWindowID,
+           let exact = windows.first(where: { $0.windowID == focusedWindowID })
+        {
+            return exact
+        }
+
         if let exact = windows.first(where: { $0.pid == frontmostPID }) {
             return exact
         }
 
         return windows.first(where: { $0.bundleID == frontmostBundleID })
+    }
+
+    private static func frontmostWindowID(pid: pid_t) -> UInt32? {
+        guard AXIsProcessTrusted() else {
+            return nil
+        }
+
+        let appElement = AXUIElementCreateApplication(pid)
+        for attribute in [kAXFocusedWindowAttribute as CFString, kAXMainWindowAttribute as CFString] {
+            var ref: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(appElement, attribute, &ref) == .success,
+                  let resolved = ref
+            else {
+                continue
+            }
+
+            var windowID: CGWindowID = 0
+            if AXUIElementGetWindowID((resolved as! AXUIElement), &windowID) == .success {
+                return UInt32(windowID)
+            }
+        }
+
+        return nil
     }
 
     @discardableResult
@@ -234,8 +326,7 @@ public enum WindowQueryService {
             return false
         }
 
-        _ = running.unhide()
-        _ = running.activate(options: activationOptions())
+        prepareForTargetedWindowInteraction(running)
         let appElement = AXUIElementCreateApplication(running.processIdentifier)
         guard let windowElement = matchingWindowElement(
             windowID: windowID,
@@ -280,8 +371,7 @@ public enum WindowQueryService {
             return false
         }
 
-        _ = running.unhide()
-        _ = running.activate(options: activationOptions())
+        prepareForTargetedWindowInteraction(running)
 
         let appElement = AXUIElementCreateApplication(running.processIdentifier)
         guard let windowElement = matchingWindowElement(
@@ -310,7 +400,7 @@ public enum WindowQueryService {
     public static func activate(bundleID: String, preferredWindowTitle: String? = nil) -> Bool {
         if let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
             _ = running.unhide()
-            _ = running.activate(options: activationOptions())
+            _ = running.activate(options: bundleActivationOptions())
             if waitForFrontmost(pid: running.processIdentifier, bundleID: bundleID) {
                 return true
             }
@@ -333,7 +423,7 @@ public enum WindowQueryService {
 
         if let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
             _ = running.unhide()
-            _ = running.activate(options: activationOptions())
+            _ = running.activate(options: bundleActivationOptions())
             if waitForFrontmost(pid: running.processIdentifier, bundleID: bundleID) {
                 return true
             }
@@ -382,8 +472,21 @@ public enum WindowQueryService {
         return waitForFrontmost(pid: pid, bundleID: bundleID)
     }
 
-    private static func activationOptions() -> NSApplication.ActivationOptions {
+    static func bundleActivationOptions() -> NSApplication.ActivationOptions {
         [.activateAllWindows]
+    }
+
+    private static func prepareForTargetedWindowInteraction(_ running: NSRunningApplication) {
+        prepareForTargetedWindowInteraction(isHidden: running.isHidden) {
+            _ = running.unhide()
+        }
+    }
+
+    static func prepareForTargetedWindowInteraction(isHidden: Bool, unhide: () -> Void) {
+        // Avoid app-wide activation here. The precise window focus path below should decide the z-order.
+        if isHidden {
+            unhide()
+        }
     }
 
     @discardableResult
@@ -393,12 +496,143 @@ public enum WindowQueryService {
         pid: pid_t,
         bundleID: String?
     ) -> Bool {
-        _ = AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
-        _ = AXUIElementSetAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, windowElement)
-        _ = AXUIElementSetAttributeValue(appElement, kAXMainWindowAttribute as CFString, windowElement)
-        _ = AXUIElementSetAttributeValue(windowElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-        _ = AXUIElementPerformAction(windowElement, kAXRaiseAction as CFString)
-        return waitForFrontmost(pid: pid, bundleID: bundleID)
+        var resolvedWindowID: CGWindowID = 0
+        guard AXUIElementGetWindowID(windowElement, &resolvedWindowID) == .success else {
+            return false
+        }
+
+        return performWindowFocusTransition(
+            setFrontmost: {
+                if !promoteWindowToFront(pid: pid, windowID: UInt32(resolvedWindowID)) {
+                    _ = AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+                }
+            },
+            waitForFrontmost: {
+                waitForFrontmost(pid: pid, bundleID: bundleID)
+            },
+            applyWindowFocus: {
+                _ = AXUIElementSetAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, windowElement)
+                _ = AXUIElementSetAttributeValue(appElement, kAXMainWindowAttribute as CFString, windowElement)
+                _ = AXUIElementSetAttributeValue(windowElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+                _ = AXUIElementPerformAction(windowElement, kAXRaiseAction as CFString)
+            },
+            waitForTargetWindow: {
+                waitForFocusedWindow(
+                    appElement: appElement,
+                    targetWindowID: UInt32(resolvedWindowID),
+                    pid: pid,
+                    bundleID: bundleID
+                )
+            }
+        )
+    }
+
+    static func performWindowFocusTransition(
+        setFrontmost: () -> Void,
+        waitForFrontmost: () -> Bool,
+        applyWindowFocus: () -> Void,
+        waitForTargetWindow: () -> Bool,
+        sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+        maxAttempts: Int = 3,
+        settleDelay: TimeInterval = 0.05
+    ) -> Bool {
+        setFrontmost()
+
+        guard waitForFrontmost() else {
+            return false
+        }
+
+        for attempt in 0 ..< maxAttempts {
+            applyWindowFocus()
+            if waitForTargetWindow() {
+                return true
+            }
+
+            if attempt + 1 < maxAttempts {
+                sleep(0.01)
+            }
+        }
+
+        if settleDelay > 0 {
+            sleep(settleDelay)
+        }
+
+        return waitForTargetWindow()
+    }
+
+    private static func getProcessSerialNumber(pid: pid_t, psn: UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus {
+        LegacyGetProcessForPID(pid, psn)
+    }
+
+    private static func promoteWindowToFront(pid: pid_t, windowID: UInt32) -> Bool {
+        promoteWindowToFront(
+            pid: pid,
+            windowID: windowID,
+            getProcessForPID: getProcessSerialNumber,
+            setFrontProcessWithOptions: SkyLightSymbols.setFrontProcessWithOptions(),
+            postEventRecordTo: SkyLightSymbols.postEventRecordTo()
+        )
+    }
+
+    static func promoteWindowToFront(
+        pid: pid_t,
+        windowID: UInt32,
+        getProcessForPID: (pid_t, UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus,
+        setFrontProcessWithOptions: SetFrontProcessWithOptionsCall?,
+        postEventRecordTo: PostEventRecordToCall?
+    ) -> Bool {
+        guard let setFrontProcessWithOptions,
+              let postEventRecordTo
+        else {
+            return false
+        }
+
+        var psn = ProcessSerialNumber()
+        guard getProcessForPID(pid, &psn) == noErr,
+              setFrontProcessWithOptions(&psn, CGWindowID(windowID), SLPSMode.userGenerated.rawValue) == .success
+        else {
+            return false
+        }
+
+        return makeKeyWindow(psn: &psn, windowID: windowID, postEventRecordTo: postEventRecordTo)
+    }
+
+    static func makeKeyWindow(
+        psn: inout ProcessSerialNumber,
+        windowID: UInt32,
+        postEventRecordTo: PostEventRecordToCall
+    ) -> Bool {
+        for eventType in [UInt8(0x01), UInt8(0x02)] {
+            var bytes = makeKeyWindowEventBytes(windowID: windowID, eventType: eventType)
+            let status = bytes.withUnsafeMutableBufferPointer { buffer in
+                postEventRecordTo(&psn, buffer.baseAddress!)
+            }
+            if status != .success {
+                return false
+            }
+        }
+
+        return true
+    }
+
+    static func makeKeyWindowEventBytes(windowID: UInt32, eventType: UInt8) -> [UInt8] {
+        var bytes = [UInt8](repeating: 0, count: 0xf8)
+        bytes[0x04] = 0xf8
+        bytes[0x08] = eventType
+        bytes[0x3a] = 0x10
+
+        for index in 0x20 ..< 0x30 {
+            bytes[index] = 0xff
+        }
+
+        var littleEndianWindowID = windowID.littleEndian
+        withUnsafeBytes(of: &littleEndianWindowID) { rawBuffer in
+            for (offset, byte) in rawBuffer.enumerated() {
+                bytes[0x3c + offset] = byte
+            }
+        }
+
+        return bytes
     }
 
     private static func waitForFrontmost(pid: pid_t, bundleID: String?) -> Bool {
@@ -421,6 +655,60 @@ public enum WindowQueryService {
         if let bundleID, frontmost.bundleIdentifier == bundleID {
             return true
         }
+        return false
+    }
+
+    private static func waitForFocusedWindow(
+        appElement: AXUIElement,
+        targetWindowID: UInt32,
+        pid: pid_t,
+        bundleID: String?
+    ) -> Bool {
+        for _ in 0 ..< 5 {
+            if frontmostMatches(pid: pid, bundleID: bundleID),
+               focusedWindowMatches(appElement: appElement, targetWindowID: targetWindowID)
+            {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+
+        return frontmostMatches(pid: pid, bundleID: bundleID)
+            && focusedWindowMatches(appElement: appElement, targetWindowID: targetWindowID)
+    }
+
+    static func focusedWindowMatches(
+        appElement: AXUIElement,
+        targetWindowID: UInt32,
+        attributeValueResolver: (AXUIElement, CFString) -> AXUIElement? = { element, attribute in
+            var ref: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, attribute, &ref) == .success,
+                  let resolved = ref
+            else {
+                return nil
+            }
+            return (resolved as! AXUIElement)
+        },
+        windowIDResolver: (AXUIElement) -> CGWindowID? = { element in
+            var resolvedWindowID: CGWindowID = 0
+            guard AXUIElementGetWindowID(element, &resolvedWindowID) == .success else {
+                return nil
+            }
+            return resolvedWindowID
+        }
+    ) -> Bool {
+        for attribute in [kAXFocusedWindowAttribute as CFString, kAXMainWindowAttribute as CFString] {
+            guard let window = attributeValueResolver(appElement, attribute),
+                  let windowID = windowIDResolver(window)
+            else {
+                continue
+            }
+
+            if UInt32(windowID) == targetWindowID {
+                return true
+            }
+        }
+
         return false
     }
 

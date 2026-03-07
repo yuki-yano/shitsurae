@@ -439,7 +439,12 @@ public final class CommandService {
 
         let activated: Bool
         if let title = normalizedTarget.title {
-            activated = runtimeHooks.activateWindowWithTitle(bundleID, title)
+            let windows = runtimeHooks.listWindows()
+            if let window = resolveWindow(bundleID: bundleID, title: title, windows: windows) {
+                activated = runtimeHooks.focusWindow(window.windowID, window.bundleID)
+            } else {
+                activated = runtimeHooks.activateWindowWithTitle(bundleID, title)
+            }
         } else {
             activated = runtimeHooks.activateBundle(bundleID)
         }
@@ -484,12 +489,20 @@ public final class CommandService {
             }
         }
 
+        let windows = runtimeHooks.listWindows()
+
         if let ignoreRules = loadedConfig?.config.ignore?.focus {
-            let windows = runtimeHooks.listWindows()
             let targetWindow = resolveSlotWindow(entry: entry, windows: windows)
             if PolicyEngine.matchesIgnoreRule(window: targetWindow, rules: ignoreRules) {
                 return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
             }
+        }
+
+        if let window = resolveTrackedSlotWindow(entry: entry, windows: windows) {
+            guard runtimeHooks.focusWindow(window.windowID, window.bundleID) else {
+                return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
+            }
+            return CommandResult(exitCode: 0)
         }
 
         if !runtimeHooks.activateBundle(entry.bundleID) {
@@ -785,6 +798,20 @@ public final class CommandService {
         }
 
         return WindowTargetSelector(windowID: nil, bundleID: bundleID, title: title)
+    }
+
+    private func resolveWindow(bundleID: String, title: String, windows: [WindowSnapshot]) -> WindowSnapshot? {
+        windows.first { window in
+            window.bundleID == bundleID && window.title == title
+        }
+    }
+
+    private func resolveTrackedSlotWindow(entry: SlotEntry, windows: [WindowSnapshot]) -> WindowSnapshot? {
+        guard let windowID = entry.windowID else {
+            return nil
+        }
+
+        return windows.first(where: { $0.windowID == windowID })
     }
 
     private func resolveSlotWindow(entry: SlotEntry, windows: [WindowSnapshot]) -> WindowSnapshot {

@@ -71,6 +71,7 @@ final class ShortcutManager {
     private var cycleCandidates: [SwitcherCandidate] = []
     private var lastCycleAt: Date?
     private let cycleSessionTimeout: TimeInterval = 1.5
+    private var activationSequence: UInt64 = 0
     private var lastCarbonShortcutID: String?
     private var lastCarbonShortcutAt: Date?
     private let eventTapDuplicateThreshold: TimeInterval = 0.12
@@ -498,9 +499,9 @@ final class ShortcutManager {
             resetCycleState()
             _ = commandService.focus(slot: slot)
         case .nextWindow:
-            cycleFocus(forward: true)
+            scheduleCycleFocus(forward: true)
         case .prevWindow:
-            cycleFocus(forward: false)
+            scheduleCycleFocus(forward: false)
         case .switcher:
             resetCycleState()
             presentOrAdvanceSwitcher(forward: true)
@@ -539,6 +540,13 @@ final class ShortcutManager {
         )
     }
 
+    private func scheduleCycleFocus(forward: Bool) {
+        let managerBox = WeakShortcutManagerBox(manager: self)
+        DispatchQueue.main.async {
+            managerBox.manager?.cycleFocus(forward: forward)
+        }
+    }
+
     private func cycleFocus(forward: Bool) {
         let now = Date()
 
@@ -575,7 +583,7 @@ final class ShortcutManager {
             ]
         )
         lastCycleAt = now
-        activate(candidate: candidate)
+        activate(candidate: candidate, allowRetry: false)
     }
 
     private func presentOrAdvanceSwitcher(forward: Bool) {
@@ -957,7 +965,37 @@ final class ShortcutManager {
         )
     }
 
-    private func activate(candidate: SwitcherCandidate) {
+    private func activate(candidate: SwitcherCandidate, allowRetry: Bool = true) {
+        activationSequence &+= 1
+        let sequence = activationSequence
+        performActivation(candidate: candidate, sequence: sequence, attempt: 1, allowRetry: allowRetry)
+    }
+
+    private func performActivation(candidate: SwitcherCandidate, sequence: UInt64, attempt: Int, allowRetry: Bool) {
+        if let windowID = candidateWindowID(from: candidate.id) {
+            let result = commandService.focus(
+                slot: nil,
+                target: WindowTargetSelector(windowID: windowID, bundleID: nil, title: nil)
+            )
+            logger.log(
+                event: "candidate.activate.window",
+                fields: [
+                    "windowID": windowID,
+                    "bundleID": candidate.bundleID ?? "",
+                    "activated": result.exitCode == 0,
+                    "attempt": attempt,
+                ]
+            )
+            retryActivationIfNeeded(
+                candidate: candidate,
+                sequence: sequence,
+                attempt: attempt,
+                success: result.exitCode == 0,
+                allowRetry: allowRetry
+            )
+            return
+        }
+
         if let slot = candidate.slot {
             _ = commandService.focus(slot: slot)
             logger.log(
@@ -968,17 +1006,46 @@ final class ShortcutManager {
         }
 
         if let bundleID = candidate.bundleID {
-            let activated = WindowQueryService.activate(
-                bundleID: bundleID,
-                preferredWindowTitle: candidate.title
+            let result = commandService.focus(
+                slot: nil,
+                target: WindowTargetSelector(windowID: nil, bundleID: bundleID, title: candidate.title)
             )
             logger.log(
                 event: "candidate.activate.bundle",
                 fields: [
                     "bundleID": bundleID,
-                    "activated": activated,
+                    "activated": result.exitCode == 0,
+                    "attempt": attempt,
                 ]
             )
+            retryActivationIfNeeded(
+                candidate: candidate,
+                sequence: sequence,
+                attempt: attempt,
+                success: result.exitCode == 0,
+                allowRetry: allowRetry
+            )
+        }
+    }
+
+    private func retryActivationIfNeeded(candidate: SwitcherCandidate, sequence: UInt64, attempt: Int, success: Bool, allowRetry: Bool) {
+        guard allowRetry,
+              !success,
+              sequence == activationSequence,
+              attempt < 3,
+              candidate.slot == nil
+        else {
+            return
+        }
+
+        let managerBox = WeakShortcutManagerBox(manager: self)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            guard let manager = managerBox.manager,
+                  manager.activationSequence == sequence
+            else {
+                return
+            }
+            manager.performActivation(candidate: candidate, sequence: sequence, attempt: attempt + 1, allowRetry: allowRetry)
         }
     }
 

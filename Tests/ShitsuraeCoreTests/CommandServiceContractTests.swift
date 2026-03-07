@@ -328,26 +328,28 @@ final class CommandServiceContractTests: XCTestCase {
             ]
         )
 
-        var activatedBundleIDs: [String] = []
+        var focusedTargets: [(UInt32, String)] = []
         let focusedWindow = Self.window(windowID: 202, bundleID: "com.hnc.Discord", title: "Discord", spaceID: 2, frontIndex: 0)
         let runtimeHooks = CommandServiceRuntimeHooks(
             accessibilityGranted: { true },
             listWindows: { [focusedWindow] },
             focusedWindow: { focusedWindow },
-            activateBundle: { bundleID in
-                activatedBundleIDs.append(bundleID)
-                return true
-            },
+            activateBundle: { _ in true },
             setFocusedWindowFrame: { _ in true },
             displays: { [] },
-            runProcess: { _, _ in (0, "") }
+            runProcess: { _, _ in (0, "") },
+            focusWindow: { windowID, bundleID in
+                focusedTargets.append((windowID, bundleID))
+                return true
+            }
         )
 
         let service = workspace.makeService(stateStore: stateStore, runtimeHooks: runtimeHooks)
         let result = service.focus(slot: 1)
 
         XCTAssertEqual(result.exitCode, 0)
-        XCTAssertEqual(activatedBundleIDs, ["com.hnc.Discord"])
+        XCTAssertEqual(focusedTargets.map(\.0), [202])
+        XCTAssertEqual(focusedTargets.map(\.1), ["com.hnc.Discord"])
     }
 
     func testFocusFallsBackToConfigSlotDefinitionWhenStateIsEmpty() throws {
@@ -375,6 +377,58 @@ final class CommandServiceContractTests: XCTestCase {
         let result = service.focus(slot: 1)
         XCTAssertEqual(result.exitCode, 0)
         XCTAssertEqual(activatedBundleIDs, ["com.apple.TextEdit"])
+    }
+
+    func testFocusSlotUsesTrackedWindowIDWhenAvailable() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+
+        let stateStore = RuntimeStateStore(stateFileURL: workspace.stateFileURL)
+        stateStore.save(
+            slots: [
+                SlotEntry(
+                    slot: 1,
+                    source: .window,
+                    bundleID: "com.apple.TextEdit",
+                    title: "Draft",
+                    spaceID: 1,
+                    displayID: "display-a",
+                    windowID: 202
+                ),
+            ]
+        )
+
+        let windows = [
+            Self.window(windowID: 101, bundleID: "com.apple.TextEdit", title: "Editor", spaceID: 1, frontIndex: 0),
+            Self.window(windowID: 202, bundleID: "com.apple.TextEdit", title: "Draft", spaceID: 1, frontIndex: 1),
+        ]
+        var focusedTargets: [(UInt32, String)] = []
+        var activatedBundleIDs: [String] = []
+
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: { windows },
+            focusedWindow: { nil },
+            activateBundle: { bundleID in
+                activatedBundleIDs.append(bundleID)
+                return true
+            },
+            setFocusedWindowFrame: { _ in true },
+            displays: { [] },
+            runProcess: { _, _ in (0, "") },
+            focusWindow: { windowID, bundleID in
+                focusedTargets.append((windowID, bundleID))
+                return true
+            }
+        )
+
+        let service = workspace.makeService(stateStore: stateStore, runtimeHooks: runtimeHooks)
+        let result = service.focus(slot: 1)
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(focusedTargets.map(\.0), [202])
+        XCTAssertEqual(focusedTargets.map(\.1), ["com.apple.TextEdit"])
+        XCTAssertTrue(activatedBundleIDs.isEmpty)
     }
 
     func testShouldHandleFocusShortcutReturnsFalseWhenFallbackTargetIsNotPresent() throws {
@@ -551,6 +605,47 @@ final class CommandServiceContractTests: XCTestCase {
         XCTAssertEqual(result.exitCode, 0)
         XCTAssertEqual(titledActivationCalls.map(\.0), ["com.apple.TextEdit"])
         XCTAssertEqual(titledActivationCalls.map(\.1), ["Draft"])
+    }
+
+    func testFocusBundleIDAndTitleUsesExactWindowWhenEnumerated() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+
+        let windows = [
+            Self.window(windowID: 101, bundleID: "com.apple.TextEdit", title: "Editor", spaceID: 1, frontIndex: 0),
+            Self.window(windowID: 202, bundleID: "com.apple.TextEdit", title: "Draft", spaceID: 1, frontIndex: 1),
+        ]
+        var focusedTargets: [(UInt32, String)] = []
+        var titledActivationCalls: [(String, String)] = []
+
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: { windows },
+            focusedWindow: { nil },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { _ in true },
+            displays: { [] },
+            runProcess: { _, _ in (0, "") },
+            activateWindowWithTitle: { bundleID, title in
+                titledActivationCalls.append((bundleID, title))
+                return true
+            },
+            focusWindow: { windowID, bundleID in
+                focusedTargets.append((windowID, bundleID))
+                return true
+            }
+        )
+
+        let service = workspace.makeService(runtimeHooks: runtimeHooks)
+        let result = service.focus(
+            slot: nil,
+            target: WindowTargetSelector(windowID: nil, bundleID: "com.apple.TextEdit", title: "Draft")
+        )
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(focusedTargets.map(\.0), [202])
+        XCTAssertEqual(focusedTargets.map(\.1), ["com.apple.TextEdit"])
+        XCTAssertTrue(titledActivationCalls.isEmpty)
     }
 
     func testFocusRejectsInvalidSelectorCombinations() throws {
