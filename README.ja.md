@@ -111,6 +111,7 @@ Shitsurae は通常の macOS アプリとして起動し、メニューバーに
 - スロット・bundle ID・タイトルマッチャー・フレーム・自動起動フラグを表示するウィンドウ詳細テーブル
 
 **General** — 現在の設定を一覧確認：
+- アプリ設定（`launchAtLogin`）
 - `apply` / `focus` の無視ルール（除外アプリとウィンドウ条件）
 - 実行ポリシー（デフォルトの Space 移動方式とアプリごとのオーバーライド）
 - オーバーレイ設定（サムネイルの ON/OFF）
@@ -339,6 +340,13 @@ ignore:
       - com.apple.SystemPreferences
 ```
 
+### アプリ挙動
+
+```yaml
+app:
+  launchAtLogin: true
+```
+
 ### ショートカットのカスタマイズ
 
 ```yaml
@@ -347,6 +355,7 @@ shortcuts:
   focusBySlotEnabledInApps:
     com.hnc.Discord: false
     com.tinyspeck.slackmacgap: false
+    org.alacritty: false
 
   # Cmd+Ctrl+J / K の候補から除外
   cycleExcludedApps:

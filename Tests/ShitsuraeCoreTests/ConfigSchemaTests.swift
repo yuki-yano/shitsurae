@@ -15,6 +15,7 @@ final class ConfigSchemaTests: XCTestCase {
         )
 
         let properties = try XCTUnwrap(root["properties"] as? [String: Any])
+        XCTAssertNotNil(properties["app"])
         let layouts = try XCTUnwrap(properties["layouts"] as? [String: Any])
         let patternProperties = try XCTUnwrap(layouts["patternProperties"] as? [String: Any])
         XCTAssertNotNil(patternProperties["^[A-Za-z0-9._-]+$"])
@@ -38,6 +39,10 @@ final class ConfigSchemaTests: XCTestCase {
         let shortcuts = try XCTUnwrap(defs["shortcutsDefinition"] as? [String: Any])
         let shortcutProperties = try XCTUnwrap(shortcuts["properties"] as? [String: Any])
         XCTAssertNotNil(shortcutProperties["cycle"])
+
+        let appDefinition = try XCTUnwrap(defs["appDefinition"] as? [String: Any])
+        let appProperties = try XCTUnwrap(appDefinition["properties"] as? [String: Any])
+        XCTAssertNotNil(appProperties["launchAtLogin"])
 
         let switcher = try XCTUnwrap(defs["switcherShortcutDefinition"] as? [String: Any])
         let switcherProperties = try XCTUnwrap(switcher["properties"] as? [String: Any])

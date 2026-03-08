@@ -1,6 +1,7 @@
 import Foundation
 
 public struct ShitsuraeConfig: Codable, Equatable {
+    public let app: AppDefinition?
     public let ignore: IgnoreDefinition?
     public let overlay: OverlayDefinition?
     public let executionPolicy: ExecutionPolicy?
@@ -9,6 +10,7 @@ public struct ShitsuraeConfig: Codable, Equatable {
     public let shortcuts: ShortcutsDefinition?
 
     public init(
+        app: AppDefinition? = nil,
         ignore: IgnoreDefinition?,
         overlay: OverlayDefinition?,
         executionPolicy: ExecutionPolicy?,
@@ -16,6 +18,7 @@ public struct ShitsuraeConfig: Codable, Equatable {
         layouts: [String: LayoutDefinition],
         shortcuts: ShortcutsDefinition?
     ) {
+        self.app = app
         self.ignore = ignore
         self.overlay = overlay
         self.executionPolicy = executionPolicy
@@ -26,12 +29,21 @@ public struct ShitsuraeConfig: Codable, Equatable {
 }
 
 public struct ShitsuraeConfigFile: Decodable {
+    public let app: AppDefinition?
     public let ignore: IgnoreDefinition?
     public let overlay: OverlayDefinition?
     public let executionPolicy: ExecutionPolicy?
     public let monitors: MonitorsDefinition?
     public let layouts: [String: LayoutDefinition]?
     public let shortcuts: ShortcutsDefinition?
+}
+
+public struct AppDefinition: Codable, Equatable {
+    public let launchAtLogin: Bool?
+
+    public init(launchAtLogin: Bool? = nil) {
+        self.launchAtLogin = launchAtLogin
+    }
 }
 
 public struct LayoutDefinition: Codable, Equatable {

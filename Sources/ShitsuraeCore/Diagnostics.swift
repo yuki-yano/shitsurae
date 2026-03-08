@@ -12,7 +12,6 @@ public struct DiagnosticsJSON: Codable {
     public let layouts: [String]
     public let spaces: [SpaceStatus]
     public let lastConfigReload: ConfigReloadStatus
-    public let watch: WatchStatus
     public let recentErrors: [RecentError]
 }
 
@@ -102,8 +101,7 @@ public enum DiagnosticsService {
         loadedConfig: LoadedConfig?,
         loadError: ConfigLoadError?,
         lastConfigReload: ConfigReloadStatus,
-        supportedBuildCatalogURL: URL,
-        watchOverride: WatchStatus? = nil
+        supportedBuildCatalogURL: URL
     ) -> DiagnosticsJSON {
         let expectedSpacesMode = loadedConfig?.config.resolvedSpacesMode ?? .perDisplay
         let actualSpacesMode = SystemProbe.actualSpacesMode()
@@ -147,13 +145,8 @@ public enum DiagnosticsService {
         let spaces = collectSpaces(config: loadedConfig?.config)
         let layouts = loadedConfig.map { Array($0.config.layouts.keys).sorted() } ?? []
 
-        let watch = watchOverride ?? WatchStatus(
-            debounceMs: 250,
-            watcherRunning: false
-        )
-
         return DiagnosticsJSON(
-            schemaVersion: 1,
+            schemaVersion: 2,
             generatedAt: Date.rfc3339UTC(),
             permissions: PermissionsStatus(
                 accessibility: PermissionItem(granted: SystemProbe.accessibilityGranted(), required: true),
@@ -174,7 +167,6 @@ public enum DiagnosticsService {
                 return $0.spaceID < $1.spaceID
             },
             lastConfigReload: lastConfigReload,
-            watch: watch,
             recentErrors: RecentErrorStore.shared.list()
         )
     }

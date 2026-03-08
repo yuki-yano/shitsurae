@@ -93,6 +93,7 @@ public final class ConfigLoader {
     }
 
     private func merge(decodedFiles: [(URL, ShitsuraeConfigFile)]) -> (config: ShitsuraeConfig?, errors: [ValidateErrorItem]) {
+        var app: AppDefinition?
         var ignore: IgnoreDefinition?
         var overlay: OverlayDefinition?
         var executionPolicy: ExecutionPolicy?
@@ -122,6 +123,7 @@ public final class ConfigLoader {
                 destination = value
             }
 
+            assignSingleton("app", item.app, &app)
             assignSingleton("overlay", item.overlay, &overlay)
             assignSingleton("executionPolicy", item.executionPolicy, &executionPolicy)
             assignSingleton("monitors", item.monitors, &monitors)
@@ -151,6 +153,7 @@ public final class ConfigLoader {
         }
 
         let config = ShitsuraeConfig(
+            app: app,
             ignore: ignore,
             overlay: overlay,
             executionPolicy: executionPolicy,

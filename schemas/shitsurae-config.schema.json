@@ -6,6 +6,9 @@
   "additionalProperties": false,
   "required": ["layouts"],
   "properties": {
+    "app": {
+      "$ref": "#/$defs/appDefinition"
+    },
     "ignore": {
       "$ref": "#/$defs/ignoreDefinition"
     },
@@ -33,6 +36,15 @@
     }
   },
   "$defs": {
+    "appDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "launchAtLogin": {
+          "type": "boolean"
+        }
+      }
+    },
     "spaceMoveMethod": {
       "type": "string",
       "enum": ["drag", "displayRelay"]

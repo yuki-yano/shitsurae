@@ -232,6 +232,26 @@ final class ConfigLoaderTests: XCTestCase {
         XCTAssertEqual(loaded.config.resolvedShortcuts.cancelKeys, ["esc", "["])
     }
 
+    func testLoadAppLaunchAtLoginSetting() throws {
+        let yaml = """
+        app:
+          launchAtLogin: true
+        layouts:
+          work:
+            spaces:
+              - spaceID: 1
+                windows:
+                  - match:
+                      bundleID: "com.example.app"
+                    slot: 1
+                    frame: { x: "0%", y: "0%", width: "100%", height: "100%" }
+        """
+        try write(yaml: yaml, named: "config.yaml")
+
+        let loaded = try ConfigLoader().load(from: tempDirectory)
+        XCTAssertEqual(loaded.config.app?.launchAtLogin, true)
+    }
+
     private func write(yaml: String, named: String) throws {
         let fileURL = tempDirectory.appendingPathComponent(named)
         try yaml.write(to: fileURL, atomically: true, encoding: .utf8)

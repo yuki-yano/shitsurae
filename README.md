@@ -111,6 +111,7 @@ A full GUI with sidebar navigation, organized into the following sections:
 - Window detail table showing slot, bundle ID, title matcher, frame, and launch flag
 
 **General** — review current configuration at a glance:
+- App settings (`launchAtLogin`)
 - Ignore rules for `apply` and `focus` (excluded apps and window conditions)
 - Execution policy (default space-move method and per-app overrides)
 - Overlay settings (thumbnail on/off)
@@ -341,6 +342,13 @@ ignore:
       - com.apple.SystemPreferences
 ```
 
+### App behavior
+
+```yaml
+app:
+  launchAtLogin: true
+```
+
 ### Shortcut customization
 
 ```yaml
@@ -349,6 +357,7 @@ shortcuts:
   focusBySlotEnabledInApps:
     com.hnc.Discord: false
     com.tinyspeck.slackmacgap: false
+    org.alacritty: false
 
   # Exclude from Cmd+Ctrl+J / K cycling
   cycleExcludedApps:

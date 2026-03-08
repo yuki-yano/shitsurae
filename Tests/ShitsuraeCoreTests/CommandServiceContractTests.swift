@@ -87,11 +87,13 @@ final class CommandServiceContractTests: XCTestCase {
         XCTAssertTrue(result.stderr.isEmpty)
 
         let diagnostics = try decode(DiagnosticsJSON.self, from: result.stdout)
-        XCTAssertEqual(diagnostics.schemaVersion, 1)
+        XCTAssertEqual(diagnostics.schemaVersion, 2)
         XCTAssertTrue(Self.isRFC3339UTCWithFractionalSeconds(diagnostics.generatedAt))
         XCTAssertTrue(Self.isRFC3339UTCWithFractionalSeconds(diagnostics.lastConfigReload.at))
         XCTAssertEqual(diagnostics.permissions.automation.required, false)
-        XCTAssertGreaterThanOrEqual(diagnostics.watch.debounceMs, 0)
+
+        let payload = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any]
+        XCTAssertNil(payload?["watch"])
     }
 
     func testDiagnosticsScreenRecordingRequiredWhenOverlayThumbnailsEnabled() throws {

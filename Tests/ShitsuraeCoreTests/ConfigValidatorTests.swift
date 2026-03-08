@@ -4,6 +4,7 @@ import XCTest
 final class ConfigValidatorTests: XCTestCase {
     func testLayoutsMustNotBeEmpty() {
         let config = ShitsuraeConfig(
+            app: nil,
             ignore: nil,
             overlay: nil,
             executionPolicy: nil,
@@ -19,6 +20,7 @@ final class ConfigValidatorTests: XCTestCase {
     func testLayoutNamePatternValidation() {
         let layout = baseConfig().layouts["work"]!
         let config = ShitsuraeConfig(
+            app: nil,
             ignore: nil,
             overlay: nil,
             executionPolicy: nil,
@@ -38,6 +40,7 @@ final class ConfigValidatorTests: XCTestCase {
             spaces: [SpaceDefinition(spaceID: 1, display: nil, windows: [window])]
         )
         let config = ShitsuraeConfig(
+            app: nil,
             ignore: nil,
             overlay: nil,
             executionPolicy: nil,
@@ -602,6 +605,7 @@ final class ConfigValidatorTests: XCTestCase {
         )
 
         return ShitsuraeConfig(
+            app: nil,
             ignore: ignore,
             overlay: nil,
             executionPolicy: executionPolicy,

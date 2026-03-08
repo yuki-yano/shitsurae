@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import Foundation
+import ServiceManagement
 import ShitsuraeCore
 import SwiftUI
 
@@ -111,6 +112,8 @@ private final class AppModel: ObservableObject {
 
     let commandService: CommandService
     private let shortcutManager: ShortcutManager
+    private let launchAtLoginController = LaunchAtLoginController()
+    private var appliedLaunchAtLogin: Bool?
     private var shutdownPerformed = false
 
     init() {
@@ -144,6 +147,7 @@ private final class AppModel: ObservableObject {
     func reloadConfig() {
         do {
             let loaded = try ConfigLoader().loadFromDefaultDirectory()
+            applyLaunchAtLoginIfNeeded(config: loaded.config)
             config = loaded.config
             configError = nil
             layouts = loaded.config.layouts.keys.sorted()
@@ -215,6 +219,21 @@ private final class AppModel: ObservableObject {
         runProcess(executable: "/usr/bin/pkill", arguments: ["-x", "ShitsuraeAgent"])
     }
 
+    private func applyLaunchAtLoginIfNeeded(config: ShitsuraeConfig) {
+        guard let launchAtLogin = config.app?.launchAtLogin,
+              appliedLaunchAtLogin != launchAtLogin
+        else {
+            return
+        }
+
+        do {
+            try launchAtLoginController.setEnabled(launchAtLogin)
+            appliedLaunchAtLogin = launchAtLogin
+        } catch {
+            NSLog("Failed to apply launchAtLogin=%@ setting: %@", String(launchAtLogin), error.localizedDescription)
+        }
+    }
+
     private func shutdownIfNeeded() {
         guard !shutdownPerformed else { return }
         shutdownPerformed = true
@@ -230,6 +249,20 @@ private final class AppModel: ObservableObject {
         process.standardError = Pipe()
         try? process.run()
         process.waitUntilExit()
+    }
+}
+
+private struct LaunchAtLoginController {
+    func setEnabled(_ enabled: Bool) throws {
+        let service = SMAppService.mainApp
+        switch (enabled, service.status) {
+        case (true, .enabled), (false, .notRegistered):
+            return
+        case (true, _):
+            try service.register()
+        case (false, _):
+            try service.unregister()
+        }
     }
 }
 
@@ -601,6 +634,10 @@ private struct LayoutDetailView: View {
 private struct GeneralSettingsView: View {
     let config: ShitsuraeConfig?
 
+    private var hasAppSettings: Bool {
+        config?.app?.launchAtLogin != nil
+    }
+
     private var hasIgnore: Bool {
         guard let ignore = config?.ignore else { return false }
         let applyApps = ignore.apply?.apps ?? []
@@ -623,7 +660,7 @@ private struct GeneralSettingsView: View {
     }
 
     private var hasAnySettings: Bool {
-        hasIgnore || hasExecutionPolicy || hasOverlay || hasMonitors
+        hasAppSettings || hasIgnore || hasExecutionPolicy || hasOverlay || hasMonitors
     }
 
     var body: some View {
@@ -636,9 +673,12 @@ private struct GeneralSettingsView: View {
                     ContentUnavailableView(
                         "No settings configured",
                         systemImage: "gearshape",
-                        description: Text("Add ignore, executionPolicy, overlay, or monitors to your YAML config.")
+                        description: Text("Add app, ignore, executionPolicy, overlay, or monitors to your YAML config.")
                     )
                 } else {
+                    if hasAppSettings {
+                        appSection
+                    }
                     if hasIgnore {
                         ignoreSection
                     }
@@ -654,6 +694,36 @@ private struct GeneralSettingsView: View {
                 }
             }
             .padding(20)
+        }
+    }
+
+    // MARK: App
+
+    @ViewBuilder
+    private var appSection: some View {
+        if let launchAtLogin = config?.app?.launchAtLogin {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    SectionHeader(icon: "power", title: "App")
+
+                    Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                        GridRow {
+                            Text("Setting")
+                            Text("Value")
+                        }
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+
+                        Divider().gridCellUnsizedAxes(.horizontal)
+
+                        GridRow {
+                            Text("Launch at Login")
+                            generalBoolBadge(launchAtLogin)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 
@@ -939,21 +1009,37 @@ private struct ShortcutsView: View {
                     ForEach(1 ... 9, id: \.self) { slot in
                         if let hotkey = resolved.focusBySlot[slot] {
                             GridRow {
-                                HStack(spacing: 6) {
-                                    Circle()
-                                        .fill(colorForSlot(slot))
-                                        .frame(width: 8, height: 8)
-                                    Text("\(slot)")
-                                        .foregroundStyle(colorForSlot(slot))
-                                }
-                                .font(.system(.body, design: .monospaced))
-
+                                slotLabel(slot)
                                 hotkeyLabel(hotkey)
                             }
                         }
                     }
                 }
 
+                if !resolved.focusBySlotEnabledInApps.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Per-App Overrides").font(.caption.bold()).foregroundStyle(.secondary)
+
+                        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                            GridRow {
+                                Text("App")
+                                Text("Enabled")
+                            }
+                            .font(.caption2.bold())
+                            .foregroundStyle(.tertiary)
+
+                            ForEach(resolved.focusBySlotEnabledInApps.keys.sorted(), id: \.self) { bundleID in
+                                if let enabled = resolved.focusBySlotEnabledInApps[bundleID] {
+                                    GridRow {
+                                        Text(bundleID)
+                                            .font(.system(.body, design: .monospaced))
+                                        boolBadge(enabled)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -1135,6 +1221,19 @@ private struct ShortcutsView: View {
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
+    }
+
+    private func slotLabel(_ slot: Int) -> some View {
+        Text("\(slot)")
+            .font(.system(.caption, design: .monospaced).bold())
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Color.primary.opacity(0.06), in: Capsule())
+            .overlay {
+                Capsule()
+                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+            }
     }
 
     private func boolBadge(_ value: Bool) -> some View {

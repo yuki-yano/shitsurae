@@ -218,8 +218,7 @@ public final class CommandService {
             loadedConfig: loaded,
             loadError: loadError,
             lastConfigReload: lastConfigReload,
-            supportedBuildCatalogURL: supportedBuildCatalogURL,
-            watchOverride: autoReloadMonitorEnabled ? watchStatus : nil
+            supportedBuildCatalogURL: supportedBuildCatalogURL
         )
 
         return CommandResult(exitCode: 0, stdout: encodeJSON(diagnostics) + "\n")
