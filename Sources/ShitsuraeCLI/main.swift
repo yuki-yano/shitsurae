@@ -55,6 +55,9 @@ struct Arrange: ParsableCommand {
     @Flag(name: .long, help: "JSON output")
     var json = false
 
+    @Flag(name: .long, help: "update runtime state only without applying layout operations")
+    var stateOnly = false
+
     @Option(name: .long, help: "only arrange the specified spaceID in the layout")
     var space: Int?
 
@@ -72,7 +75,8 @@ struct Arrange: ParsableCommand {
                 x: nil,
                 y: nil,
                 width: nil,
-                height: nil
+                height: nil,
+                stateOnly: stateOnly
             )
         )
     }

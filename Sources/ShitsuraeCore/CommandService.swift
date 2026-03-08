@@ -224,8 +224,23 @@ public final class CommandService {
         return CommandResult(exitCode: 0, stdout: encodeJSON(diagnostics) + "\n")
     }
 
-    public func arrange(layoutName: String, spaceID: Int? = nil, dryRun: Bool, verbose: Bool, json: Bool) -> CommandResult {
-        if !dryRun, arrangeRequestDeduplicator.shouldSuppress(layoutName: layoutName, spaceID: spaceID) {
+    public func arrange(
+        layoutName: String,
+        spaceID: Int? = nil,
+        dryRun: Bool,
+        verbose: Bool,
+        json: Bool,
+        stateOnly: Bool = false
+    ) -> CommandResult {
+        if dryRun, stateOnly {
+            return errorAsResult(
+                code: .validationError,
+                message: "dryRun and stateOnly cannot be combined",
+                json: json
+            )
+        }
+
+        if !dryRun, !stateOnly, arrangeRequestDeduplicator.shouldSuppress(layoutName: layoutName, spaceID: spaceID) {
             var fields: [String: Any] = ["layout": layoutName]
             if let spaceID {
                 fields["spaceID"] = spaceID
@@ -272,7 +287,7 @@ public final class CommandService {
                 return CommandResult(exitCode: 0, stdout: renderDryRun(plan))
             }
 
-            let execution = try service.execute(layoutName: layoutName, spaceID: spaceID)
+            let execution = try service.execute(layoutName: layoutName, spaceID: spaceID, stateOnly: stateOnly)
             if json {
                 return CommandResult(exitCode: Int32(execution.exitCode), stdout: encodeJSON(execution) + "\n")
             }

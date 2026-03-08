@@ -40,6 +40,21 @@ final class RemoteCommandServiceTests: XCTestCase {
         XCTAssertEqual(request.verbose, true)
         XCTAssertEqual(request.json, true)
     }
+
+    func testArrangeForwardsStateOnlyFlagToAgentRequest() throws {
+        let client = RecordingRemoteCommandClient(result: CommandResult(exitCode: 0))
+        let service = RemoteCommandService(
+            client: client,
+            configDirectoryPathProvider: { "/tmp/config" }
+        )
+
+        _ = service.arrange(layoutName: "work", spaceID: 3, dryRun: false, verbose: false, json: true, stateOnly: true)
+
+        let request = try XCTUnwrap(client.requests.first)
+        XCTAssertEqual(request.layoutName, "work")
+        XCTAssertEqual(request.spaceID, 3)
+        XCTAssertEqual(request.stateOnly, true)
+    }
 }
 
 private final class RecordingRemoteCommandClient: RemoteCommandExecuting {

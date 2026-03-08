@@ -34,6 +34,7 @@ public struct AgentCommandRequest: Codable {
     public let bundleID: String?
     public let windowTitle: String?
     public let configDirectoryPath: String?
+    public let stateOnly: Bool?
 
     public init(
         command: AgentCommand,
@@ -51,7 +52,8 @@ public struct AgentCommandRequest: Codable {
         windowID: UInt32? = nil,
         bundleID: String? = nil,
         windowTitle: String? = nil,
-        configDirectoryPath: String? = nil
+        configDirectoryPath: String? = nil,
+        stateOnly: Bool? = nil
     ) {
         self.command = command
         self.json = json
@@ -69,6 +71,7 @@ public struct AgentCommandRequest: Codable {
         self.bundleID = bundleID
         self.windowTitle = windowTitle
         self.configDirectoryPath = configDirectoryPath
+        self.stateOnly = stateOnly
     }
 
     public func withConfigDirectoryPath(_ path: String?) -> AgentCommandRequest {
@@ -88,7 +91,8 @@ public struct AgentCommandRequest: Codable {
             windowID: windowID,
             bundleID: bundleID,
             windowTitle: windowTitle,
-            configDirectoryPath: path
+            configDirectoryPath: path,
+            stateOnly: stateOnly
         )
     }
 }

@@ -33,6 +33,7 @@ Define layouts in YAML, and `shitsurae arrange <name>` will:
 - Move windows to the designated Spaces
 - Position and resize each window to the specified frame
 - Set initial focus after arrangement
+- Update runtime slot state only with `--state-only`
 
 Position and size accept flexible units: `%` (screen ratio), `pt` (logical points), `px` (physical pixels), `r` (0.0–1.0 ratio).
 
@@ -160,6 +161,7 @@ The CLI exposes the same functionality for shell scripts and automation:
 shitsurae arrange <layout> --dry-run --json    # Preview the execution plan
 shitsurae arrange <layout> --json              # Apply a layout
 shitsurae arrange <layout> --space 2 --json    # Apply to a specific Space
+shitsurae arrange <layout> --state-only --json # Update runtime state only
 shitsurae layouts list                         # List defined layouts
 shitsurae validate --json                      # Validate config files
 shitsurae diagnostics --json                   # Show system diagnostics

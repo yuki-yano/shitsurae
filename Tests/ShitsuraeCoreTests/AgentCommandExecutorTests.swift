@@ -19,7 +19,8 @@ final class AgentCommandExecutorTests: XCTestCase {
             x: nil,
             y: nil,
             width: nil,
-            height: nil
+            height: nil,
+            stateOnly: true
         )
 
         let response = executor.execute(request)
@@ -30,6 +31,7 @@ final class AgentCommandExecutorTests: XCTestCase {
         XCTAssertEqual(handler.arrangeCalls.first?.spaceID, 2)
         XCTAssertEqual(handler.arrangeCalls.first?.dryRun, true)
         XCTAssertEqual(handler.arrangeCalls.first?.json, true)
+        XCTAssertEqual(handler.arrangeCalls.first?.stateOnly, true)
     }
 
     func testExecuteFocusRoutesSlot() {
@@ -261,7 +263,8 @@ final class AgentCommandExecutorTests: XCTestCase {
         height: LengthValue? = nil,
         windowID: UInt32? = nil,
         bundleID: String? = nil,
-        windowTitle: String? = nil
+        windowTitle: String? = nil,
+        stateOnly: Bool? = nil
     ) -> AgentCommandRequest {
         AgentCommandRequest(
             command: command,
@@ -278,7 +281,8 @@ final class AgentCommandExecutorTests: XCTestCase {
             height: height,
             windowID: windowID,
             bundleID: bundleID,
-            windowTitle: windowTitle
+            windowTitle: windowTitle,
+            stateOnly: stateOnly
         )
     }
 }
@@ -290,6 +294,7 @@ private final class StubCommandHandler: CommandHandling {
         let dryRun: Bool
         let verbose: Bool
         let json: Bool
+        let stateOnly: Bool
     }
 
     struct FocusCall: Equatable {
@@ -407,8 +412,8 @@ private final class StubCommandHandler: CommandHandling {
         return switcherListResult
     }
 
-    func arrange(layoutName: String, spaceID: Int?, dryRun: Bool, verbose: Bool, json: Bool) -> CommandResult {
-        arrangeCalls.append(.init(layoutName: layoutName, spaceID: spaceID, dryRun: dryRun, verbose: verbose, json: json))
+    func arrange(layoutName: String, spaceID: Int?, dryRun: Bool, verbose: Bool, json: Bool, stateOnly: Bool) -> CommandResult {
+        arrangeCalls.append(.init(layoutName: layoutName, spaceID: spaceID, dryRun: dryRun, verbose: verbose, json: json, stateOnly: stateOnly))
         return arrangeResult
     }
 

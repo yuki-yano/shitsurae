@@ -256,6 +256,58 @@ final class CommandServiceContractTests: XCTestCase {
         XCTAssertEqual(payload.message, "space not found in layout: 9")
     }
 
+    func testArrangeStateOnlyUpdatesRuntimeStateWithoutArrangeRuntimeChecks() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+
+        let stateStore = RuntimeStateStore(stateFileURL: workspace.stateFileURL)
+        let service = workspace.makeService(
+            stateStore: stateStore,
+            arrangeDriver: MissingPermissionArrangeDriver()
+        )
+
+        let result = service.arrange(
+            layoutName: "work",
+            dryRun: false,
+            verbose: false,
+            json: true,
+            stateOnly: true
+        )
+
+        XCTAssertEqual(result.exitCode, 0)
+        let payload = try decode(ArrangeExecutionJSON.self, from: result.stdout)
+        XCTAssertEqual(payload.result, "success")
+        XCTAssertTrue(payload.hardErrors.isEmpty)
+        XCTAssertTrue(payload.softErrors.isEmpty)
+        XCTAssertTrue(payload.warnings.contains(where: { $0.code == "arrange.stateOnly" }))
+
+        let persisted = stateStore.load().slots
+        XCTAssertEqual(persisted.count, 1)
+        XCTAssertEqual(persisted.first?.slot, 1)
+        XCTAssertEqual(persisted.first?.bundleID, "com.apple.TextEdit")
+        XCTAssertEqual(persisted.first?.spaceID, 1)
+        XCTAssertNil(persisted.first?.windowID)
+    }
+
+    func testArrangeRejectsCombiningDryRunAndStateOnly() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+        let service = workspace.makeService()
+
+        let result = service.arrange(
+            layoutName: "work",
+            dryRun: true,
+            verbose: false,
+            json: true,
+            stateOnly: true
+        )
+
+        XCTAssertEqual(result.exitCode, Int32(ErrorCode.validationError.rawValue))
+        let payload = try decode(CommonErrorJSON.self, from: result.stdout)
+        XCTAssertEqual(payload.code, ErrorCode.validationError.rawValue)
+        XCTAssertEqual(payload.message, "dryRun and stateOnly cannot be combined")
+    }
+
     func testFocusOutOfRangeReturnsValidationErrorToStderr() throws {
         let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
         defer { workspace.cleanup() }

@@ -15,13 +15,15 @@ final class AgentIPCTests: XCTestCase {
             x: nil,
             y: nil,
             width: nil,
-            height: nil
+            height: nil,
+            stateOnly: true
         )
 
         let copied = request.withConfigDirectoryPath("/tmp/shitsurae")
         XCTAssertEqual(copied.command, .arrange)
         XCTAssertEqual(copied.layoutName, "work")
         XCTAssertEqual(copied.spaceID, 2)
+        XCTAssertEqual(copied.stateOnly, true)
         XCTAssertEqual(copied.configDirectoryPath, "/tmp/shitsurae")
     }
 
@@ -42,7 +44,8 @@ final class AgentIPCTests: XCTestCase {
             windowID: 42,
             bundleID: "com.apple.TextEdit",
             windowTitle: "Draft",
-            configDirectoryPath: "/Users/example/.config/shitsurae"
+            configDirectoryPath: "/Users/example/.config/shitsurae",
+            stateOnly: true
         )
 
         let encoded = try JSONEncoder().encode(request)
@@ -55,6 +58,7 @@ final class AgentIPCTests: XCTestCase {
         XCTAssertEqual(decoded.bundleID, "com.apple.TextEdit")
         XCTAssertEqual(decoded.windowTitle, "Draft")
         XCTAssertEqual(decoded.configDirectoryPath, "/Users/example/.config/shitsurae")
+        XCTAssertEqual(decoded.stateOnly, true)
     }
 
     func testAgentCommandCodableSupportsDisplayAndSpaceCommands() throws {

@@ -27,7 +27,14 @@ public struct RemoteCommandService {
         self.configDirectoryPathProvider = configDirectoryPathProvider
     }
 
-    public func arrange(layoutName: String, spaceID: Int? = nil, dryRun: Bool, verbose: Bool, json: Bool) -> CommandResult {
+    public func arrange(
+        layoutName: String,
+        spaceID: Int? = nil,
+        dryRun: Bool,
+        verbose: Bool,
+        json: Bool,
+        stateOnly: Bool = false
+    ) -> CommandResult {
         client.execute(
             AgentCommandRequest(
                 command: .arrange,
@@ -42,7 +49,8 @@ public struct RemoteCommandService {
                 y: nil,
                 width: nil,
                 height: nil,
-                configDirectoryPath: configDirectoryPathProvider()
+                configDirectoryPath: configDirectoryPathProvider(),
+                stateOnly: stateOnly
             )
         )
     }

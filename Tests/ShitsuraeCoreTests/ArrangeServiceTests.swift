@@ -634,6 +634,44 @@ final class ArrangeServiceTests: XCTestCase {
         XCTAssertEqual(persisted.first(where: { $0.slot == 2 })?.spaceID, 2)
     }
 
+    func testStateOnlyPersistsLayoutWithoutRunningArrangeOperations() throws {
+        let driver = FakeArrangeDriver()
+        driver.accessibility = false
+        driver.backendAvailableResult = (false, "unsupportedOSBuild")
+
+        let logger = ShitsuraeLogger(logFileURL: tempFile("arrange-log.jsonl"))
+        let store = RuntimeStateStore(stateFileURL: tempFile("state.json"))
+        let context = ArrangeContext(config: baseConfig(initialFocusSlot: 1), supportedBuildCatalogURL: URL(fileURLWithPath: "/tmp/missing.json"))
+        let service = ArrangeService(context: context, logger: logger, stateStore: store, driver: driver)
+
+        let result = try service.execute(layoutName: "work", stateOnly: true)
+
+        XCTAssertEqual(result.result, "success")
+        XCTAssertEqual(result.exitCode, ErrorCode.success.rawValue)
+        XCTAssertTrue(result.warnings.contains(where: { $0.code == "arrange.stateOnly" }))
+        XCTAssertTrue(driver.launchInvocations.isEmpty)
+        XCTAssertTrue(driver.moveWindowToSpaceCalls.isEmpty)
+        XCTAssertTrue(driver.setFrameInvocations.isEmpty)
+        XCTAssertTrue(driver.activateInvocations.isEmpty)
+        XCTAssertTrue(driver.sleepCalls.isEmpty)
+
+        let persisted = store.load().slots
+        XCTAssertEqual(
+            persisted,
+            [
+                SlotEntry(
+                    slot: 1,
+                    source: .window,
+                    bundleID: "com.example.app",
+                    title: "com.example.app",
+                    spaceID: 1,
+                    displayID: nil,
+                    windowID: nil
+                ),
+            ]
+        )
+    }
+
 
 
     private func makeService(driver: FakeArrangeDriver) -> ArrangeService {
@@ -1056,6 +1094,7 @@ private final class FakeArrangeDriver: ArrangeDriver {
     var autoUpdateWindowFrameOnSet: Bool = true
     var setFrameInvocations: [(windowID: UInt32, bundleID: String, frame: ResolvedFrame)] = []
     var activateResults: [String: Bool] = [:]
+    var activateInvocations: [String] = []
     var accessibility: Bool = true
     var spacesMode: SpacesMode? = .perDisplay
     var backendAvailableResult: (Bool, String?) = (true, nil)
@@ -1195,7 +1234,8 @@ private final class FakeArrangeDriver: ArrangeDriver {
     }
 
     func activate(bundleID: String) -> Bool {
-        activateResults[bundleID] ?? true
+        activateInvocations.append(bundleID)
+        return activateResults[bundleID] ?? true
     }
 
     func sleep(milliseconds: Int) {

@@ -33,6 +33,7 @@ YAML にレイアウトを定義し、`shitsurae arrange <name>` を実行する
 - ウィンドウを指定した Space へ移動
 - 指定座標・サイズに配置
 - 配置完了後、初期フォーカスを設定
+- `--state-only` で runtime state のみ更新
 
 位置・サイズの単位は柔軟に指定可能：`%`（画面比率）、`pt`（論理座標）、`px`（物理ピクセル）、`r`（0.0〜1.0 の比率）。
 
@@ -160,6 +161,7 @@ Shitsurae は通常の macOS アプリとして起動し、メニューバーに
 shitsurae arrange <layout> --dry-run --json    # 実行計画の確認（変更なし）
 shitsurae arrange <layout> --json              # レイアウト適用
 shitsurae arrange <layout> --space 2 --json    # 特定 Space に適用
+shitsurae arrange <layout> --state-only --json # runtime state のみ更新
 shitsurae layouts list                         # 定義済みレイアウト一覧
 shitsurae validate --json                      # 設定ファイルの検証
 shitsurae diagnostics --json                   # 診断情報

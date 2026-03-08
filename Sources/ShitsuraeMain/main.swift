@@ -95,9 +95,14 @@ private enum SidebarItem: Hashable {
 
 private enum ArrangeStatus: Equatable {
     case idle
-    case running
-    case success
-    case failed
+    case running(ArrangeTrigger)
+    case success(ArrangeTrigger)
+    case failed(ArrangeTrigger)
+}
+
+private enum ArrangeTrigger: Equatable {
+    case apply
+    case stateOnly
 }
 
 // MARK: - AppModel
@@ -158,18 +163,19 @@ private final class AppModel: ObservableObject {
         }
     }
 
-    func apply(layout: String, spaceID: Int? = nil) {
-        arrangeStatus = .running
+    func apply(layout: String, spaceID: Int? = nil, stateOnly: Bool = false) {
+        let trigger: ArrangeTrigger = stateOnly ? .stateOnly : .apply
+        arrangeStatus = .running(trigger)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = RemoteCommandService().arrange(
                 layoutName: layout, spaceID: spaceID,
-                dryRun: false, verbose: false, json: false
+                dryRun: false, verbose: false, json: false, stateOnly: stateOnly
             )
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.arrangeStatus = result.exitCode == 0 ? .success : .failed
+                self.arrangeStatus = result.exitCode == 0 ? .success(trigger) : .failed(trigger)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                    if self.arrangeStatus == .success || self.arrangeStatus == .failed {
+                    if self.arrangeStatus == .success(trigger) || self.arrangeStatus == .failed(trigger) {
                         self.arrangeStatus = .idle
                     }
                 }
@@ -389,7 +395,7 @@ private struct ArrangeView: View {
                         .frame(width: 140)
                     }
 
-                    applyButton
+                    actionButtons
                 }
 
                 if let layout = currentLayout {
@@ -409,27 +415,60 @@ private struct ArrangeView: View {
     }
 
     @ViewBuilder
-    private var applyButton: some View {
-        Button {
+    private var actionButtons: some View {
+        HStack(spacing: 8) {
+            arrangeButton(title: "Apply", systemImage: "play.fill", trigger: .apply, stateOnly: false)
+            arrangeButton(title: "State Only", systemImage: "square.stack.3d.down.right", trigger: .stateOnly, stateOnly: true)
+                .help("Update runtime state without moving or resizing windows")
+        }
+        .padding(.top, 16)
+    }
+
+    @ViewBuilder
+    private func arrangeButton(
+        title: String,
+        systemImage: String,
+        trigger: ArrangeTrigger,
+        stateOnly: Bool
+    ) -> some View {
+        let button = Button {
             guard let layout = selectedLayout else { return }
-            model.apply(layout: layout, spaceID: selectedSpaceID)
+            model.apply(layout: layout, spaceID: selectedSpaceID, stateOnly: stateOnly)
         } label: {
             HStack(spacing: 6) {
-                switch model.arrangeStatus {
-                case .idle:
-                    Image(systemName: "play.fill")
-                case .running:
-                    ProgressView().controlSize(.small)
-                case .success:
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                case .failed:
-                    Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
-                }
-                Text("Apply")
+                statusIcon(for: trigger, defaultSystemImage: systemImage)
+                Text(title)
             }
         }
-        .disabled(selectedLayout == nil || model.arrangeStatus == .running)
-        .padding(.top, 16)
+
+        if trigger == .apply {
+            button.buttonStyle(.borderedProminent)
+                .disabled(selectedLayout == nil || isArrangeRunning)
+        } else {
+            button.buttonStyle(.bordered)
+                .disabled(selectedLayout == nil || isArrangeRunning)
+        }
+    }
+
+    @ViewBuilder
+    private func statusIcon(for trigger: ArrangeTrigger, defaultSystemImage: String) -> some View {
+        switch model.arrangeStatus {
+        case let .running(statusTrigger) where statusTrigger == trigger:
+            ProgressView().controlSize(.small)
+        case let .success(statusTrigger) where statusTrigger == trigger:
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+        case let .failed(statusTrigger) where statusTrigger == trigger:
+            Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
+        default:
+            Image(systemName: defaultSystemImage)
+        }
+    }
+
+    private var isArrangeRunning: Bool {
+        if case .running = model.arrangeStatus {
+            return true
+        }
+        return false
     }
 
     private func layoutPreview(_ layout: LayoutDefinition) -> some View {

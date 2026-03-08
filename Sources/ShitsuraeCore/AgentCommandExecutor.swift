@@ -4,7 +4,7 @@ public protocol CommandHandling {
     func validate(json: Bool) -> CommandResult
     func layoutsList() -> CommandResult
     func diagnostics(json: Bool) -> CommandResult
-    func arrange(layoutName: String, spaceID: Int?, dryRun: Bool, verbose: Bool, json: Bool) -> CommandResult
+    func arrange(layoutName: String, spaceID: Int?, dryRun: Bool, verbose: Bool, json: Bool, stateOnly: Bool) -> CommandResult
     func displayList(json: Bool) -> CommandResult
     func displayCurrent(json: Bool) -> CommandResult
     func spaceList(json: Bool) -> CommandResult
@@ -41,7 +41,8 @@ public final class AgentCommandExecutor {
                 spaceID: request.spaceID,
                 dryRun: request.dryRun ?? false,
                 verbose: request.verbose ?? false,
-                json: request.json ?? false
+                json: request.json ?? false,
+                stateOnly: request.stateOnly ?? false
             )
         case .layoutsList:
             result = commandHandler.layoutsList()

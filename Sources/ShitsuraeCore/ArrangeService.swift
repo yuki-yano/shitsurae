@@ -92,8 +92,16 @@ public final class ArrangeService {
         )
     }
 
-    public func execute(layoutName: String, spaceID: Int? = nil) throws -> ArrangeExecutionJSON {
-        logger.log(event: "arrange.start", fields: ["layout": layoutName])
+    public func execute(layoutName: String, spaceID: Int? = nil, stateOnly: Bool = false) throws -> ArrangeExecutionJSON {
+        var startFields: [String: Any] = ["layout": layoutName]
+        if stateOnly {
+            startFields["stateOnly"] = true
+        }
+        logger.log(event: "arrange.start", fields: startFields)
+
+        if stateOnly {
+            return try executeStateOnly(layoutName: layoutName, spaceID: spaceID)
+        }
 
         if !driver.accessibilityGranted() {
             return failed(
@@ -318,6 +326,47 @@ public final class ArrangeService {
         return output
     }
 
+    private func executeStateOnly(layoutName: String, spaceID: Int?) throws -> ArrangeExecutionJSON {
+        let layout = try validatedLayout(layoutName, spaceID: spaceID)
+        let slotEntries = stateOnlySlotEntries(layout: layout, arrangedSpaceID: spaceID)
+
+        persistRuntimeState(
+            layout: layout,
+            arrangedSpaceID: spaceID,
+            slotEntries: slotEntries,
+            preserveUnresolvedSelectedSlots: false
+        )
+
+        let output = ArrangeExecutionJSON(
+            schemaVersion: 1,
+            layout: layoutName,
+            spacesMode: context.config.resolvedSpacesMode,
+            result: "success",
+            hardErrors: [],
+            softErrors: [],
+            skipped: [],
+            warnings: [
+                WarningItem(
+                    code: "arrange.stateOnly",
+                    detail: "updated runtime state without applying layout operations"
+                ),
+            ],
+            exitCode: ErrorCode.success.rawValue
+        )
+
+        logger.log(
+            event: "arrange.finished",
+            fields: [
+                "layout": layoutName,
+                "result": "success",
+                "exitCode": ErrorCode.success.rawValue,
+                "stateOnly": true,
+            ]
+        )
+
+        return output
+    }
+
     private func persistRuntimeState(
         layout: LayoutDefinition,
         arrangedSpaceID: Int?,
@@ -472,11 +521,7 @@ public final class ArrangeService {
         spaceID: Int?,
         includeDryRunDiagnostics: Bool
     ) throws -> PlanningResult {
-        let layout = try requiredLayout(layoutName)
-
-        if let spaceID, !layout.spaces.contains(where: { $0.spaceID == spaceID }) {
-            throw ShitsuraeError(.validationError, "space not found in layout: \(spaceID)")
-        }
+        let layout = try validatedLayout(layoutName, spaceID: spaceID)
 
         let displays = driver.displays()
         let defaultDisplay = displays.first
@@ -712,6 +757,58 @@ public final class ArrangeService {
             throw ShitsuraeError(.validationError, "layout not found: \(layoutName)")
         }
         return layout
+    }
+
+    private func validatedLayout(_ layoutName: String, spaceID: Int?) throws -> LayoutDefinition {
+        let layout = try requiredLayout(layoutName)
+
+        if let spaceID, !layout.spaces.contains(where: { $0.spaceID == spaceID }) {
+            throw ShitsuraeError(.validationError, "space not found in layout: \(spaceID)")
+        }
+
+        return layout
+    }
+
+    private func stateOnlySlotEntries(layout: LayoutDefinition, arrangedSpaceID: Int?) -> [SlotEntry] {
+        var selectedSpaceIDs = Set<Int>()
+        var entries: [SlotEntry] = []
+
+        for space in layout.spaces {
+            if let arrangedSpaceID, space.spaceID != arrangedSpaceID {
+                continue
+            }
+
+            if !selectedSpaceIDs.insert(space.spaceID).inserted {
+                continue
+            }
+
+            for window in space.windows {
+                entries.append(
+                    SlotEntry(
+                        slot: window.slot,
+                        source: window.source ?? .window,
+                        bundleID: window.match.bundleID,
+                        title: runtimeStateTitle(for: window.match),
+                        profile: window.match.profile,
+                        spaceID: space.spaceID,
+                        displayID: space.display?.id,
+                        windowID: nil
+                    )
+                )
+            }
+        }
+
+        return entries
+    }
+
+    private func runtimeStateTitle(for rule: WindowMatchRule) -> String {
+        if let equals = rule.title?.equals, !equals.isEmpty {
+            return equals
+        }
+        if let contains = rule.title?.contains, !contains.isEmpty {
+            return contains
+        }
+        return rule.bundleID
     }
 
     private func failed(layoutName: String, code: ErrorCode, message: String) -> ArrangeExecutionJSON {
