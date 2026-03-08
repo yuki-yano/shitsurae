@@ -370,7 +370,7 @@ private struct ArrangeView: View {
                     }
                 }
 
-                HStack(spacing: 12) {
+                HStack(alignment: .bottom, spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Layout").font(.caption).foregroundStyle(.secondary)
                         Picker("Layout", selection: $selectedLayout) {
@@ -380,7 +380,7 @@ private struct ArrangeView: View {
                             }
                         }
                         .labelsHidden()
-                        .frame(width: 180)
+                        .frame(minWidth: 180)
                     }
 
                     VStack(alignment: .leading, spacing: 4) {
@@ -392,7 +392,7 @@ private struct ArrangeView: View {
                             }
                         }
                         .labelsHidden()
-                        .frame(width: 140)
+                        .frame(minWidth: 140)
                     }
 
                     actionButtons
@@ -421,7 +421,6 @@ private struct ArrangeView: View {
             arrangeButton(title: "State Only", systemImage: "square.stack.3d.down.right", trigger: .stateOnly, stateOnly: true)
                 .help("Update runtime state without moving or resizing windows")
         }
-        .padding(.top, 16)
     }
 
     @ViewBuilder
@@ -441,13 +440,8 @@ private struct ArrangeView: View {
             }
         }
 
-        if trigger == .apply {
-            button.buttonStyle(.borderedProminent)
-                .disabled(selectedLayout == nil || isArrangeRunning)
-        } else {
-            button.buttonStyle(.bordered)
-                .disabled(selectedLayout == nil || isArrangeRunning)
-        }
+        button.buttonStyle(.bordered)
+            .disabled(selectedLayout == nil || isArrangeRunning)
     }
 
     @ViewBuilder
