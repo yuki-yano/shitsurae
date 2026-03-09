@@ -1090,7 +1090,7 @@ final class ShortcutManager {
     }
 
     private func buildCycleCandidatesForCurrentSpace() -> [SwitcherCandidate] {
-        let currentSpaceID = WindowQueryService.focusedWindow()?.spaceID
+        let currentSpaceID = WindowQueryService.currentSpaceID()
         let result = ShortcutCandidateOrdering.cycleCandidates(
             windows: WindowQueryService.listWindows(),
             currentSpaceID: currentSpaceID,
@@ -1111,7 +1111,7 @@ final class ShortcutManager {
     private func buildSwitcherCandidatesForCurrentSpace() -> [SwitcherCandidate] {
         ShortcutCandidateOrdering.switcherCandidates(
             windows: WindowQueryService.listWindows(),
-            currentSpaceID: WindowQueryService.focusedWindow()?.spaceID,
+            currentSpaceID: WindowQueryService.currentSpaceID(),
             slotEntries: stateStore.load().slots,
             ignoreFocusRules: currentIgnoreFocusRules,
             excludedBundleIDs: currentShortcuts.switcherExcludedApps,

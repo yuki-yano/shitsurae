@@ -3,6 +3,55 @@ import XCTest
 @testable import ShitsuraeCore
 
 final class RuntimeWindowServicesTests: XCTestCase {
+    func testCurrentSpaceIDPrefersFocusedWindowSpace() {
+        let focused = WindowSnapshot(
+            windowID: 101,
+            bundleID: "com.example.editor",
+            pid: 101,
+            title: "Editor",
+            role: "AXWindow",
+            subrole: nil,
+            minimized: false,
+            hidden: false,
+            frame: ResolvedFrame(x: 0, y: 0, width: 800, height: 600),
+            spaceID: 3,
+            displayID: "display-a",
+            isFullscreen: false,
+            frontIndex: 0
+        )
+        let spaces = [
+            SpaceInfo(spaceID: 1, displayID: "display-a", isVisible: true, isNativeFullscreen: false),
+            SpaceInfo(spaceID: 3, displayID: "display-a", isVisible: false, isNativeFullscreen: false),
+        ]
+
+        XCTAssertEqual(
+            WindowQueryService.currentSpaceID(focusedWindow: focused, spaces: spaces),
+            3
+        )
+    }
+
+    func testCurrentSpaceIDFallsBackToVisibleSpaceWhenFocusedWindowMissing() {
+        let spaces = [
+            SpaceInfo(spaceID: 2, displayID: "display-a", isVisible: false, isNativeFullscreen: false),
+            SpaceInfo(spaceID: 4, displayID: "display-a", isVisible: true, isNativeFullscreen: false),
+        ]
+
+        XCTAssertEqual(
+            WindowQueryService.currentSpaceID(focusedWindow: nil, spaces: spaces),
+            4
+        )
+    }
+
+    func testCurrentSpaceIDReturnsNilWhenFocusedWindowAndVisibleSpaceAreUnavailable() {
+        let spaces = [
+            SpaceInfo(spaceID: 2, displayID: "display-a", isVisible: false, isNativeFullscreen: false),
+        ]
+
+        XCTAssertNil(
+            WindowQueryService.currentSpaceID(focusedWindow: nil, spaces: spaces)
+        )
+    }
+
     func testPrepareForTargetedWindowInteractionUnhidesOnlyWhenAppIsHidden() {
         var unhideCount = 0
 

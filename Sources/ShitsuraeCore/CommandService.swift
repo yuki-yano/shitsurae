@@ -377,6 +377,13 @@ public final class CommandService {
         return CommandResult(exitCode: 0, stdout: encodeJSON(payload) + "\n")
     }
 
+    private func currentSpaceID() -> Int? {
+        WindowQueryService.currentSpaceID(
+            focusedWindow: runtimeHooks.focusedWindow(),
+            spaces: runtimeHooks.spaces()
+        )
+    }
+
     public func displayList(json: Bool) -> CommandResult {
         guard json else {
             return CommandResult(
@@ -564,7 +571,7 @@ public final class CommandService {
         }
 
         let state = stateStore.load()
-        let currentSpaceID = runtimeHooks.focusedWindow()?.spaceID
+        let currentSpaceID = currentSpaceID()
         guard let entry = resolveSlotEntry(slot: slot, state: state, currentSpaceID: currentSpaceID) else {
             return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
         }
@@ -615,7 +622,7 @@ public final class CommandService {
         guard let entry = resolveSlotEntry(
             slot: slot,
             state: state,
-            currentSpaceID: runtimeHooks.focusedWindow()?.spaceID
+            currentSpaceID: currentSpaceID()
         ),
               focusShortcutTargetExists(entry: entry, windows: windows)
         else {
@@ -666,8 +673,7 @@ public final class CommandService {
         let windows = runtimeHooks.listWindows().filter {
             !$0.isFullscreen && !$0.hidden && !$0.minimized
         }
-        let focused = runtimeHooks.focusedWindow()
-        let currentSpaceID = focused?.spaceID
+        let currentSpaceID = currentSpaceID()
         let slots = stateStore.load().slots
 
         var internalCandidates: [InternalCandidate] = []

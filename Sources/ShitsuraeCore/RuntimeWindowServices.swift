@@ -446,6 +446,21 @@ public enum WindowQueryService {
         )
     }
 
+    public static func currentSpaceID(displays: [DisplayInfo] = SystemProbe.displays()) -> Int? {
+        currentSpaceID(
+            focusedWindow: focusedWindow(displays: displays),
+            spaces: listSpaces(displays: displays)
+        )
+    }
+
+    public static func currentSpaceID(focusedWindow: WindowSnapshot?, spaces: [SpaceInfo]) -> Int? {
+        if let spaceID = focusedWindow?.spaceID {
+            return spaceID
+        }
+
+        return spaces.first(where: \.isVisible)?.spaceID
+    }
+
     static func resolveFocusedWindow(
         frontmostPID: Int,
         frontmostBundleID: String,

@@ -13,7 +13,7 @@ struct ShitsuraeMenuBarApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            let currentSpaceID = WindowQueryService.focusedWindow()?.spaceID
+            let currentSpaceID = WindowQueryService.currentSpaceID()
             if model.layouts.isEmpty {
                 Text("No layouts")
             } else {

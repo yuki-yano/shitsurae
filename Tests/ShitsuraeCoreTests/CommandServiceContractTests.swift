@@ -406,6 +406,67 @@ final class CommandServiceContractTests: XCTestCase {
         XCTAssertEqual(focusedTargets.map(\.1), ["com.hnc.Discord"])
     }
 
+    func testFocusPrefersVisibleCurrentSpaceWhenFocusedWindowIsUnavailable() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+
+        let stateStore = RuntimeStateStore(stateFileURL: workspace.stateFileURL)
+        stateStore.save(
+            slots: [
+                SlotEntry(
+                    slot: 1,
+                    source: .window,
+                    bundleID: "com.google.Chrome",
+                    title: "Chrome",
+                    spaceID: 1,
+                    displayID: "display-a",
+                    windowID: 101,
+                ),
+                SlotEntry(
+                    slot: 1,
+                    source: .window,
+                    bundleID: "com.hnc.Discord",
+                    title: "Discord",
+                    spaceID: 2,
+                    displayID: "display-a",
+                    windowID: 202,
+                ),
+            ]
+        )
+
+        let windows = [
+            Self.window(windowID: 101, bundleID: "com.google.Chrome", title: "Chrome", spaceID: 1, frontIndex: 1),
+            Self.window(windowID: 202, bundleID: "com.hnc.Discord", title: "Discord", spaceID: 2, frontIndex: 0),
+        ]
+        var focusedTargets: [(UInt32, String)] = []
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: { windows },
+            focusedWindow: { nil },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { _ in true },
+            displays: { [] },
+            runProcess: { _, _ in (0, "") },
+            focusWindow: { windowID, bundleID in
+                focusedTargets.append((windowID, bundleID))
+                return true
+            },
+            spaces: {
+                [
+                    SpaceInfo(spaceID: 1, displayID: "display-a", isVisible: false, isNativeFullscreen: false),
+                    SpaceInfo(spaceID: 2, displayID: "display-a", isVisible: true, isNativeFullscreen: false),
+                ]
+            }
+        )
+
+        let service = workspace.makeService(stateStore: stateStore, runtimeHooks: runtimeHooks)
+        let result = service.focus(slot: 1)
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(focusedTargets.map(\.0), [202])
+        XCTAssertEqual(focusedTargets.map(\.1), ["com.hnc.Discord"])
+    }
+
     func testFocusReturnsNotFoundWhenStateIsEmpty() throws {
         let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
         defer { workspace.cleanup() }
@@ -781,6 +842,40 @@ final class CommandServiceContractTests: XCTestCase {
 
         let payload = try decode(SwitcherListJSON.self, from: result.stdout)
         XCTAssertEqual(payload.candidates.map(\.id), ["window:102", "window:101"])
+    }
+
+    func testSwitcherListFallsBackToVisibleCurrentSpaceWhenFocusedWindowIsUnavailable() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.switcherConfigYAML])
+        defer { workspace.cleanup() }
+
+        let windows = [
+            Self.window(windowID: 101, bundleID: "com.example.notes", title: "A", spaceID: 1, frontIndex: 1),
+            Self.window(windowID: 102, bundleID: "com.example.chat", title: "B", spaceID: 2, frontIndex: 0),
+            Self.window(windowID: 103, bundleID: "com.example.mail", title: "C", spaceID: 2, frontIndex: 2),
+        ]
+
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: { windows },
+            focusedWindow: { nil },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { _ in true },
+            displays: { [] },
+            runProcess: { _, _ in (0, "") },
+            spaces: {
+                [
+                    SpaceInfo(spaceID: 1, displayID: "display-a", isVisible: false, isNativeFullscreen: false),
+                    SpaceInfo(spaceID: 2, displayID: "display-a", isVisible: true, isNativeFullscreen: false),
+                ]
+            }
+        )
+
+        let service = workspace.makeService(runtimeHooks: runtimeHooks)
+        let result = service.switcherList(json: true, includeAllSpacesOverride: nil)
+        XCTAssertEqual(result.exitCode, 0)
+
+        let payload = try decode(SwitcherListJSON.self, from: result.stdout)
+        XCTAssertEqual(payload.candidates.map(\.id), ["window:102", "window:103"])
     }
 
     func testSwitcherListAccessibilityMissingReturnsCode20JSON() throws {
