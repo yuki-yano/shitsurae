@@ -21,6 +21,9 @@
     "monitors": {
       "$ref": "#/$defs/monitorsDefinition"
     },
+    "mode": {
+      "$ref": "#/$defs/modeDefinition"
+    },
     "layouts": {
       "type": "object",
       "minProperties": 1,
@@ -41,6 +44,22 @@
       "additionalProperties": false,
       "properties": {
         "launchAtLogin": {
+          "type": "boolean"
+        }
+      }
+    },
+    "spaceInterpretationMode": {
+      "type": "string",
+      "enum": ["native", "virtual"]
+    },
+    "modeDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "space": {
+          "$ref": "#/$defs/spaceInterpretationMode"
+        },
+        "followFocus": {
           "type": "boolean"
         }
       }
@@ -543,6 +562,18 @@
       "additionalProperties": false,
       "properties": {
         "focusBySlot": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/focusBySlotShortcut"
+          }
+        },
+        "moveCurrentWindowToSpace": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/focusBySlotShortcut"
+          }
+        },
+        "switchVirtualSpace": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/focusBySlotShortcut"

@@ -44,6 +44,8 @@ Every operation is available from the keyboard. Default shortcuts:
 | Action | Default | Description |
 |--------|---------|-------------|
 | Slot focus | `Cmd+1` – `Cmd+9` | Jump directly to a numbered window |
+| Workspace switch | `Ctrl+1` – `Ctrl+9` | In virtual mode, switch the active logical workspace |
+| Send window to workspace | `Alt+1` – `Alt+9` | In virtual mode, send the current window to a logical workspace |
 | Next window | `Cmd+Ctrl+J` | Cycle forward within the current Space |
 | Previous window | `Cmd+Ctrl+K` | Cycle backward within the current Space |
 | Switcher | `Cmd+Tab` | Open the window switcher overlay |
@@ -55,8 +57,9 @@ All shortcuts are fully configurable in YAML. You can also disable specific shor
 
 A custom switcher triggered by `Cmd+Tab` (configurable):
 
-- Ignores slots and lists windows on the current Space in MRU order
-- By default, each candidate gets a quick key (`1`, `2`, `3`, `4`, …) for one-keystroke selection
+- Windows are listed in MRU (most recently used) order — the last-active window appears second, so a single `Cmd+Tab` press switches to the previous window (like Windows Alt+Tab)
+- In virtual mode, activation is tracked at the OS level via `NSWorkspace.didActivateApplicationNotification`, so Dock clicks, Mission Control, and direct window clicks all update the MRU order
+- Each candidate gets a quick key (`1`, `2`, `3`, `4`, …) for one-keystroke selection
 - Releasing the modifier always confirms the current selection
 - Configurable trigger, accept/cancel keys, and quick key string
 
@@ -72,7 +75,37 @@ Built-in snap presets for quick window positioning:
 
 Bind any of these to a global shortcut in your YAML config.
 
-### 5. Menu bar + GUI app
+### 5. Virtual mode
+
+When `mode.space: virtual` is enabled, `spaceID` is treated as a logical workspace ID rather than a macOS native Space number. All workspace management is performed on a single native Space by moving windows on/offscreen.
+
+```yaml
+mode:
+  space: virtual
+  followFocus: true  # default: true
+```
+
+#### Bootstrap
+
+1. Run `shitsurae arrange <layout> --dry-run --json` and inspect `availableSpaceIDs`
+2. Run `shitsurae arrange <layout> --state-only --space <id>` to initialize the active layout and active space
+3. Make sure the tracked windows for that workspace are present on the host native Space, then run `shitsurae arrange <layout> --space <id>`
+
+The GUI uses the same flow: *Initialize Active Space* (step 2) and *Apply Selected Space* (step 3).
+
+#### Behavior
+
+- `space current/list/switch` use the active virtual space as the source of truth
+- `focus --slot`, cycle, and switcher only operate on tracked windows in the active virtual space
+- `switcher list --json --include-all-spaces true` lists all tracked windows in the active layout
+- `Ctrl+1`–`Ctrl+9` switch the active virtual workspace
+- `Alt+1`–`Alt+9` / `window workspace <id>` reassign tracked windows between workspaces; windows sent away from the active space are moved offscreen instead of being minimized
+
+#### Follow-focus
+
+When `mode.followFocus` is enabled (default), focusing a managed window by any means — Dock click, Mission Control, direct click, `Cmd+Tab` — automatically switches to the virtual workspace that owns that window.
+
+### 6. Menu bar + GUI app
 
 Shitsurae runs as a standard macOS app with both a menu bar presence and a main window.
 
@@ -90,7 +123,7 @@ Always available from the system menu bar:
 
 #### Main window
 
-A full GUI with sidebar navigation, organized into the following sections:
+A full GUI with sidebar navigation: **Arrange**, **Layouts**, **General**, **Shortcuts**, **Permissions**, and **Diagnostics**.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/3adc77fe-03f4-4035-99d6-46ec116cf171" alt="Layout detail view" width="720" />
@@ -98,43 +131,9 @@ A full GUI with sidebar navigation, organized into the following sections:
 <p align="center">
   <img src="https://github.com/user-attachments/assets/8852c847-3091-4773-9c6c-5e8c4d1b6bfd" alt="Layout detail view (dashboard)" width="720" />
 </p>
-
-**Arrange** — run layouts from the GUI:
-- Layout picker dropdown to select a defined layout
-- Space picker to target all Spaces or a specific one
-- Apply button with live status indicator (idle → running → success / failed)
-- Visual layout preview showing color-coded window slots on each Space
-- Window legend listing slot number, bundle ID, title matcher, and frame dimensions
-
-**Layouts** — inspect each defined layout:
-- Summary badges for space count, window count, and initial focus target
-- Per-space visual preview with color-coded slot positions
-- Window detail table showing slot, bundle ID, title matcher, frame, and launch flag
-
-**General** — review current configuration at a glance:
-- App settings (`launchAtLogin`)
-- Ignore rules for `apply` and `focus` (excluded apps and window conditions)
-- Execution policy (default space-move method and per-app overrides)
-- Overlay settings (thumbnail on/off)
-- Monitor assignments (primary / secondary)
-
 <p align="center">
   <img src="https://github.com/user-attachments/assets/89261418-4110-491f-8bc0-4920fe5de1af" alt="Shortcuts view" width="720" />
 </p>
-
-**Shortcuts** — full shortcut reference:
-- Focus-by-slot keys (`Cmd+1`–`Cmd+9`) with per-app enable/disable status
-- Window navigation keys (next / prev), cycle mode, cycle quick/accept/cancel keys, and cycle-excluded apps
-- Switcher trigger key, current-Space scope, and switcher quick/accept/cancel keys
-- Global actions table (snap presets and custom actions with their shortcuts)
-
-**Permissions** — system permission status:
-- Accessibility (required) — granted / not granted
-- Screen Recording (required) — granted / not granted
-- Automation (optional) — granted / not granted
-- Button to jump to macOS Accessibility settings
-
-**Diagnostics** — raw system diagnostics displayed as selectable JSON text
 
 #### Window switcher overlay
 
@@ -153,7 +152,7 @@ A floating overlay triggered by the switcher hotkey (`Cmd+Tab` by default):
 - **Keyboard:** Tab / Shift+Tab to cycle, number keys for quick select, custom accept/cancel keys, or release the modifier to confirm
 - **Mouse:** click any card to activate it
 
-### 6. CLI + automation
+### 7. CLI + automation
 
 The CLI exposes the same functionality for shell scripts and automation:
 
@@ -165,22 +164,28 @@ shitsurae arrange <layout> --state-only --json # Update runtime state only
 shitsurae layouts list                         # List defined layouts
 shitsurae validate --json                      # Validate config files
 shitsurae diagnostics --json                   # Show system diagnostics
+shitsurae space current --json                 # Current space info
+shitsurae space list --json                    # List spaces
+shitsurae space switch 2 --json                # Switch active space in virtual mode
+shitsurae space recover --force-clear-pending --yes --json # Force-clear recovery state
 shitsurae window current --json                # Current window info
+shitsurae window workspace 2 --json            # In virtual mode, reassign a window to workspace 2
 shitsurae window set --x 0% --y 0% --w 50% --h 100%   # Move + resize
 shitsurae focus --slot 1                       # Focus by slot number
-shitsurae focus --bundle-id com.apple.TextEdit  # Focus by app
+shitsurae focus --bundle-id com.apple.TextEdit # Focus by app
 shitsurae switcher list --json                 # List switcher candidates
+shitsurae switcher list --json --include-all-spaces true  # In virtual mode, list the whole active layout
 ```
 
-`window move`, `window resize`, and `window set` default to the focused window when you omit a selector. Selectors: `--window-id` (exact window), `--bundle-id` (app), `--title` (combined with `--bundle-id`).
+`window workspace`, `window move`, `window resize`, and `window set` default to the focused window when you omit a selector. Selectors: `--window-id` (exact window), `--bundle-id` (app), `--title` (combined with `--bundle-id`).
 
-### 7. Multi-display support
+### 8. Multi-display support
 
 - Match displays by role (`primary` / `secondary`) or resolution conditions
 - Define multiple resolution-specific layouts for the same Space — the first match is applied
 - Seamless switching between MacBook-only and external-monitor setups without config changes
 
-### 8. Config auto-reload
+### 9. Config auto-reload
 
 - Reads all `*.yml` / `*.yaml` files in the config directory (sorted by filename)
 - Watches for file changes and auto-reloads
@@ -313,6 +318,14 @@ For Chrome, Brave, Edge, and Chromium, use `match.profile` to target a specific 
 - With `launch: true`, Shitsurae starts the browser with `--profile-directory=<profile> --new-window`.
 - `shitsurae window current --json` includes a `profile` field when resolvable.
 
+### Mode
+
+```yaml
+mode:
+  space: virtual    # native (default) | virtual
+  followFocus: true # default: true — auto-switch workspace on window focus (virtual mode only)
+```
+
 ### Space move method
 
 Control how Shitsurae moves windows between Spaces:
@@ -360,6 +373,24 @@ shortcuts:
     com.hnc.Discord: false
     com.tinyspeck.slackmacgap: false
     org.alacritty: false
+
+  # Virtual mode: send current window to a workspace (default Alt+1..9)
+  moveCurrentWindowToSpace:
+    - slot: 1
+      key: 1
+      modifiers: [alt]
+    - slot: 2
+      key: 2
+      modifiers: [alt]
+
+  # Virtual mode: switch the active workspace (default Ctrl+1..9)
+  switchVirtualSpace:
+    - slot: 1
+      key: 1
+      modifiers: [ctrl]
+    - slot: 2
+      key: 2
+      modifiers: [ctrl]
 
   # Exclude from Cmd+Ctrl+J / K cycling
   cycleExcludedApps:

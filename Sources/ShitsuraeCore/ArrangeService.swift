@@ -1,3 +1,4 @@
+import CryptoKit
 import CoreGraphics
 import Foundation
 
@@ -44,6 +45,8 @@ public struct ArrangeExecutionJSON: Codable {
     public let layout: String
     public let spacesMode: SpacesMode
     public let result: String
+    public let subcode: String?
+    public let unresolvedSlots: [PendingUnresolvedSlot]
     public let hardErrors: [ErrorItem]
     public let softErrors: [ErrorItem]
     public let skipped: [SkippedItem]
@@ -54,6 +57,17 @@ public struct ArrangeExecutionJSON: Codable {
 public struct ArrangeContext {
     public let config: ShitsuraeConfig
     public let supportedBuildCatalogURL: URL
+    public let configGeneration: String
+
+    public init(
+        config: ShitsuraeConfig,
+        supportedBuildCatalogURL: URL,
+        configGeneration: String = "legacy"
+    ) {
+        self.config = config
+        self.supportedBuildCatalogURL = supportedBuildCatalogURL
+        self.configGeneration = configGeneration
+    }
 }
 
 public final class ArrangeService {
@@ -99,169 +113,153 @@ public final class ArrangeService {
         }
         logger.log(event: "arrange.start", fields: startFields)
 
+        let layout = try validatedLayout(layoutName, spaceID: spaceID)
+
         if stateOnly {
-            return try executeStateOnly(layoutName: layoutName, spaceID: spaceID)
+            return try executeStateOnly(layoutName: layoutName, layout: layout, spaceID: spaceID)
         }
 
+        return try executeLiveArrange(layoutName: layoutName, layout: layout, spaceID: spaceID)
+    }
+
+    private func executeLiveArrange(
+        layoutName: String,
+        layout: LayoutDefinition,
+        spaceID: Int?
+    ) throws -> ArrangeExecutionJSON {
+        let preflight: LiveArrangePreparation
+        switch try prepareLiveArrange(layoutName: layoutName, layout: layout, spaceID: spaceID) {
+        case let .result(result):
+            return result
+        case let .ready(ready):
+            preflight = ready
+        }
+
+        let execution = executeLiveArrangeSteps(
+            layoutName: layoutName,
+            layout: layout,
+            planning: preflight.planning,
+            virtualHostContext: preflight.virtualHostContext
+        )
+        let outcome = finalizeLiveArrangeOutcome(
+            layoutName: layoutName,
+            hardErrors: execution.hardErrors,
+            softErrors: execution.softErrors,
+            unresolvedSlots: execution.unresolvedSlots
+        )
+
+        let persistedSlotEntries = persistedSlotEntriesForLiveArrange(
+            layout: layout,
+            arrangedSpaceID: spaceID,
+            resolvedSlotEntries: execution.slotEntries
+        )
+
+        persistRuntimeState(
+            layoutName: layoutName,
+            layout: layout,
+            arrangedSpaceID: spaceID,
+            slotEntries: persistedSlotEntries,
+            preserveUnresolvedSelectedSlots: !isVirtualMode && outcome.result != "success",
+            clearLiveArrangeRecoveryRequired: true
+        )
+
+        let output = makeArrangeExecutionOutput(
+            layoutName: layoutName,
+            outcome: outcome,
+            execution: execution
+        )
+
+        logger.log(
+            event: "arrange.finished",
+            fields: [
+                "layout": layoutName,
+                "result": outcome.result,
+                "exitCode": outcome.exitCode,
+            ]
+        )
+
+        return output
+    }
+
+    private func prepareLiveArrange(
+        layoutName: String,
+        layout: LayoutDefinition,
+        spaceID: Int?
+    ) throws -> LiveArrangePreparationResult {
         if !driver.accessibilityGranted() {
-            return failed(
+            return .result(failed(
                 layoutName: layoutName,
                 code: .missingPermission,
                 message: "Accessibility permission is required"
-            )
+            ))
         }
 
-        if let actual = driver.actualSpacesMode(), actual != context.config.resolvedSpacesMode {
-            return failed(
-                layoutName: layoutName,
-                code: .spacesModeMismatch,
-                message: "spacesMode mismatch expected=\(context.config.resolvedSpacesMode.rawValue) actual=\(actual.rawValue)"
-            )
+        if !isVirtualMode {
+            if let actual = driver.actualSpacesMode(), actual != context.config.resolvedSpacesMode {
+                return .result(failed(
+                    layoutName: layoutName,
+                    code: .spacesModeMismatch,
+                    message: "spacesMode mismatch expected=\(context.config.resolvedSpacesMode.rawValue) actual=\(actual.rawValue)"
+                ))
+            }
+
+            let backend = driver.backendAvailable(catalogURL: context.supportedBuildCatalogURL)
+            if !backend.0 {
+                return .result(failed(
+                    layoutName: layoutName,
+                    code: .backendUnavailable,
+                    message: "space backend is unavailable: \(backend.1 ?? "unknown")"
+                ))
+            }
         }
 
-        let backend = driver.backendAvailable(catalogURL: context.supportedBuildCatalogURL)
-        if !backend.0 {
-            return failed(
+        let virtualHostContext = isVirtualMode ? resolveVirtualHostDisplayContext(layout: layout) : nil
+        if isVirtualMode, virtualHostContext == nil {
+            return .result(failed(
                 layoutName: layoutName,
-                code: .backendUnavailable,
-                message: "space backend is unavailable: \(backend.1 ?? "unknown")"
-            )
+                code: .validationError,
+                message: "host display for virtual arrange is unavailable",
+                subcode: "virtualHostDisplayUnavailable"
+            ))
         }
 
         let planning = try buildExecutionPlan(layoutName: layoutName, spaceID: spaceID, includeDryRunDiagnostics: false)
+        return .ready(LiveArrangePreparation(
+            planning: planning,
+            virtualHostContext: virtualHostContext
+        ))
+    }
 
+    private func executeLiveArrangeSteps(
+        layoutName: String,
+        layout: LayoutDefinition,
+        planning: PlanningResult,
+        virtualHostContext: (display: DisplayInfo, visibleSpace: SpaceInfo)?
+    ) -> LiveArrangeStepExecution {
         var hardErrors: [ErrorItem] = []
         var softErrors: [ErrorItem] = []
         var skipped = planning.skipped
         var warnings = planning.warnings
         var slotEntries: [SlotEntry] = []
+        var unresolvedSlots: [PendingUnresolvedSlot] = []
 
         let policy = context.config.resolvedExecutionPolicy
-        let layout = try requiredLayout(layoutName)
 
         for step in planning.steps {
-            let windowDef = step.window
-            let source = windowDef.source ?? .window
-
-            if PolicyEngine.matchesIgnoreRule(windowDefinition: windowDef, rules: context.config.ignore?.apply) {
-                skipped.append(
-                    SkippedItem(
-                        spaceID: step.space.spaceID,
-                        slot: windowDef.slot,
-                        reason: "ignoreApply",
-                        detail: "matched ignore.apply rule"
-                    )
-                )
-                warnings.append(
-                    WarningItem(
-                        code: "ignore.apply.matched",
-                        detail: "slot \(windowDef.slot) skipped by ignore.apply"
-                    )
-                )
-                continue
-            }
-
-            let launch = windowDef.launch ?? true
-            let launchRequest = ApplicationLaunchRequest(
-                bundleID: windowDef.match.bundleID,
-                profileDirectory: windowDef.match.profile
-            )
-            let preLaunchWindowIDs = launch && windowDef.match.profile != nil
-                ? Set(driver.queryWindowsOnAllSpaces().filter { $0.bundleID == windowDef.match.bundleID }.map(\.windowID))
-                : nil
-            if launch, !driver.launch(request: launchRequest) {
-                softErrors.append(
-                    ErrorItem(
-                        code: ErrorCode.appLaunchFailed.rawValue,
-                        message: "failed to launch app: \(windowDef.match.bundleID)",
-                        spaceID: step.space.spaceID,
-                        slot: windowDef.slot
-                    )
-                )
-                continue
-            }
-
-            let waitOutcome = waitForWindow(
-                rule: windowDef.match,
+            let result = executeLiveArrangeStep(
+                step,
+                layoutName: layoutName,
+                layout: layout,
                 policy: policy,
-                slot: windowDef.slot,
-                spaceID: step.space.spaceID,
-                preLaunchWindowIDs: preLaunchWindowIDs
+                virtualHostContext: virtualHostContext
             )
 
-            switch waitOutcome {
-            case let .found(window):
-                if window.spaceID != step.space.spaceID {
-                    if !driver.moveWindowToSpace(
-                        windowID: window.windowID,
-                        bundleID: window.bundleID,
-                        displayID: step.display?.id,
-                        spaceID: step.space.spaceID,
-                        spacesMode: context.config.resolvedSpacesMode,
-                        method: policy.spaceMoveMethod(for: window.bundleID)
-                    ) {
-                        hardErrors.append(
-                            ErrorItem(
-                                code: ErrorCode.spaceMoveFailed.rawValue,
-                                message: "failed to move window to target space",
-                                spaceID: step.space.spaceID,
-                                slot: windowDef.slot
-                            )
-                        )
-                        break
-                    }
-                }
-
-                if !setFrameWithRetry(
-                    windowID: window.windowID,
-                    bundleID: window.bundleID,
-                    frame: step.resolvedFrame
-                ) {
-                    softErrors.append(
-                        ErrorItem(
-                            code: ErrorCode.operationTimedOut.rawValue,
-                            message: "failed to apply frame",
-                            spaceID: step.space.spaceID,
-                            slot: windowDef.slot
-                        )
-                    )
-                    continue
-                }
-
-                slotEntries.append(
-                    SlotEntry(
-                        slot: windowDef.slot,
-                        source: source,
-                        bundleID: windowDef.match.bundleID,
-                        title: window.title,
-                        profile: windowDef.match.profile ?? window.profileDirectory,
-                        spaceID: step.space.spaceID,
-                        displayID: step.display?.id ?? window.displayID,
-                        windowID: window.windowID
-                    )
-                )
-
-            case .fullscreenExcluded:
-                skipped.append(
-                    SkippedItem(
-                        spaceID: step.space.spaceID,
-                        slot: windowDef.slot,
-                        reason: "fullscreenExcluded",
-                        detail: "matched window is fullscreen and excluded"
-                    )
-                )
-                continue
-            case .notFound:
-                softErrors.append(
-                    ErrorItem(
-                        code: ErrorCode.targetWindowNotFound.rawValue,
-                        message: "target window not found: \(windowDef.match.bundleID)",
-                        spaceID: step.space.spaceID,
-                        slot: windowDef.slot
-                    )
-                )
-                continue
-            }
+            skipped.append(contentsOf: result.skipped)
+            warnings.append(contentsOf: result.warnings)
+            slotEntries.append(contentsOf: result.slotEntries)
+            unresolvedSlots.append(contentsOf: result.unresolvedSlots)
+            hardErrors.append(contentsOf: result.hardErrors)
+            softErrors.append(contentsOf: result.softErrors)
 
             if !hardErrors.isEmpty {
                 break
@@ -281,78 +279,214 @@ public final class ArrangeService {
             }
         }
 
-        let result: String
-        let exitCode: Int
-
-        if let firstHard = hardErrors.first {
-            result = "failed"
-            exitCode = firstHard.code
-        } else if !softErrors.isEmpty {
-            result = "partial"
-            exitCode = ErrorCode.partialSuccess.rawValue
-        } else {
-            result = "success"
-            exitCode = ErrorCode.success.rawValue
-        }
-
-        persistRuntimeState(
-            layout: layout,
-            arrangedSpaceID: spaceID,
-            slotEntries: slotEntries,
-            preserveUnresolvedSelectedSlots: result != "success"
-        )
-
-        let output = ArrangeExecutionJSON(
-            schemaVersion: 1,
-            layout: layoutName,
-            spacesMode: context.config.resolvedSpacesMode,
-            result: result,
+        return LiveArrangeStepExecution(
             hardErrors: hardErrors,
             softErrors: softErrors,
             skipped: skipped,
             warnings: warnings,
-            exitCode: exitCode
+            slotEntries: slotEntries,
+            unresolvedSlots: unresolvedSlots
         )
-
-        logger.log(
-            event: "arrange.finished",
-            fields: [
-                "layout": layoutName,
-                "result": result,
-                "exitCode": exitCode,
-            ]
-        )
-
-        return output
     }
 
-    private func executeStateOnly(layoutName: String, spaceID: Int?) throws -> ArrangeExecutionJSON {
-        let layout = try validatedLayout(layoutName, spaceID: spaceID)
+    private func executeLiveArrangeStep(
+        _ step: ExecutionStep,
+        layoutName: String,
+        layout: LayoutDefinition,
+        policy: ExecutionPolicy,
+        virtualHostContext: (display: DisplayInfo, visibleSpace: SpaceInfo)?
+    ) -> LiveArrangeStepResult {
+        let windowDef = step.window
+
+        if PolicyEngine.matchesIgnoreRule(windowDefinition: windowDef, rules: context.config.ignore?.apply) {
+            return LiveArrangeStepResult(
+                skipped: [
+                    SkippedItem(
+                        spaceID: step.space.spaceID,
+                        slot: windowDef.slot,
+                        reason: "ignoreApply",
+                        detail: "matched ignore.apply rule"
+                    ),
+                ],
+                warnings: [
+                    WarningItem(
+                        code: "ignore.apply.matched",
+                        detail: "slot \(windowDef.slot) skipped by ignore.apply"
+                    ),
+                ]
+            )
+        }
+
+        let launch = windowDef.launch ?? true
+        let launchRequest = ApplicationLaunchRequest(
+            bundleID: windowDef.match.bundleID,
+            profileDirectory: windowDef.match.profile
+        )
+        let preLaunchWindowIDs = launch && windowDef.match.profile != nil
+            ? Set(driver.queryWindowsOnAllSpaces().filter { $0.bundleID == windowDef.match.bundleID }.map(\.windowID))
+            : nil
+        if launch, !driver.launch(request: launchRequest) {
+            return LiveArrangeStepResult(
+                softErrors: [
+                    ErrorItem(
+                        code: ErrorCode.appLaunchFailed.rawValue,
+                        message: "failed to launch app: \(windowDef.match.bundleID)",
+                        spaceID: step.space.spaceID,
+                        slot: windowDef.slot
+                    ),
+                ]
+            )
+        }
+
+        let waitOutcome = waitForWindow(
+            rule: windowDef.match,
+            policy: policy,
+            slot: windowDef.slot,
+            spaceID: step.space.spaceID,
+            layoutName: layoutName,
+            preLaunchWindowIDs: preLaunchWindowIDs
+        )
+
+        switch waitOutcome {
+        case let .found(window):
+            if let virtualHostContext,
+               let unresolved = unresolvedVirtualArrangeSlot(
+                   observedWindow: window,
+                   slot: windowDef.slot,
+                   spaceID: step.space.spaceID,
+                   hostContext: virtualHostContext
+               )
+            {
+                return LiveArrangeStepResult(
+                    hardErrors: [
+                        ErrorItem(
+                            code: ErrorCode.validationError.rawValue,
+                            message: "tracked window is outside host native space",
+                            spaceID: step.space.spaceID,
+                            slot: windowDef.slot
+                        ),
+                    ],
+                    unresolvedSlots: [unresolved]
+                )
+            }
+
+            if !isVirtualMode, window.spaceID != step.space.spaceID {
+                if !driver.moveWindowToSpace(
+                    windowID: window.windowID,
+                    bundleID: window.bundleID,
+                    displayID: step.display?.id,
+                    spaceID: step.space.spaceID,
+                    spacesMode: context.config.resolvedSpacesMode,
+                    method: policy.spaceMoveMethod(for: window.bundleID)
+                ) {
+                    return LiveArrangeStepResult(
+                        hardErrors: [
+                            ErrorItem(
+                                code: ErrorCode.spaceMoveFailed.rawValue,
+                                message: "failed to move window to target space",
+                                spaceID: step.space.spaceID,
+                                slot: windowDef.slot
+                            ),
+                        ]
+                    )
+                }
+            }
+
+            if !setFrameWithRetry(
+                windowID: window.windowID,
+                bundleID: window.bundleID,
+                frame: step.resolvedFrame
+            ) {
+                return LiveArrangeStepResult(
+                    softErrors: [
+                        ErrorItem(
+                            code: ErrorCode.operationTimedOut.rawValue,
+                            message: "failed to apply frame",
+                            spaceID: step.space.spaceID,
+                            slot: windowDef.slot
+                        ),
+                    ]
+                )
+            }
+
+            return LiveArrangeStepResult(
+                slotEntries: [
+                    makeSlotEntry(
+                        layoutName: layoutName,
+                        spaceID: step.space.spaceID,
+                        window: windowDef,
+                        observedWindow: window,
+                        displayID: step.display?.id ?? window.displayID,
+                        visibleFrame: step.resolvedFrame
+                    ),
+                ]
+            )
+
+        case .fullscreenExcluded:
+            return LiveArrangeStepResult(
+                skipped: [
+                    SkippedItem(
+                        spaceID: step.space.spaceID,
+                        slot: windowDef.slot,
+                        reason: "fullscreenExcluded",
+                        detail: "matched window is fullscreen and excluded"
+                    ),
+                ]
+            )
+        case .notFound:
+            return LiveArrangeStepResult(
+                softErrors: [
+                    ErrorItem(
+                        code: ErrorCode.targetWindowNotFound.rawValue,
+                        message: "target window not found: \(windowDef.match.bundleID)",
+                        spaceID: step.space.spaceID,
+                        slot: windowDef.slot
+                    ),
+                ]
+            )
+        }
+    }
+
+    private func finalizeLiveArrangeOutcome(
+        layoutName _: String,
+        hardErrors: [ErrorItem],
+        softErrors: [ErrorItem],
+        unresolvedSlots: [PendingUnresolvedSlot]
+    ) -> LiveArrangeOutcome {
+        if let firstHard = hardErrors.first {
+            return LiveArrangeOutcome(
+                result: "failed",
+                exitCode: firstHard.code,
+                subcode: unresolvedSlots.isEmpty ? nil : "virtualSpaceUnresolvedSlots"
+            )
+        }
+        if !softErrors.isEmpty {
+            return LiveArrangeOutcome(
+                result: "partial",
+                exitCode: ErrorCode.partialSuccess.rawValue,
+                subcode: nil
+            )
+        }
+        return LiveArrangeOutcome(
+            result: "success",
+            exitCode: ErrorCode.success.rawValue,
+            subcode: nil
+        )
+    }
+
+    private func executeStateOnly(layoutName: String, layout: LayoutDefinition, spaceID: Int?) throws -> ArrangeExecutionJSON {
         let slotEntries = stateOnlySlotEntries(layout: layout, arrangedSpaceID: spaceID)
 
         persistRuntimeState(
+            layoutName: layoutName,
             layout: layout,
             arrangedSpaceID: spaceID,
             slotEntries: slotEntries,
-            preserveUnresolvedSelectedSlots: false
+            preserveUnresolvedSelectedSlots: false,
+            clearLiveArrangeRecoveryRequired: false
         )
 
-        let output = ArrangeExecutionJSON(
-            schemaVersion: 1,
-            layout: layoutName,
-            spacesMode: context.config.resolvedSpacesMode,
-            result: "success",
-            hardErrors: [],
-            softErrors: [],
-            skipped: [],
-            warnings: [
-                WarningItem(
-                    code: "arrange.stateOnly",
-                    detail: "updated runtime state without applying layout operations"
-                ),
-            ],
-            exitCode: ErrorCode.success.rawValue
-        )
+        let output = makeStateOnlyArrangeExecutionOutput(layoutName: layoutName)
 
         logger.log(
             event: "arrange.finished",
@@ -368,11 +502,98 @@ public final class ArrangeService {
     }
 
     private func persistRuntimeState(
+        layoutName: String,
+        layout: LayoutDefinition,
+        arrangedSpaceID: Int?,
+        slotEntries: [SlotEntry],
+        preserveUnresolvedSelectedSlots: Bool,
+        clearLiveArrangeRecoveryRequired: Bool
+    ) {
+        let currentState = stateStore.load()
+        let preservedEntries = preservedRuntimeStateEntries(
+            currentState: currentState,
+            layoutName: layoutName,
+            layout: layout,
+            arrangedSpaceID: arrangedSpaceID,
+            slotEntries: slotEntries,
+            preserveUnresolvedSelectedSlots: preserveUnresolvedSelectedSlots
+        )
+        let nextState = makePersistedArrangeRuntimeState(
+            currentState: currentState,
+            layoutName: layoutName,
+            layout: layout,
+            arrangedSpaceID: arrangedSpaceID,
+            slotEntries: slotEntries,
+            preservedEntries: preservedEntries,
+            clearLiveArrangeRecoveryRequired: clearLiveArrangeRecoveryRequired
+        )
+        stateStore.save(state: nextState)
+    }
+
+    private func persistedSlotEntriesForLiveArrange(
+        layout: LayoutDefinition,
+        arrangedSpaceID: Int?,
+        resolvedSlotEntries: [SlotEntry]
+    ) -> [SlotEntry] {
+        if isVirtualMode {
+            return mergeResolvedSlotEntries(
+                base: stateOnlySlotEntries(layout: layout, arrangedSpaceID: arrangedSpaceID),
+                resolved: resolvedSlotEntries
+            )
+        }
+
+        return resolvedSlotEntries
+    }
+
+    private func makeArrangeExecutionOutput(
+        layoutName: String,
+        outcome: LiveArrangeOutcome,
+        execution: LiveArrangeStepExecution
+    ) -> ArrangeExecutionJSON {
+        ArrangeExecutionJSON(
+            schemaVersion: 2,
+            layout: layoutName,
+            spacesMode: context.config.resolvedSpacesMode,
+            result: outcome.result,
+            subcode: outcome.subcode,
+            unresolvedSlots: execution.unresolvedSlots,
+            hardErrors: execution.hardErrors,
+            softErrors: execution.softErrors,
+            skipped: execution.skipped,
+            warnings: execution.warnings,
+            exitCode: outcome.exitCode
+        )
+    }
+
+    private func makeStateOnlyArrangeExecutionOutput(layoutName: String) -> ArrangeExecutionJSON {
+        ArrangeExecutionJSON(
+            schemaVersion: 2,
+            layout: layoutName,
+            spacesMode: context.config.resolvedSpacesMode,
+            result: "success",
+            subcode: nil,
+            unresolvedSlots: [],
+            hardErrors: [],
+            softErrors: [],
+            skipped: [],
+            warnings: [
+                WarningItem(
+                    code: "arrange.stateOnly",
+                    detail: "updated runtime state without applying layout operations"
+                ),
+            ],
+            exitCode: ErrorCode.success.rawValue
+        )
+    }
+
+    private func preservedRuntimeStateEntries(
+        currentState: RuntimeState,
+        layoutName: String,
         layout: LayoutDefinition,
         arrangedSpaceID: Int?,
         slotEntries: [SlotEntry],
         preserveUnresolvedSelectedSlots: Bool
-    ) {
+    ) -> [SlotEntry] {
         let selectedSpaces = Set(
             layout.spaces.compactMap { space -> Int? in
                 guard arrangedSpaceID == nil || space.spaceID == arrangedSpaceID else {
@@ -397,7 +618,11 @@ public final class ArrangeService {
             }
         )
 
-        let preservedEntries = stateStore.load().slots.filter { entry in
+        return currentState.slots.filter { entry in
+            if isVirtualMode, entry.layoutName != layoutName {
+                return false
+            }
+
             let key = SlotStateKey(slot: entry.slot, spaceID: entry.spaceID)
 
             if let entrySpaceID = entry.spaceID, selectedSpaces.contains(entrySpaceID) {
@@ -408,8 +633,67 @@ public final class ArrangeService {
 
             return arrangedSpaceID != nil
         }
+    }
 
-        stateStore.save(slots: preservedEntries + slotEntries)
+    private func makePersistedArrangeRuntimeState(
+        currentState: RuntimeState,
+        layoutName: String,
+        layout: LayoutDefinition,
+        arrangedSpaceID: Int?,
+        slotEntries: [SlotEntry],
+        preservedEntries: [SlotEntry],
+        clearLiveArrangeRecoveryRequired: Bool
+    ) -> RuntimeState {
+        let nextState = currentState.with(
+            revision: currentState.revision + 1,
+            stateMode: context.config.resolvedSpaceInterpretationMode,
+            configGeneration: context.configGeneration,
+            liveArrangeRecoveryRequired: clearLiveArrangeRecoveryRequired
+                ? false
+                : currentState.liveArrangeRecoveryRequired,
+            slots: preservedEntries + slotEntries
+        )
+
+        if isVirtualMode {
+            return nextState.withActiveVirtualContext(
+                layoutName: layoutName,
+                spaceID: resolvedVirtualActiveSpaceID(
+                    layout: layout,
+                    currentState: currentState,
+                    arrangedSpaceID: arrangedSpaceID,
+                    slotEntries: slotEntries
+                ),
+                pendingSwitchTransaction: currentState.pendingSwitchTransaction
+            )
+        }
+
+        return nextState.clearingActiveVirtualContext(
+            pendingSwitchTransaction: currentState.pendingSwitchTransaction
+        )
+    }
+
+    private func resolvedVirtualActiveSpaceID(
+        layout: LayoutDefinition,
+        currentState: RuntimeState,
+        arrangedSpaceID: Int?,
+        slotEntries: [SlotEntry]
+    ) -> Int? {
+        if let arrangedSpaceID {
+            return arrangedSpaceID
+        }
+
+        if let activeSpaceID = currentState.activeVirtualSpaceID,
+           layout.spaces.contains(where: { $0.spaceID == activeSpaceID }),
+           slotEntries.contains(where: { $0.spaceID == activeSpaceID && $0.windowID != nil })
+        {
+            return activeSpaceID
+        }
+
+        if let resolvedSpaceID = slotEntries.first(where: { $0.windowID != nil })?.spaceID {
+            return resolvedSpaceID
+        }
+
+        return layout.spaces.first?.spaceID
     }
 
     private func waitForWindow(
@@ -417,18 +701,22 @@ public final class ArrangeService {
         policy _: ExecutionPolicy,
         slot: Int,
         spaceID: Int,
+        layoutName: String,
         preLaunchWindowIDs: Set<UInt32>?
     ) -> WaitOutcome {
         let totalTimeoutMs = 5000
         let deadline = Date().addingTimeInterval(TimeInterval(totalTimeoutMs) / 1000)
-        let preferredWindowID = preferredWindowID(for: rule, slot: slot)
+        let preferredWindow = preferredWindowIdentity(for: rule, slot: slot, spaceID: spaceID, layoutName: layoutName)
 
         while Date() <= deadline {
             let candidates = driver.queryWindowsOnAllSpaces().filter { $0.bundleID == rule.bundleID }
             let nonFullscreen = candidates.filter { !$0.isFullscreen }
 
-            if let preferredWindowID,
-               let preferred = nonFullscreen.first(where: { $0.windowID == preferredWindowID })
+            if let preferredWindow,
+               let preferred = nonFullscreen.first(where: {
+                   $0.windowID == preferredWindow.windowID &&
+                       (preferredWindow.pid == nil || $0.pid == preferredWindow.pid)
+               })
             {
                 return .found(preferred)
             }
@@ -459,10 +747,24 @@ public final class ArrangeService {
         return .notFound
     }
 
-    private func preferredWindowID(for rule: WindowMatchRule, slot: Int) -> UInt32? {
-        stateStore.load().slots.first {
-            $0.slot == slot && $0.bundleID == rule.bundleID && $0.profile == rule.profile
-        }?.windowID
+    private func preferredWindowIdentity(
+        for rule: WindowMatchRule,
+        slot: Int,
+        spaceID: Int,
+        layoutName: String
+    ) -> (windowID: UInt32, pid: Int?)? {
+        guard let entry = stateStore.load().slots.first(where: {
+            $0.layoutName == (isVirtualMode ? layoutName : "__legacy__")
+                && $0.slot == slot
+                && $0.spaceID == spaceID
+                && $0.bundleID == rule.bundleID
+                && $0.profile == rule.profile
+        }),
+        let windowID = entry.windowID
+        else {
+            return nil
+        }
+        return (windowID, entry.pid)
     }
 
     private func selectWindow(
@@ -624,17 +926,19 @@ public final class ArrangeService {
                     )
                 )
 
-                plan.append(
-                    PlanItem(
-                        spaceID: selected.space.spaceID,
-                        slot: window.slot,
-                        source: source,
-                        bundleID: window.match.bundleID,
-                        action: "moveSpace",
-                        frame: nil,
-                        launch: launch
+                if !isVirtualMode {
+                    plan.append(
+                        PlanItem(
+                            spaceID: selected.space.spaceID,
+                            slot: window.slot,
+                            source: source,
+                            bundleID: window.match.bundleID,
+                            action: "moveSpace",
+                            frame: nil,
+                            launch: launch
+                        )
                     )
-                )
+                }
 
                 let resolvedFrame = try resolveFrame(window: window, display: selected.display ?? defaultDisplay)
                 plan.append(
@@ -770,8 +1074,11 @@ public final class ArrangeService {
     }
 
     private func stateOnlySlotEntries(layout: LayoutDefinition, arrangedSpaceID: Int?) -> [SlotEntry] {
+        let existingState = stateStore.load()
         var selectedSpaceIDs = Set<Int>()
         var entries: [SlotEntry] = []
+        let displays = driver.displays()
+        let defaultDisplay = displays.first
 
         for space in layout.spaces {
             if let arrangedSpaceID, space.spaceID != arrangedSpaceID {
@@ -782,17 +1089,30 @@ public final class ArrangeService {
                 continue
             }
 
+            let resolvedDisplay = resolveDisplay(
+                for: space.display,
+                available: displays,
+                monitors: context.config.monitors
+            ) ?? defaultDisplay
+
             for window in space.windows {
+                let fingerprint = definitionFingerprint(
+                    layoutName: layoutName(for: layout),
+                    spaceID: space.spaceID,
+                    window: window
+                )
+                let carried = existingState.slots.first {
+                    $0.layoutName == layoutName(for: layout) && $0.definitionFingerprint == fingerprint
+                }
+
                 entries.append(
-                    SlotEntry(
-                        slot: window.slot,
-                        source: window.source ?? .window,
-                        bundleID: window.match.bundleID,
-                        title: runtimeStateTitle(for: window.match),
-                        profile: window.match.profile,
+                    makeStateOnlySlotEntry(
+                        layoutName: layoutName(for: layout),
                         spaceID: space.spaceID,
-                        displayID: space.display?.id,
-                        windowID: nil
+                        window: window,
+                        existing: carried,
+                        displayID: resolvedDisplay?.id ?? space.display?.id,
+                        desiredVisibleFrame: try? resolveFrame(window: window, display: resolvedDisplay)
                     )
                 )
             }
@@ -811,13 +1131,166 @@ public final class ArrangeService {
         return rule.bundleID
     }
 
-    private func failed(layoutName: String, code: ErrorCode, message: String) -> ArrangeExecutionJSON {
+    private var isVirtualMode: Bool {
+        context.config.resolvedSpaceInterpretationMode == .virtual
+    }
+
+    private func makeSlotEntry(
+        layoutName: String,
+        spaceID: Int,
+        window: WindowDefinition,
+        observedWindow: WindowSnapshot,
+        displayID: String?,
+        visibleFrame: ResolvedFrame
+    ) -> SlotEntry {
+        let titleMatch = persistedTitleMatch(for: window.match)
+        return SlotEntry(
+            layoutName: isVirtualMode ? layoutName : "__legacy__",
+            slot: window.slot,
+            source: window.source ?? .window,
+            bundleID: window.match.bundleID,
+            definitionFingerprint: definitionFingerprint(layoutName: layoutName, spaceID: spaceID, window: window),
+            pid: observedWindow.pid,
+            titleMatchKind: titleMatch.kind,
+            titleMatchValue: titleMatch.value,
+            excludeTitleRegex: window.match.excludeTitleRegex,
+            role: window.match.role,
+            subrole: window.match.subrole,
+            matchIndex: window.match.index,
+            lastKnownTitle: observedWindow.title,
+            profile: window.match.profile ?? observedWindow.profileDirectory,
+            spaceID: spaceID,
+            nativeSpaceID: observedWindow.spaceID,
+            displayID: displayID,
+            windowID: observedWindow.windowID,
+            lastVisibleFrame: visibleFrame,
+            lastHiddenFrame: nil,
+            visibilityState: isVirtualMode ? .visible : nil,
+            lastActivatedAt: existingVirtualLastActivatedAt(spaceID: spaceID, window: observedWindow)
+        )
+    }
+
+    private func makeStateOnlySlotEntry(
+        layoutName: String,
+        spaceID: Int,
+        window: WindowDefinition,
+        existing: SlotEntry?,
+        displayID: String?,
+        desiredVisibleFrame: ResolvedFrame?
+    ) -> SlotEntry {
+        let titleMatch = persistedTitleMatch(for: window.match)
+        let lastKnownTitle: String?
+        if isVirtualMode {
+            lastKnownTitle = existing?.lastKnownTitle
+        } else {
+            lastKnownTitle = existing?.lastKnownTitle ?? runtimeStateTitle(for: window.match)
+        }
+
+        return SlotEntry(
+            layoutName: isVirtualMode ? layoutName : "__legacy__",
+            slot: window.slot,
+            source: window.source ?? .window,
+            bundleID: window.match.bundleID,
+            definitionFingerprint: definitionFingerprint(layoutName: layoutName, spaceID: spaceID, window: window),
+            pid: existing?.pid,
+            titleMatchKind: titleMatch.kind,
+            titleMatchValue: titleMatch.value,
+            excludeTitleRegex: window.match.excludeTitleRegex,
+            role: window.match.role,
+            subrole: window.match.subrole,
+            matchIndex: window.match.index,
+            lastKnownTitle: lastKnownTitle,
+            profile: window.match.profile ?? existing?.profile,
+            spaceID: spaceID,
+            nativeSpaceID: existing?.nativeSpaceID,
+            displayID: existing?.displayID ?? displayID,
+            windowID: existing?.windowID,
+            lastVisibleFrame: existing?.lastVisibleFrame ?? desiredVisibleFrame,
+            lastHiddenFrame: existing?.lastHiddenFrame,
+            visibilityState: existing?.visibilityState,
+            lastActivatedAt: existing?.lastActivatedAt
+        )
+    }
+
+    private func mergeResolvedSlotEntries(
+        base: [SlotEntry],
+        resolved: [SlotEntry]
+    ) -> [SlotEntry] {
+        guard !base.isEmpty else {
+            return resolved
+        }
+
+        let resolvedByFingerprint = Dictionary(
+            uniqueKeysWithValues: resolved.map { ($0.definitionFingerprint, $0) }
+        )
+
+        return base.map { entry in
+            resolvedByFingerprint[entry.definitionFingerprint] ?? entry
+        }
+    }
+
+    private func existingVirtualLastActivatedAt(spaceID: Int, window: WindowSnapshot) -> String? {
+        guard isVirtualMode else {
+            return nil
+        }
+
+        return stateStore.load().slots.first(where: {
+            $0.spaceID == spaceID && $0.windowID == window.windowID
+        })?.lastActivatedAt
+    }
+
+    private func persistedTitleMatch(for rule: WindowMatchRule) -> (kind: PersistedTitleMatchKind, value: String?) {
+        if let equals = rule.title?.equals {
+            return (.equals, equals)
+        }
+        if let contains = rule.title?.contains {
+            return (.contains, contains)
+        }
+        if let regex = rule.title?.regex {
+            return (.regex, regex)
+        }
+        return (.none, nil)
+    }
+
+    private func definitionFingerprint(layoutName: String, spaceID: Int, window: WindowDefinition) -> String {
+        let titleMatch = persistedTitleMatch(for: window.match)
+
+        func field(_ key: String, _ value: String?) -> String {
+            "\(key)=\(value ?? "<nil>")"
+        }
+
+        let fields = [
+            field("layoutName", layoutName),
+            field("spaceID", String(spaceID)),
+            field("slot", String(window.slot)),
+            field("source", (window.source ?? .window).rawValue),
+            field("bundleID", window.match.bundleID),
+            field("profile", window.match.profile),
+            field("titleMatchKind", titleMatch.kind.rawValue),
+            field("titleMatchValue", titleMatch.value),
+            field("excludeTitleRegex", window.match.excludeTitleRegex),
+            field("role", window.match.role),
+            field("subrole", window.match.subrole),
+            field("matchIndex", window.match.index.map(String.init)),
+        ].joined(separator: "\u{0}")
+
+        let digest = SHA256.hash(data: Data(fields.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func layoutName(for targetLayout: LayoutDefinition) -> String {
+        context.config.layouts.first(where: { $0.value == targetLayout })?.key ?? "__unknown__"
+    }
+
+    private func failed(layoutName: String, code: ErrorCode, message: String, subcode: String? = nil) -> ArrangeExecutionJSON {
         logger.log(level: "error", event: "arrange.failed", fields: ["code": code.rawValue, "message": message])
         return ArrangeExecutionJSON(
-            schemaVersion: 1,
+            schemaVersion: 2,
             layout: layoutName,
             spacesMode: context.config.resolvedSpacesMode,
             result: "failed",
+            subcode: subcode,
+            unresolvedSlots: [],
             hardErrors: [
                 ErrorItem(code: code.rawValue, message: message, spaceID: nil, slot: nil),
             ],
@@ -828,12 +1301,106 @@ public final class ArrangeService {
         )
     }
 
+    private func resolveVirtualHostDisplayContext(layout: LayoutDefinition) -> (display: DisplayInfo, visibleSpace: SpaceInfo)? {
+        guard let hostDisplay = resolveVirtualHostDisplay(layout: layout) else {
+            return nil
+        }
+
+        let visibleSpaces = driver.spaces().filter { $0.displayID == hostDisplay.id && $0.isVisible }
+        guard visibleSpaces.count == 1, let visibleSpace = visibleSpaces.first else {
+            return nil
+        }
+
+        return (hostDisplay, visibleSpace)
+    }
+
+    private func resolveVirtualHostDisplay(layout: LayoutDefinition) -> DisplayInfo? {
+        let displays = driver.displays()
+        guard !displays.isEmpty else {
+            return nil
+        }
+
+        let explicitDefinitions = layout.spaces.compactMap(\.display)
+        if let firstDefinition = explicitDefinitions.first {
+            return resolveDisplay(for: firstDefinition, available: displays, monitors: context.config.monitors)
+        }
+
+        let frontmostUsableWindow = driver.queryWindows().first {
+            $0.displayID != nil && !isShitsuraeManagedBundle($0.bundleID)
+        }
+        if let displayID = frontmostUsableWindow?.displayID {
+            return displays.first(where: { $0.id == displayID })
+        }
+
+        let visibleDisplayIDs = Set(driver.spaces().compactMap { $0.isVisible ? $0.displayID : nil })
+        guard visibleDisplayIDs.count == 1,
+              let displayID = visibleDisplayIDs.first
+        else {
+            return nil
+        }
+
+        return displays.first(where: { $0.id == displayID })
+    }
+
+    private func unresolvedVirtualArrangeSlot(
+        observedWindow: WindowSnapshot,
+        slot: Int,
+        spaceID: Int,
+        hostContext: (display: DisplayInfo, visibleSpace: SpaceInfo)
+    ) -> PendingUnresolvedSlot? {
+        guard observedWindow.spaceID != hostContext.visibleSpace.spaceID ||
+                observedWindow.displayID != hostContext.display.id
+        else {
+            return nil
+        }
+
+        return PendingUnresolvedSlot(
+            slot: slot,
+            spaceID: spaceID,
+            reason: "hostNativeSpaceMismatch"
+        )
+    }
+
 }
 
 private enum WaitOutcome {
     case found(WindowSnapshot)
     case fullscreenExcluded
     case notFound
+}
+
+private enum LiveArrangePreparationResult {
+    case ready(LiveArrangePreparation)
+    case result(ArrangeExecutionJSON)
+}
+
+private struct LiveArrangePreparation {
+    let planning: PlanningResult
+    let virtualHostContext: (display: DisplayInfo, visibleSpace: SpaceInfo)?
+}
+
+private struct LiveArrangeStepResult {
+    var hardErrors: [ErrorItem] = []
+    var softErrors: [ErrorItem] = []
+    var skipped: [SkippedItem] = []
+    var warnings: [WarningItem] = []
+    var slotEntries: [SlotEntry] = []
+    var unresolvedSlots: [PendingUnresolvedSlot] = []
+}
+
+private struct LiveArrangeStepExecution {
+    let hardErrors: [ErrorItem]
+    let softErrors: [ErrorItem]
+    let skipped: [SkippedItem]
+    let warnings: [WarningItem]
+    let slotEntries: [SlotEntry]
+    let unresolvedSlots: [PendingUnresolvedSlot]
+}
+
+private struct LiveArrangeOutcome {
+    let result: String
+    let exitCode: Int
+    let subcode: String?
 }
 
 private struct SelectedSpace {

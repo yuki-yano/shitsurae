@@ -6,15 +6,30 @@ public enum ShortcutCandidateFilter {
         excludedBundleIDs: Set<String>,
         quickKeys: String
     ) -> [SwitcherCandidate] {
-        let filtered = candidates.filter { candidate in
+        assignQuickKeys(
+            candidates: excluding(candidates: candidates, excludedBundleIDs: excludedBundleIDs),
+            quickKeys: quickKeys
+        )
+    }
+
+    public static func excluding(
+        candidates: [SwitcherCandidate],
+        excludedBundleIDs: Set<String>
+    ) -> [SwitcherCandidate] {
+        candidates.filter { candidate in
             guard let bundleID = candidate.bundleID else {
                 return true
             }
             return !excludedBundleIDs.contains(bundleID)
         }
+    }
 
+    public static func assignQuickKeys(
+        candidates: [SwitcherCandidate],
+        quickKeys: String
+    ) -> [SwitcherCandidate] {
         let quickKeyPool = Array(quickKeys)
-        return filtered.enumerated().map { index, candidate in
+        return candidates.enumerated().map { index, candidate in
             SwitcherCandidate(
                 id: candidate.id,
                 source: candidate.source,

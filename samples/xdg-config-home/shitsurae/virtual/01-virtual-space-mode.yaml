@@ -1,0 +1,71 @@
+# arrange command: shitsurae arrange virtualWork --dry-run --json
+# bootstrap command: shitsurae arrange virtualWork --state-only --space 1 --json
+# expected exit code: 0
+mode:
+  space: virtual
+
+shortcuts:
+  moveCurrentWindowToSpace:
+    - slot: 1
+      key: 1
+      modifiers: [alt]
+    - slot: 2
+      key: 2
+      modifiers: [alt]
+  switchVirtualSpace:
+    - slot: 1
+      key: 1
+      modifiers: [ctrl]
+    - slot: 2
+      key: 2
+      modifiers: [ctrl]
+
+layouts:
+  virtualWork:
+    initialFocus:
+      slot: 1
+    spaces:
+      - spaceID: 1
+        display:
+          monitor: primary
+        windows:
+          - slot: 1
+            launch: false
+            match:
+              bundleID: com.apple.TextEdit
+            frame:
+              x: "0%"
+              y: "0%"
+              width: "50%"
+              height: "100%"
+          - slot: 2
+            launch: false
+            match:
+              bundleID: com.apple.Terminal
+            frame:
+              x: "50%"
+              y: "0%"
+              width: "50%"
+              height: "100%"
+      - spaceID: 2
+        display:
+          monitor: primary
+        windows:
+          - slot: 1
+            launch: false
+            match:
+              bundleID: com.apple.Notes
+            frame:
+              x: "0%"
+              y: "0%"
+              width: "50%"
+              height: "100%"
+          - slot: 2
+            launch: false
+            match:
+              bundleID: com.apple.Calendar
+            frame:
+              x: "50%"
+              y: "0%"
+              width: "50%"
+              height: "100%"

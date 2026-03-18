@@ -71,6 +71,26 @@ final class PolicyEngineTests: XCTestCase {
         )
     }
 
+    func testMoveCurrentWindowToSpaceCanBeDisabledPerFamily() {
+        XCTAssertTrue(
+            PolicyEngine.isShortcutDisabled(
+                frontmostBundleID: "com.example.editor",
+                shortcutID: "moveCurrentWindowToSpace:1",
+                disabledInApps: ["com.example.editor": ["moveCurrentWindowToSpace"]]
+            )
+        )
+    }
+
+    func testSwitchVirtualSpaceCanBeDisabledPerFamily() {
+        XCTAssertTrue(
+            PolicyEngine.isShortcutDisabled(
+                frontmostBundleID: "com.example.editor",
+                shortcutID: "switchVirtualSpace:1",
+                disabledInApps: ["com.example.editor": ["switchVirtualSpace"]]
+            )
+        )
+    }
+
     private func sampleWindow(bundleID: String, title: String) -> WindowSnapshot {
         WindowSnapshot(
             windowID: 1,

@@ -9,7 +9,10 @@ public enum AgentCommand: String, Codable {
     case displayCurrent
     case spaceList
     case spaceCurrent
+    case spaceSwitch
+    case spaceRecover
     case windowCurrent
+    case windowWorkspace
     case windowMove
     case windowResize
     case windowSet
@@ -35,25 +38,31 @@ public struct AgentCommandRequest: Codable {
     public let windowTitle: String?
     public let configDirectoryPath: String?
     public let stateOnly: Bool?
+    public let reconcile: Bool?
+    public let forceClearPending: Bool?
+    public let confirm: Bool?
 
     public init(
         command: AgentCommand,
-        json: Bool?,
-        dryRun: Bool?,
-        verbose: Bool?,
-        layoutName: String?,
+        json: Bool? = nil,
+        dryRun: Bool? = nil,
+        verbose: Bool? = nil,
+        layoutName: String? = nil,
         spaceID: Int? = nil,
-        slot: Int?,
-        includeAllSpaces: Bool?,
-        x: LengthValue?,
-        y: LengthValue?,
-        width: LengthValue?,
-        height: LengthValue?,
+        slot: Int? = nil,
+        includeAllSpaces: Bool? = nil,
+        x: LengthValue? = nil,
+        y: LengthValue? = nil,
+        width: LengthValue? = nil,
+        height: LengthValue? = nil,
         windowID: UInt32? = nil,
         bundleID: String? = nil,
         windowTitle: String? = nil,
         configDirectoryPath: String? = nil,
-        stateOnly: Bool? = nil
+        stateOnly: Bool? = nil,
+        reconcile: Bool? = nil,
+        forceClearPending: Bool? = nil,
+        confirm: Bool? = nil
     ) {
         self.command = command
         self.json = json
@@ -72,6 +81,9 @@ public struct AgentCommandRequest: Codable {
         self.windowTitle = windowTitle
         self.configDirectoryPath = configDirectoryPath
         self.stateOnly = stateOnly
+        self.reconcile = reconcile
+        self.forceClearPending = forceClearPending
+        self.confirm = confirm
     }
 
     public func withConfigDirectoryPath(_ path: String?) -> AgentCommandRequest {
@@ -92,7 +104,10 @@ public struct AgentCommandRequest: Codable {
             bundleID: bundleID,
             windowTitle: windowTitle,
             configDirectoryPath: path,
-            stateOnly: stateOnly
+            stateOnly: stateOnly,
+            reconcile: reconcile,
+            forceClearPending: forceClearPending,
+            confirm: confirm
         )
     }
 }

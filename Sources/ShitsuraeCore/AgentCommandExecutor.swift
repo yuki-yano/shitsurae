@@ -9,7 +9,10 @@ public protocol CommandHandling {
     func displayCurrent(json: Bool) -> CommandResult
     func spaceList(json: Bool) -> CommandResult
     func spaceCurrent(json: Bool) -> CommandResult
+    func spaceSwitch(spaceID: Int, json: Bool, reconcile: Bool) -> CommandResult
+    func spaceRecover(forceClearPending: Bool, confirmed: Bool, json: Bool) -> CommandResult
     func windowCurrent(json: Bool) -> CommandResult
+    func windowWorkspace(target: WindowTargetSelector?, spaceID: Int, json: Bool) -> CommandResult
     func windowMove(target: WindowTargetSelector?, x: LengthValue, y: LengthValue) -> CommandResult
     func windowResize(target: WindowTargetSelector?, width: LengthValue, height: LengthValue) -> CommandResult
     func windowSet(target: WindowTargetSelector?, x: LengthValue, y: LengthValue, width: LengthValue, height: LengthValue) -> CommandResult
@@ -58,8 +61,32 @@ public final class AgentCommandExecutor {
             result = commandHandler.spaceList(json: request.json ?? false)
         case .spaceCurrent:
             result = commandHandler.spaceCurrent(json: request.json ?? false)
+        case .spaceSwitch:
+            guard let spaceID = request.spaceID else {
+                return asResponse(CommandResult(exitCode: Int32(ErrorCode.validationError.rawValue), stderr: "spaceID is required\n"))
+            }
+            result = commandHandler.spaceSwitch(
+                spaceID: spaceID,
+                json: request.json ?? false,
+                reconcile: request.reconcile ?? false
+            )
+        case .spaceRecover:
+            result = commandHandler.spaceRecover(
+                forceClearPending: request.forceClearPending ?? false,
+                confirmed: request.confirm ?? false,
+                json: request.json ?? false
+            )
         case .windowCurrent:
             result = commandHandler.windowCurrent(json: request.json ?? false)
+        case .windowWorkspace:
+            guard let spaceID = request.spaceID else {
+                return asResponse(CommandResult(exitCode: Int32(ErrorCode.validationError.rawValue), stderr: "spaceID is required\n"))
+            }
+            result = commandHandler.windowWorkspace(
+                target: target,
+                spaceID: spaceID,
+                json: request.json ?? false
+            )
         case .windowMove:
             guard let x = request.x, let y = request.y else {
                 return asResponse(CommandResult(exitCode: Int32(ErrorCode.validationError.rawValue), stderr: "x and y are required\n"))

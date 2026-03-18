@@ -99,7 +99,10 @@ final class AgentCommandExecutorTests: XCTestCase {
         handler.displayCurrentResult = CommandResult(exitCode: 40)
         handler.spaceListResult = CommandResult(exitCode: 0, stdout: "{ \"spaces\": [] }\n")
         handler.spaceCurrentResult = CommandResult(exitCode: 40)
+        handler.spaceSwitchResult = CommandResult(exitCode: 0, stdout: "{ \"action\": \"noop\" }\n")
+        handler.spaceRecoverResult = CommandResult(exitCode: 0, stdout: "{ \"clearedPending\": true }\n")
         handler.windowCurrentResult = CommandResult(exitCode: 40)
+        handler.windowWorkspaceResult = CommandResult(exitCode: 0, stdout: "{ \"spaceID\": 2 }\n")
         handler.windowMoveResult = CommandResult(exitCode: 50)
         handler.windowResizeResult = CommandResult(exitCode: 51)
         handler.windowSetResult = CommandResult(exitCode: 0)
@@ -113,7 +116,10 @@ final class AgentCommandExecutorTests: XCTestCase {
         XCTAssertEqual(executor.execute(request(command: .displayCurrent, json: true)).exitCode, 40)
         XCTAssertEqual(executor.execute(request(command: .spaceList, json: true)).exitCode, 0)
         XCTAssertEqual(executor.execute(request(command: .spaceCurrent, json: true)).exitCode, 40)
+        XCTAssertEqual(executor.execute(request(command: .spaceSwitch, json: true, spaceID: 2)).exitCode, 0)
+        XCTAssertEqual(executor.execute(request(command: .spaceRecover, json: true, forceClearPending: true, confirm: true)).exitCode, 0)
         XCTAssertEqual(executor.execute(request(command: .windowCurrent, json: true)).exitCode, 40)
+        XCTAssertEqual(executor.execute(request(command: .windowWorkspace, json: true, spaceID: 2)).exitCode, 0)
         XCTAssertEqual(
             executor.execute(
                 request(command: .windowMove, json: nil, x: .expression("10%"), y: .expression("20%"))
@@ -151,7 +157,19 @@ final class AgentCommandExecutorTests: XCTestCase {
         XCTAssertEqual(handler.displayCurrentCalls, [true])
         XCTAssertEqual(handler.spaceListCalls, [true])
         XCTAssertEqual(handler.spaceCurrentCalls, [true])
+        XCTAssertEqual(handler.spaceSwitchCalls.count, 1)
+        XCTAssertEqual(handler.spaceSwitchCalls.first?.0, 2)
+        XCTAssertEqual(handler.spaceSwitchCalls.first?.1, true)
+        XCTAssertEqual(handler.spaceSwitchCalls.first?.2, false)
+        XCTAssertEqual(handler.spaceRecoverCalls.count, 1)
+        XCTAssertEqual(handler.spaceRecoverCalls.first?.0, true)
+        XCTAssertEqual(handler.spaceRecoverCalls.first?.1, true)
+        XCTAssertEqual(handler.spaceRecoverCalls.first?.2, true)
         XCTAssertEqual(handler.windowCurrentCalls, [true])
+        XCTAssertEqual(handler.windowWorkspaceCalls.count, 1)
+        XCTAssertNil(handler.windowWorkspaceCalls.first?.target)
+        XCTAssertEqual(handler.windowWorkspaceCalls.first?.spaceID, 2)
+        XCTAssertEqual(handler.windowWorkspaceCalls.first?.json, true)
         XCTAssertEqual(handler.windowMoveCalls.count, 1)
         XCTAssertNil(handler.windowMoveCalls.first?.target)
         XCTAssertEqual(handler.windowResizeCalls.count, 1)
@@ -165,6 +183,7 @@ final class AgentCommandExecutorTests: XCTestCase {
 
     func testExecuteRoutesWindowCommandsWithSelector() {
         let handler = StubCommandHandler()
+        handler.windowWorkspaceResult = CommandResult(exitCode: 0)
         handler.windowMoveResult = CommandResult(exitCode: 0)
         handler.windowResizeResult = CommandResult(exitCode: 0)
         handler.windowSetResult = CommandResult(exitCode: 0)
@@ -176,6 +195,18 @@ final class AgentCommandExecutorTests: XCTestCase {
             title: "Draft"
         )
 
+        XCTAssertEqual(
+            executor.execute(
+                request(
+                    command: .windowWorkspace,
+                    json: true,
+                    spaceID: 4,
+                    bundleID: selector.bundleID,
+                    windowTitle: selector.title
+                )
+            ).exitCode,
+            0
+        )
         XCTAssertEqual(
             executor.execute(
                 request(
@@ -218,6 +249,9 @@ final class AgentCommandExecutorTests: XCTestCase {
             0
         )
 
+        XCTAssertEqual(handler.windowWorkspaceCalls.first?.target, selector)
+        XCTAssertEqual(handler.windowWorkspaceCalls.first?.spaceID, 4)
+        XCTAssertEqual(handler.windowWorkspaceCalls.first?.json, true)
         XCTAssertEqual(handler.windowMoveCalls.first?.target, selector)
         XCTAssertEqual(handler.windowResizeCalls.first?.target, selector)
         XCTAssertEqual(handler.windowSetCalls.first?.target, selector)
@@ -229,6 +263,10 @@ final class AgentCommandExecutorTests: XCTestCase {
         XCTAssertEqual(
             executor.execute(request(command: .arrange, json: nil, layoutName: nil)).stderr,
             "layoutName is required\n"
+        )
+        XCTAssertEqual(
+            executor.execute(request(command: .windowWorkspace, json: true, spaceID: nil)).stderr,
+            "spaceID is required\n"
         )
         XCTAssertEqual(
             executor.execute(request(command: .windowMove, json: nil, x: .expression("1%"), y: nil)).stderr,
@@ -264,7 +302,9 @@ final class AgentCommandExecutorTests: XCTestCase {
         windowID: UInt32? = nil,
         bundleID: String? = nil,
         windowTitle: String? = nil,
-        stateOnly: Bool? = nil
+        stateOnly: Bool? = nil,
+        forceClearPending: Bool? = nil,
+        confirm: Bool? = nil
     ) -> AgentCommandRequest {
         AgentCommandRequest(
             command: command,
@@ -282,7 +322,9 @@ final class AgentCommandExecutorTests: XCTestCase {
             windowID: windowID,
             bundleID: bundleID,
             windowTitle: windowTitle,
-            stateOnly: stateOnly
+            stateOnly: stateOnly,
+            forceClearPending: forceClearPending,
+            confirm: confirm
         )
     }
 }
@@ -308,6 +350,12 @@ private final class StubCommandHandler: CommandHandling {
         let y: LengthValue
     }
 
+    struct WindowWorkspaceCall: Equatable {
+        let target: WindowTargetSelector?
+        let spaceID: Int
+        let json: Bool
+    }
+
     struct WindowResizeCall: Equatable {
         let target: WindowTargetSelector?
         let width: LengthValue
@@ -331,7 +379,10 @@ private final class StubCommandHandler: CommandHandling {
     var displayCurrentResult = CommandResult(exitCode: 0)
     var spaceListResult = CommandResult(exitCode: 0)
     var spaceCurrentResult = CommandResult(exitCode: 0)
+    var spaceSwitchResult = CommandResult(exitCode: 0)
+    var spaceRecoverResult = CommandResult(exitCode: 0)
     var windowCurrentResult = CommandResult(exitCode: 0)
+    var windowWorkspaceResult = CommandResult(exitCode: 0)
     var windowMoveResult = CommandResult(exitCode: 0)
     var windowResizeResult = CommandResult(exitCode: 0)
     var windowSetResult = CommandResult(exitCode: 0)
@@ -346,7 +397,10 @@ private final class StubCommandHandler: CommandHandling {
     var displayCurrentCalls: [Bool] = []
     var spaceListCalls: [Bool] = []
     var spaceCurrentCalls: [Bool] = []
+    var spaceSwitchCalls: [(Int, Bool, Bool)] = []
+    var spaceRecoverCalls: [(Bool, Bool, Bool)] = []
     var windowCurrentCalls: [Bool] = []
+    var windowWorkspaceCalls: [WindowWorkspaceCall] = []
     var windowMoveCalls: [WindowMoveCall] = []
     var windowResizeCalls: [WindowResizeCall] = []
     var windowSetCalls: [WindowSetCall] = []
@@ -387,9 +441,24 @@ private final class StubCommandHandler: CommandHandling {
         return spaceCurrentResult
     }
 
+    func spaceSwitch(spaceID: Int, json: Bool, reconcile: Bool) -> CommandResult {
+        spaceSwitchCalls.append((spaceID, json, reconcile))
+        return spaceSwitchResult
+    }
+
+    func spaceRecover(forceClearPending: Bool, confirmed: Bool, json: Bool) -> CommandResult {
+        spaceRecoverCalls.append((forceClearPending, confirmed, json))
+        return spaceRecoverResult
+    }
+
     func windowCurrent(json: Bool) -> CommandResult {
         windowCurrentCalls.append(json)
         return windowCurrentResult
+    }
+
+    func windowWorkspace(target: WindowTargetSelector?, spaceID: Int, json: Bool) -> CommandResult {
+        windowWorkspaceCalls.append(.init(target: target, spaceID: spaceID, json: json))
+        return windowWorkspaceResult
     }
 
     func windowMove(target: WindowTargetSelector?, x: LengthValue, y: LengthValue) -> CommandResult {

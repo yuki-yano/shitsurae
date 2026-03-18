@@ -12,6 +12,7 @@ public struct ApplicationLaunchRequest: Equatable {
 
 public protocol ArrangeDriver {
     func displays() -> [DisplayInfo]
+    func spaces() -> [SpaceInfo]
     func queryWindows() -> [WindowSnapshot]
     func queryWindowsOnAllSpaces() -> [WindowSnapshot]
     func launch(request: ApplicationLaunchRequest) -> Bool
@@ -45,6 +46,10 @@ public struct LiveArrangeDriver: ArrangeDriver {
 
     public func displays() -> [DisplayInfo] {
         SystemProbe.displays()
+    }
+
+    public func spaces() -> [SpaceInfo] {
+        WindowQueryService.listSpaces(displays: displays())
     }
 
     public func queryWindows() -> [WindowSnapshot] {

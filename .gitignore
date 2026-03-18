@@ -1,5 +1,6 @@
 /build
 /.build
+/.build-verify
 /tmp
 /dist
 Shitsurae.app.tar.gz

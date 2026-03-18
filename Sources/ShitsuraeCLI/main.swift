@@ -41,12 +41,14 @@ private func executeRemote(_ request: AgentCommandRequest) -> Never {
 }
 
 struct Arrange: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Apply a layout")
+    static let configuration = CommandConfiguration(
+        abstract: "Apply a layout; in virtual mode omitting --space updates all workspace state and live-applies the current active workspace"
+    )
 
     @Argument(help: "layout name")
     var layoutName: String
 
-    @Flag(name: .long, help: "dry run")
+    @Flag(name: .long, help: "dry run; in virtual mode this is step 1 of bootstrap and the post-recovery discovery path")
     var dryRun = false
 
     @Flag(name: .long, help: "verbose logs")
@@ -55,10 +57,10 @@ struct Arrange: ParsableCommand {
     @Flag(name: .long, help: "JSON output")
     var json = false
 
-    @Flag(name: .long, help: "update runtime state only without applying layout operations")
+    @Flag(name: .long, help: "update runtime state only without applying layout operations; in virtual mode this is 'Initialize Active Space'")
     var stateOnly = false
 
-    @Option(name: .long, help: "only arrange the specified spaceID in the layout")
+    @Option(name: .long, help: "only arrange the specified spaceID in the layout; omit in virtual mode to update all workspace state and live-apply the current active workspace")
     var space: Int?
 
     mutating func run() throws {
@@ -70,12 +72,6 @@ struct Arrange: ParsableCommand {
                 verbose: verbose,
                 layoutName: layoutName,
                 spaceID: space,
-                slot: nil,
-                includeAllSpaces: nil,
-                x: nil,
-                y: nil,
-                width: nil,
-                height: nil,
                 stateOnly: stateOnly
             )
         )
@@ -90,21 +86,7 @@ struct Layouts: ParsableCommand {
 
     struct List: ParsableCommand {
         mutating func run() throws {
-            executeRemote(
-                AgentCommandRequest(
-                    command: .layoutsList,
-                    json: nil,
-                    dryRun: nil,
-                    verbose: nil,
-                    layoutName: nil,
-                    slot: nil,
-                    includeAllSpaces: nil,
-                    x: nil,
-                    y: nil,
-                    width: nil,
-                    height: nil
-                )
-            )
+            executeRemote(AgentCommandRequest(command: .layoutsList))
         }
     }
 }
@@ -114,21 +96,7 @@ struct Validate: ParsableCommand {
     var json = false
 
     mutating func run() throws {
-        executeRemote(
-            AgentCommandRequest(
-                command: .validate,
-                json: json,
-                dryRun: nil,
-                verbose: nil,
-                layoutName: nil,
-                slot: nil,
-                includeAllSpaces: nil,
-                x: nil,
-                y: nil,
-                width: nil,
-                height: nil
-            )
-        )
+        executeRemote(AgentCommandRequest(command: .validate, json: json))
     }
 }
 
@@ -137,21 +105,7 @@ struct Diagnostics: ParsableCommand {
     var json = false
 
     mutating func run() throws {
-        executeRemote(
-            AgentCommandRequest(
-                command: .diagnostics,
-                json: json,
-                dryRun: nil,
-                verbose: nil,
-                layoutName: nil,
-                slot: nil,
-                includeAllSpaces: nil,
-                x: nil,
-                y: nil,
-                width: nil,
-                height: nil
-            )
-        )
+        executeRemote(AgentCommandRequest(command: .diagnostics, json: json))
     }
 }
 
@@ -166,21 +120,7 @@ struct Display: ParsableCommand {
         var json = false
 
         mutating func run() throws {
-            executeRemote(
-                AgentCommandRequest(
-                    command: .displayList,
-                    json: json,
-                    dryRun: nil,
-                    verbose: nil,
-                    layoutName: nil,
-                    slot: nil,
-                    includeAllSpaces: nil,
-                    x: nil,
-                    y: nil,
-                    width: nil,
-                    height: nil
-                )
-            )
+            executeRemote(AgentCommandRequest(command: .displayList, json: json))
         }
     }
 
@@ -189,21 +129,7 @@ struct Display: ParsableCommand {
         var json = false
 
         mutating func run() throws {
-            executeRemote(
-                AgentCommandRequest(
-                    command: .displayCurrent,
-                    json: json,
-                    dryRun: nil,
-                    verbose: nil,
-                    layoutName: nil,
-                    slot: nil,
-                    includeAllSpaces: nil,
-                    x: nil,
-                    y: nil,
-                    width: nil,
-                    height: nil
-                )
-            )
+            executeRemote(AgentCommandRequest(command: .displayCurrent, json: json))
         }
     }
 }
@@ -211,7 +137,7 @@ struct Display: ParsableCommand {
 struct Space: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Space related commands",
-        subcommands: [List.self, Current.self]
+        subcommands: [List.self, Current.self, Switch.self, Recover.self]
     )
 
     struct List: ParsableCommand {
@@ -219,21 +145,7 @@ struct Space: ParsableCommand {
         var json = false
 
         mutating func run() throws {
-            executeRemote(
-                AgentCommandRequest(
-                    command: .spaceList,
-                    json: json,
-                    dryRun: nil,
-                    verbose: nil,
-                    layoutName: nil,
-                    slot: nil,
-                    includeAllSpaces: nil,
-                    x: nil,
-                    y: nil,
-                    width: nil,
-                    height: nil
-                )
-            )
+            executeRemote(AgentCommandRequest(command: .spaceList, json: json))
         }
     }
 
@@ -242,19 +154,53 @@ struct Space: ParsableCommand {
         var json = false
 
         mutating func run() throws {
+            executeRemote(AgentCommandRequest(command: .spaceCurrent, json: json))
+        }
+    }
+
+    struct Switch: ParsableCommand {
+        @Argument(help: "target space id")
+        var spaceID: Int
+
+        @Flag(name: .long, help: "JSON output")
+        var json = false
+
+        @Flag(name: .long, help: "reconcile visibility even when the target space is already active")
+        var reconcile = false
+
+        mutating func run() throws {
             executeRemote(
                 AgentCommandRequest(
-                    command: .spaceCurrent,
+                    command: .spaceSwitch,
                     json: json,
-                    dryRun: nil,
-                    verbose: nil,
-                    layoutName: nil,
-                    slot: nil,
-                    includeAllSpaces: nil,
-                    x: nil,
-                    y: nil,
-                    width: nil,
-                    height: nil
+                    spaceID: spaceID,
+                    reconcile: reconcile
+                )
+            )
+        }
+    }
+
+    struct Recover: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Recover pending virtual-space state; force-clear is last resort and must be followed by --dry-run --json then arrange --space"
+        )
+
+        @Flag(name: .long, help: "force clear pending virtual space recovery state as a last resort; does not reconcile workspace visibility")
+        var forceClearPending = false
+
+        @Flag(name: .long, help: "confirm destructive recovery operation and accept follow-up rediscovery/reconcile work")
+        var yes = false
+
+        @Flag(name: .long, help: "JSON output")
+        var json = false
+
+        mutating func run() throws {
+            executeRemote(
+                AgentCommandRequest(
+                    command: .spaceRecover,
+                    json: json,
+                    forceClearPending: forceClearPending,
+                    confirm: yes
                 )
             )
         }
@@ -278,16 +224,7 @@ struct Focus: ParsableCommand {
         executeRemote(
             AgentCommandRequest(
                 command: .focus,
-                json: nil,
-                dryRun: nil,
-                verbose: nil,
-                layoutName: nil,
                 slot: slot,
-                includeAllSpaces: nil,
-                x: nil,
-                y: nil,
-                width: nil,
-                height: nil,
                 windowID: windowID,
                 bundleID: bundleID,
                 windowTitle: title
@@ -299,7 +236,7 @@ struct Focus: ParsableCommand {
 struct Window: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Window operations",
-        subcommands: [Current.self, Move.self, Resize.self, Set.self]
+        subcommands: [Current.self, Workspace.self, Move.self, Resize.self, Set.self]
     )
 
     struct Current: ParsableCommand {
@@ -307,21 +244,7 @@ struct Window: ParsableCommand {
         var json = false
 
         mutating func run() throws {
-            executeRemote(
-                AgentCommandRequest(
-                    command: .windowCurrent,
-                    json: json,
-                    dryRun: nil,
-                    verbose: nil,
-                    layoutName: nil,
-                    slot: nil,
-                    includeAllSpaces: nil,
-                    x: nil,
-                    y: nil,
-                    width: nil,
-                    height: nil
-                )
-            )
+            executeRemote(AgentCommandRequest(command: .windowCurrent, json: json))
         }
     }
 
@@ -345,19 +268,44 @@ struct Window: ParsableCommand {
             executeRemote(
                 AgentCommandRequest(
                     command: .windowMove,
-                    json: nil,
-                    dryRun: nil,
-                    verbose: nil,
-                    layoutName: nil,
-                    slot: nil,
-                    includeAllSpaces: nil,
                     x: parseLength(x),
                     y: parseLength(y),
-                    width: nil,
-                    height: nil,
                     windowID: windowID,
                     bundleID: bundleID,
                     windowTitle: title
+                )
+            )
+        }
+    }
+
+    struct Workspace: ParsableCommand {
+        @Argument(help: "target virtual workspace id")
+        var spaceID: Int
+
+        @Flag(name: .long, help: "JSON output")
+        var json = false
+
+        @Option(name: .long, help: "target window id")
+        var windowID: UInt32?
+
+        @Option(name: .long, help: "target app bundle id")
+        var bundleID: String?
+
+        @Option(name: .long, help: "target window title")
+        var title: String?
+
+        mutating func run() throws {
+            let target = (windowID != nil || bundleID != nil || title != nil)
+                ? WindowTargetSelector(windowID: windowID, bundleID: bundleID, title: title)
+                : nil
+            executeRemote(
+                AgentCommandRequest(
+                    command: .windowWorkspace,
+                    json: json,
+                    spaceID: spaceID,
+                    windowID: target?.windowID,
+                    bundleID: target?.bundleID,
+                    windowTitle: target?.title
                 )
             )
         }
@@ -383,14 +331,6 @@ struct Window: ParsableCommand {
             executeRemote(
                 AgentCommandRequest(
                     command: .windowResize,
-                    json: nil,
-                    dryRun: nil,
-                    verbose: nil,
-                    layoutName: nil,
-                    slot: nil,
-                    includeAllSpaces: nil,
-                    x: nil,
-                    y: nil,
                     width: parseLength(w),
                     height: parseLength(h),
                     windowID: windowID,
@@ -427,12 +367,6 @@ struct Window: ParsableCommand {
             executeRemote(
                 AgentCommandRequest(
                     command: .windowSet,
-                    json: nil,
-                    dryRun: nil,
-                    verbose: nil,
-                    layoutName: nil,
-                    slot: nil,
-                    includeAllSpaces: nil,
                     x: parseLength(x),
                     y: parseLength(y),
                     width: parseLength(w),
@@ -456,7 +390,10 @@ struct Switcher: ParsableCommand {
         @Flag(name: .long)
         var json = false
 
-        @Option(name: .long, help: "true|false")
+        @Option(
+            name: .long,
+            help: "true|false; in virtual mode true lists tracked windows across the active layout, false limits output to the active virtual space"
+        )
         var includeAllSpaces: String?
 
         mutating func run() throws {
@@ -476,15 +413,7 @@ struct Switcher: ParsableCommand {
                 AgentCommandRequest(
                     command: .switcherList,
                     json: json,
-                    dryRun: nil,
-                    verbose: nil,
-                    layoutName: nil,
-                    slot: nil,
                     includeAllSpaces: parsed,
-                    x: nil,
-                    y: nil,
-                    width: nil,
-                    height: nil
                 )
             )
         }

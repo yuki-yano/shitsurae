@@ -16,11 +16,16 @@ final class ConfigSchemaTests: XCTestCase {
 
         let properties = try XCTUnwrap(root["properties"] as? [String: Any])
         XCTAssertNotNil(properties["app"])
+        XCTAssertNotNil(properties["mode"])
         let layouts = try XCTUnwrap(properties["layouts"] as? [String: Any])
         let patternProperties = try XCTUnwrap(layouts["patternProperties"] as? [String: Any])
         XCTAssertNotNil(patternProperties["^[A-Za-z0-9._-]+$"])
 
         let defs = try XCTUnwrap(root["$defs"] as? [String: Any])
+        let modeDefinition = try XCTUnwrap(defs["modeDefinition"] as? [String: Any])
+        let modeProperties = try XCTUnwrap(modeDefinition["properties"] as? [String: Any])
+        let modeSpace = try XCTUnwrap(modeProperties["space"] as? [String: Any])
+        XCTAssertEqual(modeSpace["$ref"] as? String, "#/$defs/spaceInterpretationMode")
         let overlayCommandKeyName = try XCTUnwrap(defs["overlayCommandKeyName"] as? [String: Any])
         XCTAssertTrue((overlayCommandKeyName["pattern"] as? String)?.contains("\\[") == true)
 
@@ -39,6 +44,8 @@ final class ConfigSchemaTests: XCTestCase {
         let shortcuts = try XCTUnwrap(defs["shortcutsDefinition"] as? [String: Any])
         let shortcutProperties = try XCTUnwrap(shortcuts["properties"] as? [String: Any])
         XCTAssertNotNil(shortcutProperties["cycle"])
+        XCTAssertNotNil(shortcutProperties["moveCurrentWindowToSpace"])
+        XCTAssertNotNil(shortcutProperties["switchVirtualSpace"])
 
         let appDefinition = try XCTUnwrap(defs["appDefinition"] as? [String: Any])
         let appProperties = try XCTUnwrap(appDefinition["properties"] as? [String: Any])

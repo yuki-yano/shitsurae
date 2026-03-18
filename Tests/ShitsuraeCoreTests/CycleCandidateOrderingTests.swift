@@ -62,6 +62,40 @@ final class CycleCandidateOrderingTests: XCTestCase {
         XCTAssertEqual(second.state, SpaceCycleState(spaceID: 1, trailingWindowIDs: [21, 22]))
     }
 
+    func testCycleCandidatesFromOrderedCandidatesKeepSlottedPrefixAndObservedTrailingOrder() {
+        let first = ShortcutCandidateOrdering.cycleCandidates(
+            orderedCandidates: [
+                candidate(id: "window:61", bundleID: "com.example.trailing-a", slot: nil, quickKey: "1"),
+                candidate(id: "window:62", bundleID: "com.example.trailing-b", slot: nil, quickKey: "2"),
+                candidate(id: "window:63", bundleID: "com.example.slot-three", slot: 3, quickKey: "3"),
+                candidate(id: "window:64", bundleID: "com.example.slot-one", slot: 1, quickKey: "4"),
+            ],
+            currentSpaceID: 1,
+            quickKeys: "1234",
+            state: nil
+        )
+
+        XCTAssertEqual(first.candidates.map(\.id), ["window:64", "window:63", "window:61", "window:62"])
+        XCTAssertEqual(first.candidates.map(\.quickKey), ["1", "2", "3", "4"])
+        XCTAssertEqual(first.state, SpaceCycleState(spaceID: 1, trailingWindowIDs: [61, 62]))
+
+        let second = ShortcutCandidateOrdering.cycleCandidates(
+            orderedCandidates: [
+                candidate(id: "window:62", bundleID: "com.example.trailing-b", slot: nil, quickKey: "1"),
+                candidate(id: "window:61", bundleID: "com.example.trailing-a", slot: nil, quickKey: "2"),
+                candidate(id: "window:63", bundleID: "com.example.slot-three", slot: 3, quickKey: "3"),
+                candidate(id: "window:64", bundleID: "com.example.slot-one", slot: 1, quickKey: "4"),
+            ],
+            currentSpaceID: 1,
+            quickKeys: "1234",
+            state: first.state
+        )
+
+        XCTAssertEqual(second.candidates.map(\.id), ["window:64", "window:63", "window:61", "window:62"])
+        XCTAssertEqual(second.candidates.map(\.quickKey), ["1", "2", "3", "4"])
+        XCTAssertEqual(second.state, SpaceCycleState(spaceID: 1, trailingWindowIDs: [61, 62]))
+    }
+
     func testCycleCandidatesRemoveMissingTrailingWindowAndMoveSlottedWindowOutOfTrailingState() {
         let state = SpaceCycleState(spaceID: 1, trailingWindowIDs: [31, 32, 33])
         let windows = [
@@ -171,6 +205,19 @@ final class CycleCandidateOrderingTests: XCTestCase {
             spaceID: 1,
             displayID: "display-a",
             windowID: windowID
+        )
+    }
+
+    private func candidate(id: String, bundleID: String, slot: Int?, quickKey: String?) -> SwitcherCandidate {
+        SwitcherCandidate(
+            id: id,
+            source: .window,
+            title: id,
+            bundleID: bundleID,
+            spaceID: 1,
+            displayID: "display-a",
+            slot: slot,
+            quickKey: quickKey
         )
     }
 }

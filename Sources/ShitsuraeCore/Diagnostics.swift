@@ -3,6 +3,10 @@ import Foundation
 public struct DiagnosticsJSON: Codable {
     public let schemaVersion: Int
     public let generatedAt: String
+    public let configuredSpaceMode: SpaceInterpretationMode
+    public let effectiveSpaceMode: SpaceInterpretationMode
+    public let activeLayoutName: String?
+    public let activeVirtualSpaceID: Int?
     public let permissions: PermissionsStatus
     public let spacesMode: SpacesMode
     public let spacesModeCompatibility: SpacesModeCompatibility
@@ -12,6 +16,8 @@ public struct DiagnosticsJSON: Codable {
     public let layouts: [String]
     public let spaces: [SpaceStatus]
     public let lastConfigReload: ConfigReloadStatus
+    public let diagnosticEventFields: [String]
+    public let diagnosticEvents: [DiagnosticEvent]
     public let recentErrors: [RecentError]
 }
 
@@ -55,11 +61,6 @@ public struct SpaceStatus: Codable {
     public let monitorRole: MonitorRole?
 }
 
-public struct WatchStatus: Codable {
-    public let debounceMs: Int
-    public let watcherRunning: Bool
-}
-
 public struct RecentError: Codable {
     public let at: String
     public let code: Int
@@ -101,8 +102,13 @@ public enum DiagnosticsService {
         loadedConfig: LoadedConfig?,
         loadError: ConfigLoadError?,
         lastConfigReload: ConfigReloadStatus,
-        supportedBuildCatalogURL: URL
+        supportedBuildCatalogURL: URL,
+        runtimeStateStore: RuntimeStateStore = RuntimeStateStore(),
+        diagnosticEventStore: DiagnosticEventStore = DiagnosticEventStore()
     ) -> DiagnosticsJSON {
+        let runtimeState = runtimeStateStore.load()
+        let configuredSpaceMode = loadedConfig?.config.resolvedSpaceInterpretationMode ?? .native
+        let effectiveSpaceMode = configuredSpaceMode
         let expectedSpacesMode = loadedConfig?.config.resolvedSpacesMode ?? .perDisplay
         let actualSpacesMode = SystemProbe.actualSpacesMode()
         let mismatchReason: String?
@@ -144,10 +150,15 @@ public enum DiagnosticsService {
 
         let spaces = collectSpaces(config: loadedConfig?.config)
         let layouts = loadedConfig.map { Array($0.config.layouts.keys).sorted() } ?? []
+        let diagnosticEvents = diagnosticEventStore.recent(limit: 20)
 
         return DiagnosticsJSON(
-            schemaVersion: 2,
+            schemaVersion: 4,
             generatedAt: Date.rfc3339UTC(),
+            configuredSpaceMode: configuredSpaceMode,
+            effectiveSpaceMode: effectiveSpaceMode,
+            activeLayoutName: runtimeState.activeLayoutName,
+            activeVirtualSpaceID: runtimeState.activeVirtualSpaceID,
             permissions: PermissionsStatus(
                 accessibility: PermissionItem(granted: SystemProbe.accessibilityGranted(), required: true),
                 automation: PermissionItem(granted: false, required: false),
@@ -167,6 +178,15 @@ public enum DiagnosticsService {
                 return $0.spaceID < $1.spaceID
             },
             lastConfigReload: lastConfigReload,
+            diagnosticEventFields: [
+                "requestID",
+                "lockOwnerPID",
+                "lockOwnerProcessKind",
+                "lockOwnerStartedAt",
+                "lockWaitTimeoutMS",
+                "manualRecoveryRequired",
+            ],
+            diagnosticEvents: diagnosticEvents,
             recentErrors: RecentErrorStore.shared.list()
         )
     }

@@ -1,19 +1,39 @@
+import CryptoKit
 import Foundation
 import Yams
 
-public struct LoadedConfig {
-    public let config: ShitsuraeConfig
-    public let configFiles: [ConfigFileStatus]
-    public let directoryURL: URL
-}
-
-public struct ConfigLoadError: Error, Sendable {
+public struct ConfigLoadError: Error, LocalizedError, Sendable {
     public let code: ErrorCode
     public let errors: [ValidateErrorItem]
 
     public init(code: ErrorCode, errors: [ValidateErrorItem]) {
         self.code = code
         self.errors = errors
+    }
+
+    public var errorDescription: String? {
+        guard !errors.isEmpty else {
+            return "Failed to load config."
+        }
+
+        let messages = errors.map { error in
+            let location: String
+            switch (error.line, error.column) {
+            case let (.some(line), .some(column)):
+                location = "\(error.path):\(line):\(column)"
+            case let (.some(line), .none):
+                location = "\(error.path):\(line)"
+            default:
+                location = error.path
+            }
+            return "\(location): \(error.message)"
+        }
+
+        if messages.count == 1 {
+            return messages[0]
+        }
+
+        return ([ "Failed to load config:" ] + messages.map { "- \($0)" }).joined(separator: "\n")
     }
 }
 
@@ -89,7 +109,12 @@ public final class ConfigLoader {
             throw ConfigLoadError(code: code, errors: validationErrors)
         }
 
-        return LoadedConfig(config: config, configFiles: statuses.sorted { $0.path < $1.path }, directoryURL: directoryURL)
+        return LoadedConfig(
+            config: config,
+            configFiles: statuses.sorted { $0.path < $1.path },
+            directoryURL: directoryURL,
+            configGeneration: Self.makeConfigGeneration(from: files)
+        )
     }
 
     private func merge(decodedFiles: [(URL, ShitsuraeConfigFile)]) -> (config: ShitsuraeConfig?, errors: [ValidateErrorItem]) {
@@ -99,6 +124,7 @@ public final class ConfigLoader {
         var executionPolicy: ExecutionPolicy?
         var monitors: MonitorsDefinition?
         var shortcuts: ShortcutsDefinition?
+        var mode: ModeDefinition?
         var layouts: [String: LayoutDefinition] = [:]
         var errors: [ValidateErrorItem] = []
 
@@ -128,6 +154,7 @@ public final class ConfigLoader {
             assignSingleton("executionPolicy", item.executionPolicy, &executionPolicy)
             assignSingleton("monitors", item.monitors, &monitors)
             assignSingleton("shortcuts", item.shortcuts, &shortcuts)
+            assignSingleton("mode", item.mode, &mode)
 
             ignore = mergeIgnore(left: ignore, right: item.ignore)
 
@@ -159,7 +186,8 @@ public final class ConfigLoader {
             executionPolicy: executionPolicy,
             monitors: monitors,
             layouts: layouts,
-            shortcuts: shortcuts
+            shortcuts: shortcuts,
+            mode: mode
         )
 
         return (config, [])
@@ -241,5 +269,22 @@ public final class ConfigLoader {
             }
         }
         return lhs.code < rhs.code
+    }
+
+    private static func makeConfigGeneration(from files: [URL]) -> String {
+        let sortedFiles = files.sorted { $0.path < $1.path }
+        var bytes = Data()
+
+        for file in sortedFiles {
+            let resolvedPath = file.resolvingSymlinksInPath().path
+            bytes.append(Data(resolvedPath.utf8))
+            bytes.append(0)
+            if let contents = try? Data(contentsOf: file) {
+                bytes.append(contents)
+            }
+        }
+
+        let digest = SHA256.hash(data: bytes)
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 }

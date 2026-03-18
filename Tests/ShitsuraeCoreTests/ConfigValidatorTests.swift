@@ -309,6 +309,8 @@ final class ConfigValidatorTests: XCTestCase {
                 focusBySlot: [
                     FocusBySlotShortcut(key: "x", modifiers: ["cmd"], slot: 2),
                 ],
+                moveCurrentWindowToSpace: nil,
+                switchVirtualSpace: nil,
                 nextWindow: nil,
                 prevWindow: nil,
                 cycle: nil,
@@ -322,6 +324,10 @@ final class ConfigValidatorTests: XCTestCase {
         XCTAssertEqual(resolved.focusBySlot[2], HotkeyDefinition(key: "x", modifiers: ["cmd"]))
         XCTAssertEqual(resolved.focusBySlot[1], HotkeyDefinition(key: "1", modifiers: ["cmd"]))
         XCTAssertEqual(resolved.focusBySlot[9], HotkeyDefinition(key: "9", modifiers: ["cmd"]))
+        XCTAssertEqual(resolved.moveCurrentWindowToSpace[1], HotkeyDefinition(key: "1", modifiers: ["alt"]))
+        XCTAssertEqual(resolved.moveCurrentWindowToSpace[9], HotkeyDefinition(key: "9", modifiers: ["alt"]))
+        XCTAssertEqual(resolved.switchVirtualSpace[1], HotkeyDefinition(key: "1", modifiers: ["ctrl"]))
+        XCTAssertEqual(resolved.switchVirtualSpace[9], HotkeyDefinition(key: "9", modifiers: ["ctrl"]))
         XCTAssertEqual(resolved.nextWindow, HotkeyDefinition(key: "j", modifiers: ["cmd", "ctrl"]))
         XCTAssertEqual(resolved.prevWindow, HotkeyDefinition(key: "k", modifiers: ["cmd", "ctrl"]))
         XCTAssertEqual(resolved.cycleMode, .direct)
@@ -337,6 +343,8 @@ final class ConfigValidatorTests: XCTestCase {
         let config = baseConfig(
             shortcuts: ShortcutsDefinition(
                 focusBySlot: nil,
+                moveCurrentWindowToSpace: nil,
+                switchVirtualSpace: nil,
                 nextWindow: nil,
                 prevWindow: nil,
                 cycle: nil,
@@ -371,6 +379,12 @@ final class ConfigValidatorTests: XCTestCase {
                     FocusBySlotShortcut(key: "f21", modifiers: ["cmd", "cmd"], slot: 2),
                     FocusBySlotShortcut(key: "3", modifiers: ["hyper"], slot: 3),
                 ],
+                moveCurrentWindowToSpace: [
+                    FocusBySlotShortcut(key: "f21", modifiers: [], slot: 1),
+                ],
+                switchVirtualSpace: [
+                    FocusBySlotShortcut(key: "f21", modifiers: [], slot: 2),
+                ],
                 nextWindow: HotkeyDefinition(key: "left", modifiers: ["cmd", "shift"]),
                 prevWindow: HotkeyDefinition(key: "home", modifiers: ["ctrl"]),
                 cycle: CycleShortcutDefinition(
@@ -397,6 +411,10 @@ final class ConfigValidatorTests: XCTestCase {
         assertHasError(errors, contains: "focusBySlot:2 has invalid key")
         assertHasError(errors, contains: "focusBySlot:2 has duplicate modifiers")
         assertHasError(errors, contains: "focusBySlot:3 has invalid modifier")
+        assertHasError(errors, contains: "moveCurrentWindowToSpace:1 has invalid key")
+        assertHasError(errors, contains: "moveCurrentWindowToSpace:1 must have at least one modifier")
+        assertHasError(errors, contains: "switchVirtualSpace:2 has invalid key")
+        assertHasError(errors, contains: "switchVirtualSpace:2 must have at least one modifier")
         assertHasError(errors, contains: "cycle.acceptKeys contains invalid key")
         assertHasError(errors, contains: "cycle.cancelKeys contains invalid key")
         assertHasError(errors, contains: "acceptKeys contains invalid key")
@@ -407,6 +425,8 @@ final class ConfigValidatorTests: XCTestCase {
         let config = baseConfig(
             shortcuts: ShortcutsDefinition(
                 focusBySlot: nil,
+                moveCurrentWindowToSpace: nil,
+                switchVirtualSpace: nil,
                 nextWindow: HotkeyDefinition(key: "j", modifiers: ["cmd", "ctrl"]),
                 prevWindow: HotkeyDefinition(key: "k", modifiers: ["cmd", "ctrl"]),
                 cycle: CycleShortcutDefinition(
@@ -430,6 +450,8 @@ final class ConfigValidatorTests: XCTestCase {
         let config = baseConfig(
             shortcuts: ShortcutsDefinition(
                 focusBySlot: nil,
+                moveCurrentWindowToSpace: nil,
+                switchVirtualSpace: nil,
                 nextWindow: nil,
                 prevWindow: nil,
                 cycle: CycleShortcutDefinition(
@@ -459,6 +481,8 @@ final class ConfigValidatorTests: XCTestCase {
         let config = baseConfig(
             shortcuts: ShortcutsDefinition(
                 focusBySlot: nil,
+                moveCurrentWindowToSpace: nil,
+                switchVirtualSpace: nil,
                 nextWindow: nil,
                 prevWindow: nil,
                 cycle: nil,
@@ -546,6 +570,8 @@ final class ConfigValidatorTests: XCTestCase {
         let config = baseConfig(
             shortcuts: ShortcutsDefinition(
                 focusBySlot: [FocusBySlotShortcut(key: "f20", modifiers: ["fn", "cmd"], slot: 1)],
+                moveCurrentWindowToSpace: [FocusBySlotShortcut(key: "1", modifiers: ["alt"], slot: 1)],
+                switchVirtualSpace: [FocusBySlotShortcut(key: "1", modifiers: ["ctrl"], slot: 1)],
                 nextWindow: HotkeyDefinition(key: "left", modifiers: ["cmd"]),
                 prevWindow: HotkeyDefinition(key: "right", modifiers: ["cmd"]),
                 cycle: CycleShortcutDefinition(
@@ -575,12 +601,100 @@ final class ConfigValidatorTests: XCTestCase {
                         )
                     ),
                 ],
-                disabledInApps: ["com.apple.Terminal": ["switcher", "focusBySlot:1", "globalAction:1"]]
+                disabledInApps: ["com.apple.Terminal": ["switcher", "focusBySlot:1", "moveCurrentWindowToSpace:1", "switchVirtualSpace:1", "globalAction:1"]]
             )
         )
 
         let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
         XCTAssertTrue(errors.isEmpty)
+    }
+
+    func testMoveCurrentWindowToSpaceDisabledShortcutIDsAreAccepted() {
+        let config = baseConfig(
+            shortcuts: ShortcutsDefinition(
+                focusBySlot: nil,
+                moveCurrentWindowToSpace: nil,
+                switchVirtualSpace: nil,
+                nextWindow: nil,
+                prevWindow: nil,
+                cycle: nil,
+                switcher: nil,
+                globalActions: nil,
+                disabledInApps: [
+                    "com.apple.Terminal": ["moveCurrentWindowToSpace", "moveCurrentWindowToSpace:1", "switchVirtualSpace", "switchVirtualSpace:1"],
+                ]
+            )
+        )
+
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
+        XCTAssertTrue(errors.isEmpty)
+    }
+
+    func testDuplicateSpaceIDRejected() {
+        let config = baseConfig(
+            spaces: [
+                SpaceDefinition(spaceID: 1, display: nil, windows: [defaultWindowDefinition()]),
+                SpaceDefinition(spaceID: 1, display: nil, windows: [defaultWindowDefinition()]),
+            ]
+        )
+
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
+        assertHasError(errors, contains: "spaceID must be unique")
+    }
+
+    func testVirtualModeRejectsMixedDisplayResolution() {
+        let spaces = [
+            SpaceDefinition(
+                spaceID: 1,
+                display: nil,
+                windows: [defaultWindowDefinition()]
+            ),
+            SpaceDefinition(
+                spaceID: 2,
+                display: DisplayDefinition(monitor: .primary, id: nil, width: nil, height: nil),
+                windows: [defaultWindowDefinition()]
+            ),
+        ]
+        let config = baseConfig(mode: ModeDefinition(space: .virtual), spaces: spaces)
+
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
+        assertHasError(errors, contains: "cannot mix implicit and explicit displays")
+    }
+
+    func testVirtualModeRejectsWidthHeightOnlyDisplay() {
+        let spaces = [
+            SpaceDefinition(
+                spaceID: 1,
+                display: DisplayDefinition(monitor: nil, id: nil, width: 1440, height: 900),
+                windows: [defaultWindowDefinition()]
+            ),
+        ]
+        let config = baseConfig(mode: ModeDefinition(space: .virtual), spaces: spaces)
+
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
+        assertHasError(errors, contains: "target one host display")
+    }
+
+    func testVirtualModeRejectsAmbiguousWindowMatchersAcrossSpaces() {
+        let duplicated = defaultWindowDefinition(
+            windowMatch: WindowMatchRule(
+                bundleID: "com.example.app",
+                title: TitleMatcher(equals: "Main", contains: nil, regex: nil),
+                role: "AXWindow",
+                subrole: nil,
+                profile: nil,
+                excludeTitleRegex: nil,
+                index: nil
+            )
+        )
+        let spaces = [
+            SpaceDefinition(spaceID: 1, display: nil, windows: [duplicated]),
+            SpaceDefinition(spaceID: 2, display: nil, windows: [duplicated]),
+        ]
+        let config = baseConfig(mode: ModeDefinition(space: .virtual), spaces: spaces)
+
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
+        assertHasError(errors, contains: "requires unique window matchers")
     }
 
     private func baseConfig(
@@ -596,12 +710,16 @@ final class ConfigValidatorTests: XCTestCase {
         ignore: IgnoreDefinition? = nil,
         shortcuts: ShortcutsDefinition? = nil,
         executionPolicy: ExecutionPolicy? = nil,
+        mode: ModeDefinition? = nil,
         spaces: [SpaceDefinition]? = nil
     ) -> ShitsuraeConfig {
+        let virtualDisplay = mode?.space == .virtual
+            ? DisplayDefinition(monitor: .primary, id: nil, width: nil, height: nil)
+            : nil
         let window = defaultWindowDefinition(windowMatch: windowMatch)
         let layout = LayoutDefinition(
             initialFocus: InitialFocusDefinition(slot: 1),
-            spaces: spaces ?? [SpaceDefinition(spaceID: 1, display: nil, windows: [window])]
+            spaces: spaces ?? [SpaceDefinition(spaceID: 1, display: virtualDisplay, windows: [window])]
         )
 
         return ShitsuraeConfig(
@@ -611,7 +729,8 @@ final class ConfigValidatorTests: XCTestCase {
             executionPolicy: executionPolicy,
             monitors: nil,
             layouts: ["work": layout],
-            shortcuts: shortcuts
+            shortcuts: shortcuts,
+            mode: mode
         )
     }
 

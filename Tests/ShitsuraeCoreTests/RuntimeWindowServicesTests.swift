@@ -170,6 +170,126 @@ final class RuntimeWindowServicesTests: XCTestCase {
         XCTAssertEqual(events, ["promote"])
     }
 
+    func testSetWindowMinimizedResultReturnsPermissionDeniedWhenAccessibilityIsMissing() {
+        var prepared = false
+
+        let result = WindowQueryService.setWindowMinimizedResult(
+            isTrusted: false,
+            runningApplication: { true },
+            prepareForInteraction: { prepared = true },
+            resolveWindowElement: { true },
+            applyMinimizedAttribute: { .success }
+        )
+
+        XCTAssertEqual(result, .permissionDenied)
+        XCTAssertFalse(prepared)
+    }
+
+    func testSetWindowMinimizedResultReturnsFailedWhenWindowCannotBeResolved() {
+        var prepared = false
+
+        let result = WindowQueryService.setWindowMinimizedResult(
+            isTrusted: true,
+            runningApplication: { true },
+            prepareForInteraction: { prepared = true },
+            resolveWindowElement: { false },
+            applyMinimizedAttribute: { .success }
+        )
+
+        XCTAssertEqual(result, .failed)
+        XCTAssertTrue(prepared)
+    }
+
+    func testSetWindowMinimizedResultTreatsRestoreAsSuccessWhenAttributeWriteSucceeds() {
+        let result = WindowQueryService.setWindowMinimizedResult(
+            isTrusted: true,
+            runningApplication: { true },
+            prepareForInteraction: {},
+            resolveWindowElement: { true },
+            applyMinimizedAttribute: { .success }
+        )
+
+        XCTAssertEqual(result, .success)
+    }
+
+    func testSetWindowMinimizedResultTreatsRestorePermissionDeniedAsPermissionDenied() {
+        let result = WindowQueryService.setWindowMinimizedResult(
+            isTrusted: true,
+            runningApplication: { true },
+            prepareForInteraction: {},
+            resolveWindowElement: { true },
+            applyMinimizedAttribute: { .apiDisabled }
+        )
+
+        XCTAssertEqual(result, .permissionDenied)
+    }
+
+    func testSetWindowFrameResultAppliesSizePositionSizeWithoutWindowPromotion() {
+        var events: [String] = []
+
+        let result = WindowQueryService.setWindowFrameResult(
+            expectedFrame: ResolvedFrame(x: 10, y: 20, width: 300, height: 200),
+            isTrusted: true,
+            runningApplication: { true },
+            prepareForInteraction: { events.append("prepare") },
+            resolveWindowElement: { events.append("resolve"); return true },
+            applySize: { events.append("size"); return .success },
+            applyPosition: { events.append("position"); return .success },
+            readFrame: { ResolvedFrame(x: 10, y: 20, width: 300, height: 200) }
+        )
+
+        XCTAssertEqual(result, .success)
+        XCTAssertEqual(events, ["prepare", "resolve", "size", "position", "size"])
+    }
+
+    func testSetWindowFrameResultReturnsFailedWhenAppliedFrameDoesNotConverge() {
+        let result = WindowQueryService.setWindowFrameResult(
+            expectedFrame: ResolvedFrame(x: 100, y: 200, width: 300, height: 200),
+            isTrusted: true,
+            runningApplication: { true },
+            prepareForInteraction: {},
+            resolveWindowElement: { true },
+            applySize: { .success },
+            applyPosition: { .success },
+            readFrame: { ResolvedFrame(x: 0, y: 0, width: 300, height: 200) }
+        )
+
+        XCTAssertEqual(result, .failed)
+    }
+
+    func testSetWindowFrameResultSucceedsWithMenuBarYOffset() {
+        // macOS adjusts y by the menu bar height (~25 px).  The position
+        // tolerance (30 px) should accept this as convergence.
+        let result = WindowQueryService.setWindowFrameResult(
+            expectedFrame: ResolvedFrame(x: 0, y: 0, width: 3430, height: 2135),
+            isTrusted: true,
+            runningApplication: { true },
+            prepareForInteraction: {},
+            resolveWindowElement: { true },
+            applySize: { .success },
+            applyPosition: { .success },
+            readFrame: { ResolvedFrame(x: 0, y: 25, width: 3430, height: 2135) }
+        )
+
+        XCTAssertEqual(result, .success)
+    }
+
+    func testSetWindowFrameResultReturnsPermissionDeniedWhenAccessibilityIsMissing() {
+        let result = WindowQueryService.setWindowFrameResult(
+            isTrusted: false,
+            runningApplication: { true },
+            prepareForInteraction: { XCTFail("prepareForInteraction should not run") },
+            resolveWindowElement: {
+                XCTFail("resolveWindowElement should not run")
+                return false
+            },
+            applySize: { AXError.success },
+            applyPosition: { AXError.success }
+        )
+
+        XCTAssertEqual(result, WindowInteractionResult.permissionDenied)
+    }
+
     func testListWindowsTransformsRawWindowInfoAndSortsByFrontAndWindowID() {
         let display = DisplayInfo(
             id: "display-a",

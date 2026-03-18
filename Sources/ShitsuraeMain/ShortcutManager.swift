@@ -1,9 +1,7 @@
 @preconcurrency import AppKit
 import Carbon.HIToolbox
 import Foundation
-import ScreenCaptureKit
 import ShitsuraeCore
-import SwiftUI
 
 private final class WeakShortcutManagerBox: @unchecked Sendable {
     weak var manager: ShortcutManager?
@@ -14,11 +12,27 @@ private final class WeakShortcutManagerBox: @unchecked Sendable {
 }
 
 final class ShortcutManager {
-    fileprivate static let switcherOverlaySelectionNotification = Notification.Name("SwitcherOverlaySelectionNotification")
-    fileprivate static let switcherOverlaySelectionCandidateIDKey = "candidateID"
+    private enum CycleStateKey: Hashable {
+        case native(Int)
+        case virtual(layoutName: String, spaceID: Int)
+
+        init(scope: InteractiveShortcutScope) {
+            switch scope {
+            case let .native(spaceID):
+                self = .native(spaceID)
+            case let .virtual(layoutName, spaceID):
+                self = .virtual(layoutName: layoutName, spaceID: spaceID)
+            }
+        }
+    }
+
+    static let switcherOverlaySelectionNotification = Notification.Name("SwitcherOverlaySelectionNotification")
+    static let switcherOverlaySelectionCandidateIDKey = "candidateID"
 
     private enum HotkeyAction {
         case focus(slot: Int)
+        case moveCurrentWindowToSpace(spaceID: Int)
+        case switchVirtualSpace(spaceID: Int)
         case nextWindow
         case prevWindow
         case switcher
@@ -29,6 +43,10 @@ final class ShortcutManager {
             switch self {
             case let .focus(slot):
                 return "focusBySlot:\(slot)"
+            case let .moveCurrentWindowToSpace(spaceID):
+                return "moveCurrentWindowToSpace:\(spaceID)"
+            case let .switchVirtualSpace(spaceID):
+                return "switchVirtualSpace:\(spaceID)"
             case .nextWindow:
                 return "nextWindow"
             case .prevWindow:
@@ -43,25 +61,11 @@ final class ShortcutManager {
         }
     }
 
-    private enum OverlaySessionKind {
-        case switcher
-        case cycle
-    }
-
-    private struct OverlaySession {
-        let kind: OverlaySessionKind
-        var candidates: [SwitcherCandidate]
-        var selectedIndex: Int
-        let quickKeys: String
-        let acceptKeys: [String]
-        let cancelKeys: [String]
-        var holdModifiers: Set<String>
-    }
-
     private let commandService: CommandService
+    private let stateStore: RuntimeStateStore
     private let configLoader = ConfigLoader()
     private let logger = ShitsuraeLogger()
-    private let stateStore = RuntimeStateStore()
+    private let focusedWindowProvider: () -> WindowSnapshot?
 
     private var hotKeyPressedEventHandlerRef: EventHandlerRef?
     private var hotKeyReleasedEventHandlerRef: EventHandlerRef?
@@ -77,22 +81,34 @@ final class ShortcutManager {
     private let overlayController = SwitcherOverlayController()
     private var overlaySelectionObserver: NSObjectProtocol?
     private var activeSpaceObserver: NSObjectProtocol?
-    private var overlaySession: OverlaySession?
+    private var appActivationObserver: NSObjectProtocol?
+    private var overlaySession: ShortcutOverlaySession?
     private var currentIgnoreFocusRules: IgnoreRuleSet?
-    private var spaceCycleStates: [Int: SpaceCycleState] = [:]
+    private var spaceCycleStates: [CycleStateKey: SpaceCycleState] = [:]
     private var lastActiveSpaceChangeAt: Date?
     private let activeSpaceSettleDelay: TimeInterval = 0.15
+    private var lastFollowFocusSwitchAt: Date?
+    private let followFocusDebounceInterval: TimeInterval = 0.5
+    private var followFocusEnabled: Bool = false
     private var lastCarbonShortcutID: String?
     private var lastCarbonShortcutAt: Date?
     private let eventTapDuplicateThreshold: TimeInterval = 0.12
     private var lastEventTapOverlayAdvanceShortcutID: String?
     private var lastEventTapOverlayAdvanceAt: Date?
     private let overlayAdvanceDedupeThreshold: TimeInterval = 0.12
+    private var loggedShortcutUnavailableHints: Set<String> = []
 
     private(set) var currentShortcuts = ResolvedShortcuts(from: nil)
+    private var currentLoadedConfig: LoadedConfig?
 
-    init(commandService: CommandService) {
+    init(
+        commandService: CommandService,
+        stateStore: RuntimeStateStore = RuntimeStateStore(),
+        focusedWindowProvider: @escaping () -> WindowSnapshot? = { WindowQueryService.focusedWindow() }
+    ) {
         self.commandService = commandService
+        self.stateStore = stateStore
+        self.focusedWindowProvider = focusedWindowProvider
         let managerBox = WeakShortcutManagerBox(manager: self)
         overlaySelectionObserver = NotificationCenter.default.addObserver(
             forName: Self.switcherOverlaySelectionNotification,
@@ -107,7 +123,7 @@ final class ShortcutManager {
     }
 
     func start() {
-        startObservingWorkspaceChanges()
+        startWorkspaceObservers()
         reloadConfiguration()
     }
 
@@ -116,10 +132,8 @@ final class ShortcutManager {
             NotificationCenter.default.removeObserver(overlaySelectionObserver)
             self.overlaySelectionObserver = nil
         }
-        if let activeSpaceObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(activeSpaceObserver)
-            self.activeSpaceObserver = nil
-        }
+        stopWorkspaceObservers()
+        lastFollowFocusSwitchAt = nil
         unregisterHotkeys()
         stopEventTap()
         stopModifierReleasePolling()
@@ -132,6 +146,7 @@ final class ShortcutManager {
         lastCarbonShortcutAt = nil
         lastEventTapOverlayAdvanceShortcutID = nil
         lastEventTapOverlayAdvanceAt = nil
+        loggedShortcutUnavailableHints.removeAll()
     }
 
     func reloadConfiguration() {
@@ -141,12 +156,16 @@ final class ShortcutManager {
 
         do {
             let loaded = try configLoader.loadFromDefaultDirectory()
+            currentLoadedConfig = loaded
             currentShortcuts = loaded.config.resolvedShortcuts
             currentIgnoreFocusRules = loaded.config.ignore?.focus
+            followFocusEnabled = loaded.config.resolvedFollowFocus
             overlayController.setShowsWindowThumbnails(loaded.config.overlay?.showThumbnails == true)
         } catch {
+            currentLoadedConfig = nil
             currentShortcuts = ResolvedShortcuts(from: nil)
             currentIgnoreFocusRules = nil
+            followFocusEnabled = false
             overlayController.setShowsWindowThumbnails(false)
         }
 
@@ -319,6 +338,20 @@ final class ShortcutManager {
             for slot in 1 ... 9 {
                 if let definition = shortcuts.focusBySlot[slot] {
                     registerHotkey(definition: definition, action: .focus(slot: slot))
+                }
+            }
+        }
+
+        if isConfiguredVirtualMode {
+            for spaceID in 1 ... 9 {
+                if let definition = shortcuts.moveCurrentWindowToSpace[spaceID] {
+                    registerHotkey(definition: definition, action: .moveCurrentWindowToSpace(spaceID: spaceID))
+                }
+            }
+
+            for spaceID in 1 ... 9 {
+                if let definition = shortcuts.switchVirtualSpace[spaceID] {
+                    registerHotkey(definition: definition, action: .switchVirtualSpace(spaceID: spaceID))
                 }
             }
         }
@@ -528,6 +561,29 @@ final class ShortcutManager {
             cancelOverlay()
             resetCycleState()
             _ = commandService.focus(slot: slot)
+        case let .moveCurrentWindowToSpace(spaceID):
+            cancelOverlay()
+            resetCycleState()
+            let target = focusedWindowProvider().map {
+                WindowTargetSelector(windowID: $0.windowID, bundleID: nil, title: nil)
+            }
+            let result = commandService.windowWorkspace(target: target, spaceID: spaceID, json: true)
+            logShortcutCommandResult(
+                shortcutID: action.shortcutID,
+                command: "window.workspace",
+                result: result,
+                fields: ["spaceID": spaceID]
+            )
+        case let .switchVirtualSpace(spaceID):
+            cancelOverlay()
+            resetCycleState()
+            let result = commandService.spaceSwitch(spaceID: spaceID, json: true)
+            logShortcutCommandResult(
+                shortcutID: action.shortcutID,
+                command: "space.switch",
+                result: result,
+                fields: ["spaceID": spaceID]
+            )
         case .nextWindow:
             if currentShortcuts.cycleMode == .direct {
                 cancelOverlay()
@@ -559,7 +615,7 @@ final class ShortcutManager {
         switch action {
         case .nextWindow, .prevWindow, .switcher, .switcherReverse:
             handleOverlayTriggerReleased(action: action)
-        case .focus, .globalAction:
+        case .focus, .moveCurrentWindowToSpace, .switchVirtualSpace, .globalAction:
             return
         }
     }
@@ -627,14 +683,13 @@ final class ShortcutManager {
     }
 
     private func presentOrAdvanceCycleOverlay(forward: Bool, action: HotkeyAction) {
-        if var session = overlaySession, session.kind == .cycle {
-            guard !session.candidates.isEmpty else { return }
-            session.selectedIndex = forward
-                ? (session.selectedIndex + 1) % session.candidates.count
-                : (session.selectedIndex - 1 + session.candidates.count) % session.candidates.count
-            session.holdModifiers = holdModifiers(for: action)
-            overlaySession = session
-            overlayController.show(candidates: session.candidates, selectedIndex: session.selectedIndex)
+        if let session = overlaySession, session.kind == .cycle {
+            var nextSession = session
+            nextSession.advance(forward: forward, holdModifiers: holdModifiers(for: action))
+            overlaySession = nextSession
+            if let overlaySession {
+                overlayController.show(candidates: overlaySession.candidates, selectedIndex: overlaySession.selectedIndex)
+            }
             return
         }
 
@@ -649,7 +704,7 @@ final class ShortcutManager {
         }
 
         let initialIndex = initialSwitcherSelectionIndex(candidates: candidates, forward: forward)
-        overlaySession = OverlaySession(
+        overlaySession = ShortcutOverlaySession(
             kind: .cycle,
             candidates: candidates,
             selectedIndex: initialIndex,
@@ -670,14 +725,13 @@ final class ShortcutManager {
     }
 
     private func presentOrAdvanceSwitcher(forward: Bool, action: HotkeyAction) {
-        if var session = overlaySession, session.kind == .switcher {
-            guard !session.candidates.isEmpty else { return }
-            session.selectedIndex = forward
-                ? (session.selectedIndex + 1) % session.candidates.count
-                : (session.selectedIndex - 1 + session.candidates.count) % session.candidates.count
-            session.holdModifiers = holdModifiers(for: action)
-            overlaySession = session
-            overlayController.show(candidates: session.candidates, selectedIndex: session.selectedIndex)
+        if let session = overlaySession, session.kind == .switcher {
+            var nextSession = session
+            nextSession.advance(forward: forward, holdModifiers: holdModifiers(for: action))
+            overlaySession = nextSession
+            if let overlaySession {
+                overlayController.show(candidates: overlaySession.candidates, selectedIndex: overlaySession.selectedIndex)
+            }
             return
         }
 
@@ -692,7 +746,7 @@ final class ShortcutManager {
         }
 
         let initialIndex = initialSwitcherSelectionIndex(candidates: candidates, forward: forward)
-        overlaySession = OverlaySession(
+        overlaySession = ShortcutOverlaySession(
             kind: .switcher,
             candidates: candidates,
             selectedIndex: initialIndex,
@@ -765,6 +819,24 @@ final class ShortcutManager {
             }
         }
 
+        if isConfiguredVirtualMode {
+            for spaceID in 1 ... 9 {
+                if let definition = currentShortcuts.moveCurrentWindowToSpace[spaceID],
+                   eventMatchesHotkey(event: event, key: definition.key, modifiers: definition.modifiers)
+                {
+                    return .moveCurrentWindowToSpace(spaceID: spaceID)
+                }
+            }
+
+            for spaceID in 1 ... 9 {
+                if let definition = currentShortcuts.switchVirtualSpace[spaceID],
+                   eventMatchesHotkey(event: event, key: definition.key, modifiers: definition.modifiers)
+                {
+                    return .switchVirtualSpace(spaceID: spaceID)
+                }
+            }
+        }
+
         if eventMatchesHotkey(
             event: event,
             key: currentShortcuts.nextWindow.key,
@@ -810,7 +882,7 @@ final class ShortcutManager {
             return true
         case .nextWindow, .prevWindow:
             return !isRecentlyHandledByCarbon(shortcutID: action.shortcutID)
-        case .switcher, .switcherReverse, .globalAction:
+        case .moveCurrentWindowToSpace, .switchVirtualSpace, .switcher, .switcherReverse, .globalAction:
             return actionsByHotKeyID.isEmpty
         }
     }
@@ -823,7 +895,7 @@ final class ShortcutManager {
         switch action {
         case let .focus(slot):
             return commandService.shouldHandleFocusShortcut(slot: slot)
-        case .nextWindow, .prevWindow, .switcher, .switcherReverse, .globalAction:
+        case .moveCurrentWindowToSpace, .switchVirtualSpace, .nextWindow, .prevWindow, .switcher, .switcherReverse, .globalAction:
             return true
         }
     }
@@ -887,7 +959,7 @@ final class ShortcutManager {
                     recordEventTapOverlayAdvance(shortcutID: action.shortcutID)
                     overlayController.show(candidates: session.candidates, selectedIndex: session.selectedIndex)
                     return true
-                case .focus, .switcher, .switcherReverse, .globalAction:
+                case .focus, .moveCurrentWindowToSpace, .switchVirtualSpace, .switcher, .switcherReverse, .globalAction:
                     break
                 }
             }
@@ -957,15 +1029,9 @@ final class ShortcutManager {
             return
         }
 
-        overlaySession = OverlaySession(
-            kind: session.kind,
-            candidates: session.candidates,
-            selectedIndex: selectedIndex,
-            quickKeys: session.quickKeys,
-            acceptKeys: session.acceptKeys,
-            cancelKeys: session.cancelKeys,
-            holdModifiers: session.holdModifiers
-        )
+        var nextSession = session
+        nextSession.selectedIndex = selectedIndex
+        overlaySession = nextSession
         acceptOverlay()
     }
 
@@ -1013,6 +1079,7 @@ final class ShortcutManager {
         modifierReleasePollingTimer = nil
     }
 
+
     private func pollModifierRelease() {
         guard let session = overlaySession else {
             stopModifierReleasePolling()
@@ -1033,7 +1100,7 @@ final class ShortcutManager {
                 return false
             }
             return Date().timeIntervalSince(lastEventTapOverlayAdvanceAt) <= overlayAdvanceDedupeThreshold
-        case .focus, .globalAction:
+        case .focus, .moveCurrentWindowToSpace, .switchVirtualSpace, .globalAction:
             return false
         }
     }
@@ -1073,50 +1140,220 @@ final class ShortcutManager {
             return normalizedModifiers(currentShortcuts.switcherTrigger.modifiers)
         case .switcherReverse:
             return Set(["cmd", "shift"])
-        case .focus, .globalAction:
+        case .focus, .moveCurrentWindowToSpace, .switchVirtualSpace, .globalAction:
             return []
         }
     }
 
-    private func overlayKind(for action: HotkeyAction) -> OverlaySessionKind? {
+    private func overlayKind(for action: HotkeyAction) -> ShortcutOverlaySessionKind? {
         switch action {
         case .nextWindow, .prevWindow:
             return .cycle
         case .switcher, .switcherReverse:
             return .switcher
-        case .focus, .globalAction:
+        case .focus, .moveCurrentWindowToSpace, .switchVirtualSpace, .globalAction:
             return nil
         }
     }
 
     private func buildCycleCandidatesForCurrentSpace() -> [SwitcherCandidate] {
-        let currentSpaceID = WindowQueryService.currentSpaceID()
-        let result = ShortcutCandidateOrdering.cycleCandidates(
-            windows: WindowQueryService.listWindows(),
-            currentSpaceID: currentSpaceID,
-            slotEntries: stateStore.load().slots,
-            ignoreFocusRules: currentIgnoreFocusRules,
-            excludedBundleIDs: currentShortcuts.cycleExcludedApps,
-            quickKeys: currentShortcuts.cycleQuickKeys,
-            state: currentSpaceID.flatMap { spaceCycleStates[$0] }
-        )
-
-        if let state = result.state {
-            spaceCycleStates[state.spaceID] = state
+        guard let context = shortcutSpaceContext(source: "cycle") else {
+            return []
         }
 
-        return result.candidates
+        let cycleStateKey = CycleStateKey(scope: context.scope)
+        let currentSpaceCandidates = resolvedCurrentSpaceCandidates(
+            includeAllSpaces: false,
+            excludedBundleIDs: currentShortcuts.cycleExcludedApps,
+            quickKeys: currentShortcuts.cycleQuickKeys,
+            logPrefix: "cycle"
+        )
+        let resolution: (candidates: [SwitcherCandidate], state: SpaceCycleState?)
+        if case .virtual = context.scope,
+           let currentSpaceCandidates
+        {
+            resolution = ShortcutCandidateOrdering.cycleCandidates(
+                orderedCandidates: currentSpaceCandidates,
+                currentSpaceID: context.currentSpaceID,
+                quickKeys: currentShortcuts.cycleQuickKeys,
+                state: spaceCycleStates[cycleStateKey]
+            )
+        } else {
+            resolution = ShortcutCandidateOrdering.cycleCandidates(
+                windows: WindowQueryService.listWindows(),
+                currentSpaceID: context.currentSpaceID,
+                slotEntries: context.slotEntries,
+                ignoreFocusRules: currentIgnoreFocusRules,
+                excludedBundleIDs: currentShortcuts.cycleExcludedApps,
+                quickKeys: currentShortcuts.cycleQuickKeys,
+                state: spaceCycleStates[cycleStateKey]
+            )
+        }
+
+        if let state = resolution.state {
+            spaceCycleStates[cycleStateKey] = state
+        }
+
+        return resolution.candidates
     }
 
     private func buildSwitcherCandidatesForCurrentSpace() -> [SwitcherCandidate] {
-        ShortcutCandidateOrdering.switcherCandidates(
-            windows: WindowQueryService.listWindows(),
-            currentSpaceID: WindowQueryService.currentSpaceID(),
-            slotEntries: stateStore.load().slots,
-            ignoreFocusRules: currentIgnoreFocusRules,
+        resolvedCurrentSpaceCandidates(
+            includeAllSpaces: false,
             excludedBundleIDs: currentShortcuts.switcherExcludedApps,
-            quickKeys: currentShortcuts.quickKeys
+            quickKeys: currentShortcuts.quickKeys,
+            logPrefix: "switcher"
+        ) ?? []
+    }
+
+    private func resolvedCurrentSpaceCandidates(
+        includeAllSpaces: Bool,
+        excludedBundleIDs: Set<String>,
+        quickKeys: String,
+        logPrefix: String
+    ) -> [SwitcherCandidate]? {
+        switch commandService.switcherCandidates(
+            includeAllSpacesOverride: includeAllSpaces,
+            excludedBundleIDs: excludedBundleIDs,
+            quickKeys: quickKeys
+        ) {
+        case let .success(candidates):
+            return candidates
+        case let .failure(result):
+            logger.log(
+                level: "error",
+                event: "\(logPrefix).candidates.resolveFailed",
+                fields: ["exitCode": Int(result.exitCode)]
+            )
+            return nil
+        }
+    }
+
+    private func logShortcutCommandResult(
+        shortcutID: String,
+        command: String,
+        result: CommandResult,
+        fields: [String: Any] = [:]
+    ) {
+        var payload = fields
+        payload["shortcutID"] = shortcutID
+        payload["command"] = command
+        payload["exitCode"] = Int(result.exitCode)
+        if !result.stdout.isEmpty {
+            payload["stdout"] = truncatedLogField(result.stdout)
+        }
+        if !result.stderr.isEmpty {
+            payload["stderr"] = truncatedLogField(result.stderr)
+        }
+        logger.log(
+            level: result.exitCode == 0 ? "info" : "error",
+            event: "shortcut.command.result",
+            fields: payload
         )
+    }
+
+    private func truncatedLogField(_ value: String, maxLength: Int = 1200) -> String {
+        let normalized = value.replacingOccurrences(of: "\n", with: "\\n")
+        guard normalized.count > maxLength else {
+            return normalized
+        }
+        let endIndex = normalized.index(normalized.startIndex, offsetBy: maxLength)
+        return String(normalized[..<endIndex]) + "...(truncated)"
+    }
+
+    private func shortcutSpaceContext(source: String) -> InteractiveShortcutContext? {
+        let resolution = resolveShortcutContext()
+        switch resolution {
+        case let .resolved(context):
+            return context
+        case let .unavailable(reason):
+            logShortcutContextUnavailable(reason: reason, source: source)
+            return nil
+        }
+    }
+
+    private func resolveShortcutContext() -> InteractiveShortcutContextResolution {
+        let state: RuntimeState
+        do {
+            state = try stateStore.loadStrict()
+        } catch let error as RuntimeStateStoreError {
+            switch error {
+            case .corrupted:
+                return .unavailable(reason: .stateCorrupted)
+            case .readPermissionDenied:
+                return .unavailable(reason: .readPermissionDenied)
+            case .readFailed, .encodingFailed, .staleWriteRejected, .writePermissionDenied, .writeFailed:
+                return .unavailable(reason: .uninitialized)
+            }
+        } catch {
+            return .unavailable(reason: .uninitialized)
+        }
+
+        let readContext = RuntimeStateReadResolver.reconciledRuntimeStateForRead(
+            state: state,
+            loadedConfig: currentLoadedConfig
+        )
+
+        let currentSpace = RuntimeStateReadResolver.resolveCurrentSpace(
+            loadedConfig: currentLoadedConfig,
+            runtimeState: readContext.state,
+            focusedWindow: focusedWindowProvider(),
+            spaces: WindowQueryService.listSpaces()
+        )
+
+        let nativeCurrentSpaceID: Int?
+        switch currentSpace {
+        case let .resolved(spaceID, kind, _):
+            nativeCurrentSpaceID = kind == .native ? spaceID : nil
+        case .unavailable:
+            nativeCurrentSpaceID = nil
+        }
+
+        return RuntimeStateReadResolver.resolveInteractiveShortcutContextDetailed(
+            loadedConfig: currentLoadedConfig,
+            state: readContext.state,
+            nativeCurrentSpaceID: nativeCurrentSpaceID
+        )
+    }
+
+    private func logShortcutContextUnavailable(reason: CurrentSpaceUnavailableReason, source: String) {
+        let hintKey = "\(source):\(shortcutUnavailableHintID(for: reason))"
+        guard !loggedShortcutUnavailableHints.contains(hintKey) else {
+            return
+        }
+
+        loggedShortcutUnavailableHints.insert(hintKey)
+        logger.log(
+            level: "info",
+            event: "shortcut.context.unavailable",
+            fields: [
+                "source": source,
+                "reason": shortcutUnavailableHintID(for: reason),
+                "hint": shortcutUnavailableHintMessage(for: reason),
+            ]
+        )
+    }
+
+    private func shortcutUnavailableHintID(for reason: CurrentSpaceUnavailableReason) -> String {
+        switch reason {
+        case .uninitialized, .staleGeneration:
+            return "initializeActiveSpace"
+        case .stateCorrupted:
+            return "reinitializeRuntimeState"
+        case .readPermissionDenied:
+            return "restoreStateFileReadPermission"
+        }
+    }
+
+    private func shortcutUnavailableHintMessage(for reason: CurrentSpaceUnavailableReason) -> String {
+        switch reason {
+        case .uninitialized, .staleGeneration:
+            return "Initialize Active Space"
+        case .stateCorrupted:
+            return "Reinitialize Runtime State"
+        case .readPermissionDenied:
+            return "Restore Runtime State Read Permission"
+        }
     }
 
     private func activate(candidate: SwitcherCandidate) {
@@ -1248,21 +1485,6 @@ final class ShortcutManager {
         lastEventTapOverlayAdvanceAt = nil
     }
 
-    private func startObservingWorkspaceChanges() {
-        guard activeSpaceObserver == nil else {
-            return
-        }
-
-        let managerBox = WeakShortcutManagerBox(manager: self)
-        activeSpaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.activeSpaceDidChangeNotification,
-            object: nil,
-            queue: .main
-        ) { _ in
-            managerBox.manager?.handleActiveSpaceDidChange()
-        }
-    }
-
     private func handleActiveSpaceDidChange() {
         lastActiveSpaceChangeAt = Date()
         if overlaySession?.kind == .cycle {
@@ -1272,12 +1494,64 @@ final class ShortcutManager {
         logger.log(event: "workspace.activeSpace.changed")
     }
 
+    private func handleAppActivatedForFollowFocus() {
+        guard isConfiguredVirtualMode else {
+            return
+        }
+
+        guard let focused = focusedWindowProvider() else {
+            return
+        }
+
+        // Always update lastActivatedAt so that Cmd+Tab MRU order stays
+        // in sync with OS-level window activation (Dock click, Mission
+        // Control, direct click, etc.).
+        commandService.touchVirtualActivation(windowID: focused.windowID)
+
+        // Adopt untracked windows into the current workspace on each
+        // activation event instead of polling with a timer.
+        commandService.adoptUntrackedWindowsIntoCurrentWorkspace()
+
+        let decision = resolveShortcutFollowFocusDecision(
+            followFocusEnabled: followFocusEnabled,
+            lastFollowFocusSwitchAt: lastFollowFocusSwitchAt,
+            lastActiveSpaceChangeAt: lastActiveSpaceChangeAt,
+            debounceInterval: followFocusDebounceInterval,
+            targetSpaceID: commandService.virtualSpaceIDForWindow(focused.windowID),
+            activeSpaceID: commandService.activeVirtualSpaceID()
+        )
+        guard case let .switchSpace(targetSpaceID) = decision else {
+            return
+        }
+
+        logger.log(
+            event: "followFocus.spaceSwitch",
+            fields: [
+                "windowID": Int(focused.windowID),
+                "bundleID": focused.bundleID,
+                "targetSpaceID": targetSpaceID,
+            ]
+        )
+        lastFollowFocusSwitchAt = Date()
+        let result = commandService.spaceSwitch(spaceID: targetSpaceID, json: true)
+        logShortcutCommandResult(
+            shortcutID: "followFocus",
+            command: "space.switch",
+            result: result,
+            fields: ["spaceID": targetSpaceID, "trigger": "followFocus"]
+        )
+    }
+
     private func shouldRegisterSwitcherReverseHotkey(trigger: HotkeyDefinition) -> Bool {
         canonicalHotkeyKey(trigger.key) == "tab" && normalizedModifiers(trigger.modifiers) == ["cmd"]
     }
 
+    private var isConfiguredVirtualMode: Bool {
+        currentLoadedConfig?.config.resolvedSpaceInterpretationMode == .virtual
+    }
+
     private func syncNativeSwitcherHotKeys() {
-        let desired = nativeHotKeysToDisable(trigger: currentShortcuts.switcherTrigger)
+        let desired = nativeHotKeysToDisable(shortcuts: currentShortcuts)
         let toEnable = disabledNativeSymbolicHotKeys.subtracting(desired)
         if !toEnable.isEmpty {
             _ = SymbolicHotKeyController.setEnabled(true, hotKeys: Array(toEnable))
@@ -1300,23 +1574,28 @@ final class ShortcutManager {
         disabledNativeSymbolicHotKeys = []
     }
 
-    private func nativeHotKeysToDisable(trigger: HotkeyDefinition) -> Set<NativeSymbolicHotKey> {
-        let key = canonicalHotkeyKey(trigger.key)
-        let modifiers = normalizedModifiers(trigger.modifiers)
+    private func nativeHotKeysToDisable(shortcuts: ResolvedShortcuts) -> Set<NativeSymbolicHotKey> {
+        var result: Set<NativeSymbolicHotKey> = []
+        let key = canonicalHotkeyKey(shortcuts.switcherTrigger.key)
+        let modifiers = normalizedModifiers(shortcuts.switcherTrigger.modifiers)
 
         if key == "tab", modifiers == ["cmd"] {
-            return Set(SymbolicHotKeyController.commandTabGroup)
+            result.formUnion(SymbolicHotKeyController.commandTabGroup)
         }
 
         if key == "tab", modifiers == ["cmd", "shift"] {
-            return [.commandShiftTab]
+            result.insert(.commandShiftTab)
         }
 
         if key == "grave", modifiers == ["cmd"] {
-            return [.commandKeyAboveTab]
+            result.insert(.commandKeyAboveTab)
         }
 
-        return []
+        if isConfiguredVirtualMode {
+            result.formUnion(SymbolicHotKeyController.desktopSwitchGroup)
+        }
+
+        return result
     }
 
     private func normalizedModifiers(_ modifiers: [String]) -> Set<String> {
@@ -1354,42 +1633,40 @@ final class ShortcutManager {
         return best?.display ?? displays.sorted(by: { $0.id < $1.id }).first
     }
 
+    private func startWorkspaceObservers() {
+        guard activeSpaceObserver == nil else {
+            return
+        }
+
+        let managerBox = WeakShortcutManagerBox(manager: self)
+        activeSpaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            managerBox.manager?.handleActiveSpaceDidChange()
+        }
+        appActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            managerBox.manager?.handleAppActivatedForFollowFocus()
+        }
+    }
+
+    private func stopWorkspaceObservers() {
+        if let activeSpaceObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(activeSpaceObserver)
+            self.activeSpaceObserver = nil
+        }
+        if let appActivationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(appActivationObserver)
+            self.appActivationObserver = nil
+        }
+    }
+
 }
-
-private func eventMatchesHotkey(event: CGEvent, key: String, modifiers: [String]) -> Bool {
-    guard let expectedKeyCode = keyCode(for: key) else {
-        return false
-    }
-
-    let actualKeyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
-    guard actualKeyCode == expectedKeyCode else {
-        return false
-    }
-
-    let expected = Set(modifiers.map { $0.lowercased() })
-    return eventModifierSet(flags: event.flags) == expected
-}
-
-private func eventModifierSet(flags: CGEventFlags) -> Set<String> {
-    var result = Set<String>()
-    if flags.contains(.maskCommand) {
-        result.insert("cmd")
-    }
-    if flags.contains(.maskShift) {
-        result.insert("shift")
-    }
-    if flags.contains(.maskControl) {
-        result.insert("ctrl")
-    }
-    if flags.contains(.maskAlternate) {
-        result.insert("alt")
-    }
-    if flags.contains(.maskSecondaryFn) {
-        result.insert("fn")
-    }
-    return result
-}
-
 private func appHotKeyPressedHandler(
     _: EventHandlerCallRef?,
     event: EventRef?,
@@ -1451,827 +1728,4 @@ private func carbonModifiers(_ modifiers: [String]) -> UInt32 {
         }
     }
     return result
-}
-
-private func normalizedKey(from event: CGEvent) -> String {
-    let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
-    if let key = overlayCommandKeyName(forKeyCode: keyCode) {
-        return key
-    }
-
-    var chars = [UniChar](repeating: 0, count: 4)
-    var length: Int = 0
-    event.keyboardGetUnicodeString(maxStringLength: chars.count, actualStringLength: &length, unicodeString: &chars)
-    guard length > 0 else { return "" }
-    return String(utf16CodeUnits: chars, count: length).lowercased()
-}
-
-private final class WeakSwitcherOverlayControllerBox: @unchecked Sendable {
-    weak var controller: SwitcherOverlayController?
-
-    init(controller: SwitcherOverlayController) {
-        self.controller = controller
-    }
-}
-
-private struct SwitcherOverlayComponents: @unchecked Sendable {
-    let panel: NSPanel
-    let viewModel: SwitcherOverlayViewModel
-}
-
-private final class SwitcherOverlayController {
-    private let panel: NSPanel
-    private let viewModel: SwitcherOverlayViewModel
-    private var iconCache: [String: NSImage] = [:]
-    private var previewCache: [String: NSImage] = [:]
-    private var pendingPreviewIDs: Set<String> = []
-    private var previewCaptureMaxPixels: CGFloat = 0
-    private var showsWindowThumbnails = false
-
-    init() {
-        let components: SwitcherOverlayComponents
-        if Thread.isMainThread {
-            components = MainActor.assumeIsolated {
-                Self.makeComponentsOnMain()
-            }
-        } else {
-            var tmp: SwitcherOverlayComponents?
-            DispatchQueue.main.sync {
-                tmp = MainActor.assumeIsolated {
-                    Self.makeComponentsOnMain()
-                }
-            }
-            guard let built = tmp else {
-                fatalError("Failed to initialize switcher overlay")
-            }
-            components = built
-        }
-
-        self.panel = components.panel
-        self.viewModel = components.viewModel
-    }
-
-    func show(candidates: [SwitcherCandidate], selectedIndex: Int) {
-        let managerBox = WeakSwitcherOverlayControllerBox(controller: self)
-        if Thread.isMainThread {
-            MainActor.assumeIsolated {
-                managerBox.controller?.showOnMain(candidates: candidates, selectedIndex: selectedIndex)
-            }
-            return
-        }
-
-        let snapshot = candidates
-        DispatchQueue.main.async {
-            guard let controller = managerBox.controller else {
-                return
-            }
-            MainActor.assumeIsolated {
-                controller.showOnMain(candidates: snapshot, selectedIndex: selectedIndex)
-            }
-        }
-    }
-
-    func hide() {
-        let managerBox = WeakSwitcherOverlayControllerBox(controller: self)
-        if Thread.isMainThread {
-            MainActor.assumeIsolated {
-                managerBox.controller?.hideOnMain()
-            }
-            return
-        }
-
-        DispatchQueue.main.async {
-            guard let controller = managerBox.controller else {
-                return
-            }
-            MainActor.assumeIsolated {
-                controller.hideOnMain()
-            }
-        }
-    }
-
-    func setShowsWindowThumbnails(_ enabled: Bool) {
-        let managerBox = WeakSwitcherOverlayControllerBox(controller: self)
-        if Thread.isMainThread {
-            MainActor.assumeIsolated {
-                managerBox.controller?.setShowsWindowThumbnailsOnMain(enabled)
-            }
-            return
-        }
-
-        DispatchQueue.main.async {
-            guard let controller = managerBox.controller else {
-                return
-            }
-            MainActor.assumeIsolated {
-                controller.setShowsWindowThumbnailsOnMain(enabled)
-            }
-        }
-    }
-
-    @MainActor
-    private func showOnMain(candidates: [SwitcherCandidate], selectedIndex: Int) {
-        let isInitialPresentation = !panel.isVisible
-        let shouldAnimateSelection = panel.isVisible
-        let displayFrame = panelDisplayFrame()
-        let metrics = makeMetrics(
-            candidateCount: candidates.count,
-            displayFrame: displayFrame
-        )
-
-        self.viewModel.set(
-            candidates: candidates,
-            selectedIndex: selectedIndex,
-            previews: self.previewCache,
-            icons: self.iconCache,
-            metrics: metrics,
-            shouldAnimateSelection: shouldAnimateSelection
-        )
-        self.updatePanelFrame(
-            metrics: metrics,
-            displayFrame: displayFrame,
-            forceReposition: !self.panel.isVisible
-        )
-
-        if !self.panel.isVisible {
-            self.panel.orderFrontRegardless()
-        }
-
-        self.prefetchAssets(
-            for: candidates,
-            metrics: metrics,
-            forceRefreshVisiblePreviews: isInitialPresentation
-        )
-    }
-
-    @MainActor
-    private func hideOnMain() {
-        panel.orderOut(nil)
-        viewModel.resetPresentationState()
-    }
-
-    @MainActor
-    private func setShowsWindowThumbnailsOnMain(_ enabled: Bool) {
-        guard showsWindowThumbnails != enabled else {
-            return
-        }
-
-        showsWindowThumbnails = enabled
-        guard !enabled else {
-            return
-        }
-
-        previewCache.removeAll(keepingCapacity: true)
-        pendingPreviewIDs.removeAll(keepingCapacity: true)
-        previewCaptureMaxPixels = 0
-        viewModel.clearPreviews()
-    }
-
-    @MainActor
-    private func prefetchAssets(
-        for candidates: [SwitcherCandidate],
-        metrics: SwitcherOverlayMetrics,
-        forceRefreshVisiblePreviews: Bool
-    ) {
-        self.prefetchIcons(for: candidates)
-        self.prefetchWindowPreviews(
-            for: candidates,
-            maxPixels: desiredPreviewCapturePixels(for: metrics),
-            forceRefreshVisiblePreviews: forceRefreshVisiblePreviews
-        )
-    }
-
-    @MainActor
-    private func prefetchIcons(for candidates: [SwitcherCandidate]) {
-        var iconAdded = false
-        for candidate in candidates where self.iconCache[candidate.id] == nil {
-            guard let icon = makeIcon(for: candidate) else {
-                continue
-            }
-            self.iconCache[candidate.id] = icon
-            iconAdded = true
-        }
-        if iconAdded {
-            self.viewModel.setIcons(iconCache, for: Set(candidates.map(\.id)))
-        }
-
-        trimCacheIfNeeded()
-    }
-
-    @MainActor
-    private func prefetchWindowPreviews(
-        for candidates: [SwitcherCandidate],
-        maxPixels: CGFloat,
-        forceRefreshVisiblePreviews: Bool
-    ) {
-        guard showsWindowThumbnails else {
-            return
-        }
-
-        let effectiveMaxPixels = min(
-            SwitcherOverlayLayout.thumbnailMaxPixels,
-            max(SwitcherOverlayLayout.minPreviewCapturePixels, maxPixels)
-        )
-        if effectiveMaxPixels > previewCaptureMaxPixels + 32 {
-            previewCaptureMaxPixels = effectiveMaxPixels
-            previewCache.removeAll(keepingCapacity: true)
-            pendingPreviewIDs.removeAll(keepingCapacity: true)
-        } else if previewCaptureMaxPixels <= 0 {
-            previewCaptureMaxPixels = effectiveMaxPixels
-        }
-
-        let jobs = SwitcherPreviewCapturePlanner.plannedJobs(
-            candidates: candidates,
-            cachedPreviewIDs: Set(self.previewCache.keys),
-            pendingPreviewIDs: self.pendingPreviewIDs,
-            thumbnailsEnabled: showsWindowThumbnails,
-            forceRefreshVisiblePreviews: forceRefreshVisiblePreviews
-        ).reduce(into: [String: CGWindowID]()) { partialResult, item in
-            partialResult[item.key] = CGWindowID(item.value)
-        }
-
-        guard !jobs.isEmpty else {
-            return
-        }
-
-        for candidateID in jobs.keys {
-            self.pendingPreviewIDs.insert(candidateID)
-        }
-
-        let managerBox = WeakSwitcherOverlayControllerBox(controller: self)
-        let requestedMaxPixels = effectiveMaxPixels
-        Task.detached(priority: .userInitiated) {
-            let previews = await SwitcherOverlayController.captureWindowPreviews(
-                jobs: jobs,
-                maxPixels: requestedMaxPixels
-            )
-            await MainActor.run {
-                guard let controller = managerBox.controller else {
-                    return
-                }
-
-                for candidateID in jobs.keys {
-                    controller.pendingPreviewIDs.remove(candidateID)
-                }
-
-                guard controller.showsWindowThumbnails else {
-                    return
-                }
-
-                if requestedMaxPixels + 1 < controller.previewCaptureMaxPixels {
-                    return
-                }
-
-                if !previews.isEmpty {
-                    for (candidateID, image) in previews {
-                        controller.previewCache[candidateID] = image
-                    }
-                    controller.viewModel.setPreviews(controller.previewCache, for: Set(jobs.keys))
-                }
-            }
-        }
-    }
-
-    private static func captureWindowPreviews(
-        jobs: [String: CGWindowID],
-        maxPixels: CGFloat
-    ) async -> [String: NSImage] {
-        guard !jobs.isEmpty else {
-            return [:]
-        }
-
-        guard let shareableContent = try? await SCShareableContent.current else {
-            return [:]
-        }
-
-        let windowsByID = Dictionary(uniqueKeysWithValues: shareableContent.windows.map { ($0.windowID, $0) })
-        var results: [String: NSImage] = [:]
-        for (candidateID, windowID) in jobs {
-            guard let window = windowsByID[windowID],
-                  let image = await captureWindowPreview(window: window, maxPixels: maxPixels)
-            else {
-                continue
-            }
-            results[candidateID] = image
-        }
-        return results
-    }
-
-    private static func captureWindowPreview(window: SCWindow, maxPixels: CGFloat) async -> NSImage? {
-        let frame = window.frame
-        let maxDimension = max(frame.width, frame.height)
-        guard maxDimension > 0 else {
-            return nil
-        }
-
-        let scale = min(1.0, maxPixels / maxDimension)
-        let config = SCStreamConfiguration()
-        config.width = Int(max(1, (frame.width * scale).rounded()))
-        config.height = Int(max(1, (frame.height * scale).rounded()))
-        config.showsCursor = false
-
-        let filter = SCContentFilter(desktopIndependentWindow: window)
-        guard let cgImage = try? await SCScreenshotManager.captureImage(
-            contentFilter: filter,
-            configuration: config
-        ) else {
-            return nil
-        }
-
-        return NSImage(
-            cgImage: cgImage,
-            size: NSSize(width: cgImage.width, height: cgImage.height)
-        )
-    }
-
-    @MainActor
-    private func desiredPreviewCapturePixels(for metrics: SwitcherOverlayMetrics) -> CGFloat {
-        let scale = panel.screen?.backingScaleFactor
-            ?? NSScreen.main?.backingScaleFactor
-            ?? 2.0
-        let base = max(metrics.cardWidth, metrics.previewHeight)
-        let desired = ceil(base * scale * 3.0)
-        return min(
-            SwitcherOverlayLayout.thumbnailMaxPixels,
-            max(SwitcherOverlayLayout.minPreviewCapturePixels, desired)
-        )
-    }
-
-    @MainActor
-    private func makeIcon(for candidate: SwitcherCandidate) -> NSImage? {
-        guard let bundleID = candidate.bundleID else {
-            return nil
-        }
-        if let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first,
-           let icon = running.icon
-        {
-            return icon
-        }
-
-        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
-            return nil
-        }
-        return NSWorkspace.shared.icon(forFile: appURL.path)
-    }
-
-    @MainActor
-    private func trimCacheIfNeeded() {
-        if previewCache.count > SwitcherOverlayLayout.cacheLimit {
-            previewCache.removeAll(keepingCapacity: true)
-            pendingPreviewIDs.removeAll(keepingCapacity: true)
-        }
-        if iconCache.count > SwitcherOverlayLayout.cacheLimit {
-            iconCache.removeAll(keepingCapacity: true)
-        }
-    }
-
-    @MainActor
-    private func updatePanelFrame(
-        metrics: SwitcherOverlayMetrics,
-        displayFrame: NSRect,
-        forceReposition: Bool
-    ) {
-        let targetWidth = metrics.panelWidth
-        let targetHeight = metrics.panelHeight
-        let currentFrame = panel.frame
-        if !forceReposition,
-           abs(currentFrame.width - targetWidth) < 0.5,
-           abs(currentFrame.height - targetHeight) < 0.5
-        {
-            return
-        }
-
-        let newFrame = NSRect(
-            x: round(displayFrame.midX - targetWidth / 2),
-            y: round(displayFrame.midY - targetHeight / 2),
-            width: targetWidth,
-            height: targetHeight
-        )
-        panel.setFrame(newFrame, display: true)
-    }
-
-    @MainActor
-    private func makeMetrics(candidateCount: Int, displayFrame: NSRect) -> SwitcherOverlayMetrics {
-        let effectiveCount = max(candidateCount, SwitcherOverlayLayout.minLayoutCards)
-        let visibleCards = min(effectiveCount, SwitcherOverlayLayout.maxVisibleCards)
-
-        let widthLimit = max(620, floor(displayFrame.width - 24))
-        let heightLimit = max(210, floor(displayFrame.height - 24))
-
-        let preferredWidth = min(
-            widthLimit,
-            max(
-                SwitcherOverlayLayout.minPanelWidth,
-                floor(displayFrame.width * SwitcherOverlayLayout.panelWidthRatio)
-            )
-        )
-        let preferredHeight = min(
-            heightLimit,
-            max(
-                SwitcherOverlayLayout.minPanelHeight,
-                floor(displayFrame.height * SwitcherOverlayLayout.panelHeightRatio)
-            )
-        )
-
-        let panelPadding = min(
-            SwitcherOverlayLayout.maxPanelPadding,
-            max(
-                SwitcherOverlayLayout.minPanelPadding,
-                floor(min(preferredWidth, preferredHeight) * 0.06)
-            )
-        )
-        let horizontalPadding = panelPadding
-        let verticalPadding = panelPadding
-        let cardSpacing = max(12, floor(preferredWidth * 0.012))
-        let desiredCardWidth = min(
-            SwitcherOverlayLayout.maxCardWidth,
-            max(
-                SwitcherOverlayLayout.minCardWidth,
-                floor(displayFrame.width * SwitcherOverlayLayout.cardWidthRatio)
-            )
-        )
-        let desiredCardHeight = min(
-            SwitcherOverlayLayout.maxCardHeight,
-            max(
-                SwitcherOverlayLayout.minCardHeight,
-                floor(desiredCardWidth * SwitcherOverlayLayout.cardHeightRatio)
-            )
-        )
-        let desiredPanelWidth = horizontalPadding * 2
-            + CGFloat(visibleCards) * desiredCardWidth
-            + CGFloat(max(visibleCards - 1, 0)) * cardSpacing
-        let panelWidth = min(
-            preferredWidth,
-            max(SwitcherOverlayLayout.minPanelWidth, desiredPanelWidth)
-        )
-        let desiredPanelHeight = verticalPadding * 2 + desiredCardHeight
-        let panelHeight = min(
-            heightLimit,
-            min(preferredHeight, max(SwitcherOverlayLayout.minPanelHeight, desiredPanelHeight))
-        )
-
-        let cardWidthRaw = (panelWidth
-            - horizontalPadding * 2
-            - CGFloat(max(visibleCards - 1, 0)) * cardSpacing
-        ) / CGFloat(visibleCards)
-        let cardWidth = min(
-            SwitcherOverlayLayout.maxCardWidth,
-            max(SwitcherOverlayLayout.minCardWidth, floor(cardWidthRaw))
-        )
-        let cardHeight = min(
-            SwitcherOverlayLayout.maxCardHeight,
-            max(SwitcherOverlayLayout.minCardHeight, floor(panelHeight - verticalPadding * 2))
-        )
-        let previewHeight = max(92, min(cardHeight - 48, floor(cardHeight * 0.60)))
-
-        return SwitcherOverlayMetrics(
-            panelWidth: panelWidth,
-            panelHeight: panelHeight,
-            horizontalPadding: horizontalPadding,
-            verticalPadding: verticalPadding,
-            cardSpacing: cardSpacing,
-            cardWidth: cardWidth,
-            cardHeight: cardHeight,
-            previewHeight: previewHeight,
-            maxVisibleCards: SwitcherOverlayLayout.maxVisibleCards
-        )
-    }
-
-    @MainActor
-    private func panelDisplayFrame() -> NSRect {
-        let mouseLocation = NSEvent.mouseLocation
-        if let matchingScreen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) {
-            return matchingScreen.visibleFrame
-        }
-        return NSScreen.main?.visibleFrame
-            ?? NSRect(x: 0, y: 0, width: 1200, height: 900)
-    }
-
-    @MainActor
-    private static func makeComponentsOnMain() -> SwitcherOverlayComponents {
-        let viewModel = SwitcherOverlayViewModel()
-        let panel = NSPanel(
-            contentRect: NSRect(
-                x: 0,
-                y: 0,
-                width: SwitcherOverlayLayout.initialPanelWidth,
-                height: SwitcherOverlayLayout.initialPanelHeight
-            ),
-            styleMask: [.nonactivatingPanel, .borderless],
-            backing: .buffered,
-            defer: true
-        )
-        let hostingView = NSHostingView(rootView: SwitcherOverlayView(viewModel: viewModel))
-
-        panel.isFloatingPanel = true
-        panel.level = .statusBar
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-        panel.backgroundColor = .clear
-        panel.isOpaque = false
-        panel.hasShadow = true
-        panel.hidesOnDeactivate = false
-        panel.ignoresMouseEvents = false
-
-        hostingView.frame = NSRect(
-            origin: .zero,
-            size: panel.contentRect(forFrameRect: panel.frame).size
-        )
-        hostingView.autoresizingMask = [.width, .height]
-        panel.contentView = hostingView
-
-        return SwitcherOverlayComponents(panel: panel, viewModel: viewModel)
-    }
-
-}
-
-private enum SwitcherOverlayLayout {
-    static let maxVisibleCards = 6
-    static let minLayoutCards = 1
-    static let panelWidthRatio: CGFloat = 0.72
-    static let panelHeightRatio: CGFloat = 0.31
-    static let minPanelWidth: CGFloat = 420
-    static let minPanelHeight: CGFloat = 196
-    static let minCardWidth: CGFloat = 176
-    static let maxCardWidth: CGFloat = 330
-    static let minCardHeight: CGFloat = 142
-    static let maxCardHeight: CGFloat = 240
-    static let cardHeightRatio: CGFloat = 0.74
-    static let cardWidthRatio: CGFloat = 0.136
-    static let minPanelPadding: CGFloat = 16
-    static let maxPanelPadding: CGFloat = 20
-    static let initialPanelWidth: CGFloat = 820
-    static let initialPanelHeight: CGFloat = 256
-    static let thumbnailMaxPixels: CGFloat = 2_048
-    static let minPreviewCapturePixels: CGFloat = 960
-    static let cacheLimit = 160
-}
-
-private struct SwitcherOverlayMetrics {
-    let panelWidth: CGFloat
-    let panelHeight: CGFloat
-    let horizontalPadding: CGFloat
-    let verticalPadding: CGFloat
-    let cardSpacing: CGFloat
-    let cardWidth: CGFloat
-    let cardHeight: CGFloat
-    let previewHeight: CGFloat
-    let maxVisibleCards: Int
-
-    static let initial = SwitcherOverlayMetrics(
-        panelWidth: SwitcherOverlayLayout.initialPanelWidth,
-        panelHeight: SwitcherOverlayLayout.initialPanelHeight,
-        horizontalPadding: 18,
-        verticalPadding: 18,
-        cardSpacing: 10,
-        cardWidth: 236,
-        cardHeight: 174,
-        previewHeight: 104,
-        maxVisibleCards: SwitcherOverlayLayout.maxVisibleCards
-    )
-}
-
-private final class SwitcherOverlayViewModel: ObservableObject {
-    @Published private(set) var candidates: [SwitcherCandidate] = []
-    @Published private(set) var selectedIndex = 0
-    @Published private(set) var previewsByID: [String: NSImage] = [:]
-    @Published private(set) var iconsByID: [String: NSImage] = [:]
-    @Published private(set) var metrics = SwitcherOverlayMetrics.initial
-    @Published private(set) var shouldAnimateSelection = false
-
-    func set(
-        candidates: [SwitcherCandidate],
-        selectedIndex: Int,
-        previews: [String: NSImage],
-        icons: [String: NSImage],
-        metrics: SwitcherOverlayMetrics,
-        shouldAnimateSelection: Bool
-    ) {
-        self.shouldAnimateSelection = shouldAnimateSelection
-        self.candidates = candidates
-        self.selectedIndex = selectedIndex
-        self.metrics = metrics
-        let ids = Set(candidates.map(\.id))
-        previewsByID = previews.filter { ids.contains($0.key) }
-        iconsByID = icons.filter { ids.contains($0.key) }
-    }
-
-    func resetPresentationState() {
-        shouldAnimateSelection = false
-        candidates = []
-        selectedIndex = 0
-    }
-
-    func clearPreviews() {
-        previewsByID = [:]
-    }
-
-    func setPreviews(_ previews: [String: NSImage], for candidateIDs: Set<String>) {
-        previewsByID = previews.filter { candidateIDs.contains($0.key) }
-    }
-
-    func setIcons(_ icons: [String: NSImage], for candidateIDs: Set<String>) {
-        iconsByID = icons.filter { candidateIDs.contains($0.key) }
-    }
-
-    func select(candidateID: String) {
-        NotificationCenter.default.post(
-            name: ShortcutManager.switcherOverlaySelectionNotification,
-            object: nil,
-            userInfo: [ShortcutManager.switcherOverlaySelectionCandidateIDKey: candidateID]
-        )
-    }
-}
-
-private struct SwitcherOverlayView: View {
-    @ObservedObject var viewModel: SwitcherOverlayViewModel
-
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(Color(red: 0.18, green: 0.20, blue: 0.24).opacity(0.9))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .stroke(Color.white.opacity(0.24), lineWidth: 1.2)
-                )
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: viewModel.metrics.cardSpacing) {
-                    ForEach(Array(viewModel.candidates.enumerated()), id: \.element.id) { index, candidate in
-                        SwitcherCandidateCardView(
-                            candidate: candidate,
-                            isSelected: index == viewModel.selectedIndex,
-                            preview: viewModel.previewsByID[candidate.id],
-                            icon: viewModel.iconsByID[candidate.id],
-                            metrics: viewModel.metrics,
-                            onSelect: { viewModel.select(candidateID: candidate.id) }
-                        )
-                    }
-                }
-                .padding(.horizontal, viewModel.metrics.horizontalPadding)
-                .padding(.vertical, viewModel.metrics.verticalPadding)
-            }
-            .scrollDisabled(viewModel.candidates.count <= viewModel.metrics.maxVisibleCards)
-        }
-        .clipShape(.rect(cornerRadius: 22))
-        .padding(0.5)
-        .animation(
-            viewModel.shouldAnimateSelection ? .snappy(duration: 0.18) : nil,
-            value: viewModel.selectedIndex
-        )
-    }
-}
-
-private struct SwitcherCandidateCardView: View {
-    let candidate: SwitcherCandidate
-    let isSelected: Bool
-    let preview: NSImage?
-    let icon: NSImage?
-    let metrics: SwitcherOverlayMetrics
-    let onSelect: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: compactLayout ? 7 : 10) {
-            headerRow
-            bundleRow
-            windowLikePreview
-            .frame(height: metrics.previewHeight)
-            .frame(maxWidth: .infinity)
-            .clipShape(.rect(cornerRadius: 10))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(Color.white.opacity(0.2), lineWidth: 1.1)
-            )
-        }
-        .padding(compactLayout ? 10 : 14)
-        .frame(width: metrics.cardWidth, height: metrics.cardHeight, alignment: .topLeading)
-        .background(Color.white.opacity(isSelected ? 0.34 : 0.2))
-        .clipShape(.rect(cornerRadius: 14))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(
-                    isSelected ? Color.white.opacity(0.95) : Color.white.opacity(0.22),
-                    lineWidth: isSelected ? 2 : 1
-                )
-        )
-        .scaleEffect(isSelected ? 1.028 : 1.0)
-        .shadow(
-            color: Color.black.opacity(isSelected ? 0.24 : 0.13),
-            radius: isSelected ? 16 : 9,
-            y: isSelected ? 6 : 3
-        )
-        .contentShape(.rect(cornerRadius: 14))
-        .onTapGesture(perform: onSelect)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(candidate.title)")
-    }
-
-    private var compactLayout: Bool {
-        metrics.cardWidth < 220
-    }
-
-    private var headerRow: some View {
-        HStack(spacing: compactLayout ? 6 : 8) {
-            Group {
-                if let icon {
-                    Image(nsImage: icon)
-                        .resizable()
-                        .scaledToFit()
-                } else {
-                    Image(systemName: "rectangle.on.rectangle")
-                        .symbolRenderingMode(.hierarchical)
-                }
-            }
-            .frame(width: compactLayout ? 18 : 20, height: compactLayout ? 18 : 20)
-
-            Text(candidate.title)
-                .font(.system(size: compactLayout ? 14 : 17, weight: .semibold))
-                .lineLimit(1)
-
-            Spacer(minLength: 0)
-
-            if let quickKey = candidate.quickKey {
-                Text(quickKey.uppercased())
-                    .font(.system(size: compactLayout ? 10 : 12, weight: .bold, design: .monospaced))
-                    .foregroundStyle(Color.white.opacity(0.9))
-                    .padding(.horizontal, compactLayout ? 5 : 7)
-                    .padding(.vertical, compactLayout ? 2 : 3)
-                    .background(Color.white.opacity(0.14))
-                    .clipShape(.rect(cornerRadius: 6))
-            }
-        }
-        .foregroundStyle(Color.white)
-    }
-
-    private var bundleRow: some View {
-        Group {
-            if let bundleID = candidate.bundleID {
-                Text(bundleID)
-                    .font(.system(size: compactLayout ? 11 : 12, weight: .regular))
-                    .foregroundStyle(Color.white.opacity(0.58))
-                    .lineLimit(1)
-            } else {
-                Text(" ")
-                    .font(.system(size: compactLayout ? 11 : 12, weight: .regular))
-            }
-        }
-    }
-
-    private var windowLikePreview: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: compactLayout ? 4 : 5) {
-                Circle()
-                    .fill(Color.red.opacity(0.8))
-                    .frame(width: compactLayout ? 5 : 6, height: compactLayout ? 5 : 6)
-                Circle()
-                    .fill(Color.yellow.opacity(0.82))
-                    .frame(width: compactLayout ? 5 : 6, height: compactLayout ? 5 : 6)
-                Circle()
-                    .fill(Color.green.opacity(0.82))
-                    .frame(width: compactLayout ? 5 : 6, height: compactLayout ? 5 : 6)
-
-                Spacer(minLength: 0)
-
-                Text(candidate.source == .window ? "Window" : "Session")
-                    .font(.system(size: compactLayout ? 8 : 9, weight: .medium))
-                    .foregroundStyle(Color.white.opacity(0.58))
-                    .lineLimit(1)
-
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, compactLayout ? 7 : 8)
-                .frame(height: compactLayout ? 19 : 21)
-                .background(Color.white.opacity(0.18))
-
-            ZStack {
-                if let preview {
-                    Color.black.opacity(0.1)
-                    Image(nsImage: preview)
-                        .resizable()
-                        .interpolation(.high)
-                        .antialiased(true)
-                        .scaledToFit()
-                } else {
-                    LinearGradient(
-                        colors: [Color.white.opacity(0.2), Color.black.opacity(0.14)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-
-                    Group {
-                        if let icon {
-                            Image(nsImage: icon)
-                                .resizable()
-                                .scaledToFit()
-                                .padding(compactLayout ? 16 : 24)
-                                .opacity(0.56)
-                        } else {
-                            Image(systemName: "macwindow")
-                                .font(.system(size: compactLayout ? 26 : 34))
-                                .foregroundStyle(Color.white.opacity(0.45))
-                        }
-                    }
-                }
-            }
-        }
-    }
 }

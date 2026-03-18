@@ -98,6 +98,60 @@ package enum ShortcutCandidateOrdering {
         )
     }
 
+    package static func cycleCandidates(
+        orderedCandidates: [SwitcherCandidate],
+        currentSpaceID: Int?,
+        quickKeys: String,
+        state: SpaceCycleState?
+    ) -> (candidates: [SwitcherCandidate], state: SpaceCycleState?) {
+        guard let currentSpaceID else {
+            return ([], nil)
+        }
+
+        let indexed = Array(orderedCandidates.enumerated())
+        let fixed = indexed
+            .filter { $0.element.slot != nil }
+            .sorted(by: compareIndexedFixedCandidates)
+            .map(\.element)
+
+        let trailing = indexed
+            .filter { $0.element.slot == nil }
+            .map(\.element)
+
+        let liveTrailingIDs = trailing.compactMap { SwitcherCandidateSelection.candidateWindowID(from: $0.id) }
+        let liveTrailingSet = Set(liveTrailingIDs)
+
+        var nextState = state?.spaceID == currentSpaceID
+            ? state!
+            : SpaceCycleState(spaceID: currentSpaceID)
+
+        nextState.trailingWindowIDs.removeAll { !liveTrailingSet.contains($0) }
+
+        let existingIDs = Set(nextState.trailingWindowIDs)
+        for windowID in liveTrailingIDs where !existingIDs.contains(windowID) {
+            nextState.trailingWindowIDs.append(windowID)
+        }
+
+        let trailingPairs: [(UInt32, SwitcherCandidate)] = trailing.compactMap { candidate in
+            guard let windowID = SwitcherCandidateSelection.candidateWindowID(from: candidate.id) else {
+                return nil
+            }
+            return (windowID, candidate)
+        }
+        let trailingByID = Dictionary(uniqueKeysWithValues: trailingPairs)
+        let orderedTrailing = nextState.trailingWindowIDs.compactMap { trailingByID[$0] }
+        let ordered = fixed + orderedTrailing
+
+        return (
+            ShortcutCandidateFilter.filter(
+                candidates: ordered,
+                excludedBundleIDs: [],
+                quickKeys: quickKeys
+            ),
+            nextState
+        )
+    }
+
     private struct LiveCandidate {
         let window: WindowSnapshot
         let candidate: SwitcherCandidate
@@ -169,5 +223,18 @@ package enum ShortcutCandidateOrdering {
         }
 
         return compareLiveCandidates(lhs, rhs)
+    }
+
+    private static func compareIndexedFixedCandidates(
+        _ lhs: (offset: Int, element: SwitcherCandidate),
+        _ rhs: (offset: Int, element: SwitcherCandidate)
+    ) -> Bool {
+        let leftSlot = lhs.element.slot ?? Int.max
+        let rightSlot = rhs.element.slot ?? Int.max
+        if leftSlot != rightSlot {
+            return leftSlot < rightSlot
+        }
+
+        return lhs.offset < rhs.offset
     }
 }

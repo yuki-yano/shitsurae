@@ -8,6 +8,7 @@ public struct ShitsuraeConfig: Codable, Equatable {
     public let monitors: MonitorsDefinition?
     public let layouts: [String: LayoutDefinition]
     public let shortcuts: ShortcutsDefinition?
+    public let mode: ModeDefinition?
 
     public init(
         app: AppDefinition? = nil,
@@ -16,7 +17,8 @@ public struct ShitsuraeConfig: Codable, Equatable {
         executionPolicy: ExecutionPolicy?,
         monitors: MonitorsDefinition?,
         layouts: [String: LayoutDefinition],
-        shortcuts: ShortcutsDefinition?
+        shortcuts: ShortcutsDefinition?,
+        mode: ModeDefinition? = nil
     ) {
         self.app = app
         self.ignore = ignore
@@ -25,6 +27,7 @@ public struct ShitsuraeConfig: Codable, Equatable {
         self.monitors = monitors
         self.layouts = layouts
         self.shortcuts = shortcuts
+        self.mode = mode
     }
 }
 
@@ -36,6 +39,7 @@ public struct ShitsuraeConfigFile: Decodable {
     public let monitors: MonitorsDefinition?
     public let layouts: [String: LayoutDefinition]?
     public let shortcuts: ShortcutsDefinition?
+    public let mode: ModeDefinition?
 }
 
 public struct AppDefinition: Codable, Equatable {
@@ -44,6 +48,21 @@ public struct AppDefinition: Codable, Equatable {
     public init(launchAtLogin: Bool? = nil) {
         self.launchAtLogin = launchAtLogin
     }
+}
+
+public struct ModeDefinition: Codable, Equatable {
+    public let space: SpaceInterpretationMode?
+    public let followFocus: Bool?
+
+    public init(space: SpaceInterpretationMode? = nil, followFocus: Bool? = nil) {
+        self.space = space
+        self.followFocus = followFocus
+    }
+}
+
+public enum SpaceInterpretationMode: String, Codable, CaseIterable {
+    case native
+    case virtual
 }
 
 public struct LayoutDefinition: Codable, Equatable {
@@ -71,6 +90,8 @@ public struct WindowDefinition: Codable, Equatable {
 
 public struct ShortcutsDefinition: Codable, Equatable {
     public let focusBySlot: [FocusBySlotShortcut]?
+    public let moveCurrentWindowToSpace: [FocusBySlotShortcut]?
+    public let switchVirtualSpace: [FocusBySlotShortcut]?
     public let nextWindow: HotkeyDefinition?
     public let prevWindow: HotkeyDefinition?
     public let cycle: CycleShortcutDefinition?
@@ -83,6 +104,8 @@ public struct ShortcutsDefinition: Codable, Equatable {
 
     public init(
         focusBySlot: [FocusBySlotShortcut]?,
+        moveCurrentWindowToSpace: [FocusBySlotShortcut]? = nil,
+        switchVirtualSpace: [FocusBySlotShortcut]? = nil,
         nextWindow: HotkeyDefinition?,
         prevWindow: HotkeyDefinition?,
         cycle: CycleShortcutDefinition? = nil,
@@ -94,6 +117,8 @@ public struct ShortcutsDefinition: Codable, Equatable {
         switcherExcludedApps: [String]? = nil
     ) {
         self.focusBySlot = focusBySlot
+        self.moveCurrentWindowToSpace = moveCurrentWindowToSpace
+        self.switchVirtualSpace = switchVirtualSpace
         self.nextWindow = nextWindow
         self.prevWindow = prevWindow
         self.cycle = cycle
@@ -366,9 +391,36 @@ public struct ConfigFileStatus: Codable, Equatable {
     public let message: String?
 }
 
+public struct LoadedConfig {
+    public let config: ShitsuraeConfig
+    public let configFiles: [ConfigFileStatus]
+    public let directoryURL: URL
+    public let configGeneration: String
+
+    public init(
+        config: ShitsuraeConfig,
+        configFiles: [ConfigFileStatus],
+        directoryURL: URL,
+        configGeneration: String = "test"
+    ) {
+        self.config = config
+        self.configFiles = configFiles
+        self.directoryURL = directoryURL
+        self.configGeneration = configGeneration
+    }
+}
+
 public extension ShitsuraeConfig {
     var resolvedSpacesMode: SpacesMode {
         .perDisplay
+    }
+
+    var resolvedSpaceInterpretationMode: SpaceInterpretationMode {
+        mode?.space ?? .native
+    }
+
+    var resolvedFollowFocus: Bool {
+        mode?.followFocus ?? true
     }
 
     var resolvedScreenFrameBasis: ScreenFrameBasis {
@@ -389,6 +441,8 @@ public extension ShitsuraeConfig {
 
 public struct ResolvedShortcuts: Equatable {
     public let focusBySlot: [Int: HotkeyDefinition]
+    public let moveCurrentWindowToSpace: [Int: HotkeyDefinition]
+    public let switchVirtualSpace: [Int: HotkeyDefinition]
     public let focusBySlotEnabledInApps: [String: Bool]
     public let cycleExcludedApps: Set<String>
     public let switcherExcludedApps: Set<String>
@@ -417,6 +471,29 @@ public struct ResolvedShortcuts: Equatable {
             }
         }
         focusBySlot = slots
+
+        var moveToSpaceShortcuts: [Int: HotkeyDefinition] = [:]
+        for slot in 1 ... 9 {
+            moveToSpaceShortcuts[slot] = HotkeyDefinition(key: String(slot), modifiers: ["alt"])
+        }
+        if let overrides = shortcuts?.moveCurrentWindowToSpace {
+            for item in overrides where (1 ... 9).contains(item.slot) {
+                moveToSpaceShortcuts[item.slot] = HotkeyDefinition(key: item.key, modifiers: item.modifiers)
+            }
+        }
+        moveCurrentWindowToSpace = moveToSpaceShortcuts
+
+        var switchVirtualSpaceShortcuts: [Int: HotkeyDefinition] = [:]
+        for slot in 1 ... 9 {
+            switchVirtualSpaceShortcuts[slot] = HotkeyDefinition(key: String(slot), modifiers: ["ctrl"])
+        }
+        if let overrides = shortcuts?.switchVirtualSpace {
+            for item in overrides where (1 ... 9).contains(item.slot) {
+                switchVirtualSpaceShortcuts[item.slot] = HotkeyDefinition(key: item.key, modifiers: item.modifiers)
+            }
+        }
+        switchVirtualSpace = switchVirtualSpaceShortcuts
+
         focusBySlotEnabledInApps = shortcuts?.focusBySlotEnabledInApps ?? [:]
         cycleExcludedApps = Set(shortcuts?.cycleExcludedApps ?? [])
         switcherExcludedApps = Set(shortcuts?.switcherExcludedApps ?? [])

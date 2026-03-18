@@ -11,7 +11,7 @@ build:
 test:
 	swift test
 
-app:
+app: icons
 	CONFIGURATION=$(CONFIGURATION) ./Scripts/build-app-bundle.sh
 
 release-asset:

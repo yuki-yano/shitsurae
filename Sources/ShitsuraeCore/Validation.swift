@@ -65,6 +65,32 @@ public enum ConfigValidator {
                 )
             }
 
+            let spaceIDs = layout.spaces.map(\.spaceID)
+            if spaceIDs.count != Set(spaceIDs).count {
+                errors.append(
+                    ValidateErrorItem(
+                        code: .validationError,
+                        path: sourcePath,
+                        message: "spaceID must be unique in layout \(layoutName)"
+                    )
+                )
+            }
+
+            if config.resolvedSpaceInterpretationMode == .virtual {
+                validateVirtualLayoutDisplayConsistency(
+                    layoutName: layoutName,
+                    layout: layout,
+                    sourcePath: sourcePath,
+                    errors: &errors
+                )
+                validateVirtualLayoutWindowUniqueness(
+                    layoutName: layoutName,
+                    layout: layout,
+                    sourcePath: sourcePath,
+                    errors: &errors
+                )
+            }
+
             for space in layout.spaces {
                 let slots = space.windows.map(\.slot)
                 if slots.count != Set(slots).count {
@@ -231,6 +257,90 @@ public enum ConfigValidator {
         }
     }
 
+    private static func validateVirtualLayoutDisplayConsistency(
+        layoutName: String,
+        layout: LayoutDefinition,
+        sourcePath: String,
+        errors: inout [ValidateErrorItem]
+    ) {
+        let descriptors = layout.spaces.map { space in
+            (spaceID: space.spaceID, value: normalizedVirtualDisplayKey(for: space.display))
+        }
+
+        if descriptors.contains(where: { descriptor in
+            if case .invalid = descriptor.value { return true }
+            return false
+        }) {
+            errors.append(
+                ValidateErrorItem(
+                    code: .validationError,
+                    path: sourcePath,
+                    message: "virtual mode requires each layout to target one host display in layout \(layoutName)"
+                )
+            )
+            return
+        }
+
+        let normalizedKeys = Set(descriptors.compactMap { descriptor -> String? in
+            if case let .value(key) = descriptor.value {
+                return key
+            }
+            return nil
+        })
+        let hasNilDisplay = descriptors.contains { descriptor in
+            if case .none = descriptor.value { return true }
+            return false
+        }
+        let hasExplicitDisplay = descriptors.contains { descriptor in
+            if case .value = descriptor.value { return true }
+            return false
+        }
+
+        if hasNilDisplay && hasExplicitDisplay {
+            errors.append(
+                ValidateErrorItem(
+                    code: .validationError,
+                    path: sourcePath,
+                    message: "virtual mode cannot mix implicit and explicit displays in layout \(layoutName)"
+                )
+            )
+        } else if normalizedKeys.count > 1 {
+            errors.append(
+                ValidateErrorItem(
+                    code: .validationError,
+                    path: sourcePath,
+                    message: "virtual mode requires spaces to share one display target in layout \(layoutName)"
+                )
+            )
+        }
+    }
+
+    private static func validateVirtualLayoutWindowUniqueness(
+        layoutName: String,
+        layout: LayoutDefinition,
+        sourcePath: String,
+        errors: inout [ValidateErrorItem]
+    ) {
+        var seen: [String: (spaceID: Int, slot: Int)] = [:]
+
+        for space in layout.spaces {
+            for window in space.windows {
+                let key = normalizedVirtualWindowKey(window)
+                if let existing = seen[key] {
+                    errors.append(
+                        ValidateErrorItem(
+                            code: .validationError,
+                            path: sourcePath,
+                            message: "virtual mode requires unique window matchers in layout \(layoutName): spaceID=\(existing.spaceID) slot=\(existing.slot) conflicts with spaceID=\(space.spaceID) slot=\(window.slot)"
+                        )
+                    )
+                } else {
+                    seen[key] = (space.spaceID, window.slot)
+                }
+            }
+        }
+    }
+
     private static func validateShortcuts(
         _ shortcuts: ResolvedShortcuts,
         sourcePath: String,
@@ -239,6 +349,12 @@ public enum ConfigValidator {
         for slot in 1 ... 9 {
             if let shortcut = shortcuts.focusBySlot[slot] {
                 validateHotkey(shortcut, sourcePath: sourcePath, messagePrefix: "focusBySlot:\(slot)", requireModifier: true, errors: &errors)
+            }
+            if let shortcut = shortcuts.moveCurrentWindowToSpace[slot] {
+                validateHotkey(shortcut, sourcePath: sourcePath, messagePrefix: "moveCurrentWindowToSpace:\(slot)", requireModifier: true, errors: &errors)
+            }
+            if let shortcut = shortcuts.switchVirtualSpace[slot] {
+                validateHotkey(shortcut, sourcePath: sourcePath, messagePrefix: "switchVirtualSpace:\(slot)", requireModifier: true, errors: &errors)
             }
         }
 
@@ -465,12 +581,32 @@ public enum ConfigValidator {
     }
 
     private static func isShortcutIDValid(_ shortcutID: String, maxGlobalActionIndex: Int) -> Bool {
-        if shortcutID == "focusBySlot" || shortcutID == "nextWindow" || shortcutID == "prevWindow" || shortcutID == "switcher" {
+        if shortcutID == "focusBySlot"
+            || shortcutID == "moveCurrentWindowToSpace"
+            || shortcutID == "switchVirtualSpace"
+            || shortcutID == "nextWindow"
+            || shortcutID == "prevWindow"
+            || shortcutID == "switcher"
+        {
             return true
         }
 
         if shortcutID.hasPrefix("focusBySlot:"),
            let slot = Int(shortcutID.replacingOccurrences(of: "focusBySlot:", with: "")),
+           (1 ... 9).contains(slot)
+        {
+            return true
+        }
+
+        if shortcutID.hasPrefix("moveCurrentWindowToSpace:"),
+           let slot = Int(shortcutID.replacingOccurrences(of: "moveCurrentWindowToSpace:", with: "")),
+           (1 ... 9).contains(slot)
+        {
+            return true
+        }
+
+        if shortcutID.hasPrefix("switchVirtualSpace:"),
+           let slot = Int(shortcutID.replacingOccurrences(of: "switchVirtualSpace:", with: "")),
            (1 ... 9).contains(slot)
         {
             return true
@@ -516,6 +652,66 @@ public enum ConfigValidator {
 
     private static func isRegexCompilable(_ pattern: String) -> Bool {
         (try? NSRegularExpression(pattern: pattern)) != nil
+    }
+
+    private enum VirtualDisplayKey {
+        case none
+        case value(String)
+        case invalid
+    }
+
+    private static func normalizedVirtualDisplayKey(for display: DisplayDefinition?) -> VirtualDisplayKey {
+        guard let display else {
+            return .none
+        }
+
+        if display.monitor != nil && display.id != nil {
+            return .invalid
+        }
+        if display.monitor == nil && display.id == nil && (display.width != nil || display.height != nil) {
+            return .invalid
+        }
+        if let monitor = display.monitor {
+            return .value("monitor:\(monitor.rawValue)")
+        }
+        if let id = display.id {
+            return .value("id:\(id)")
+        }
+        return .none
+    }
+
+    private static func normalizedVirtualWindowKey(_ window: WindowDefinition) -> String {
+        let titleKind: String
+        let titleValue: String
+        if let equals = window.match.title?.equals {
+            titleKind = "equals"
+            titleValue = equals
+        } else if let contains = window.match.title?.contains {
+            titleKind = "contains"
+            titleValue = contains
+        } else if let regex = window.match.title?.regex {
+            titleKind = "regex"
+            titleValue = regex
+        } else {
+            titleKind = "none"
+            titleValue = "<nil>"
+        }
+
+        func segment(_ name: String, _ value: String?) -> String {
+            "\(name)=\(value ?? "<nil>")"
+        }
+
+        return [
+            segment("source", (window.source ?? .window).rawValue),
+            segment("bundleID", window.match.bundleID),
+            segment("profile", window.match.profile),
+            segment("titleMatchKind", titleKind),
+            segment("titleMatchValue", titleValue),
+            segment("excludeTitleRegex", window.match.excludeTitleRegex),
+            segment("role", window.match.role),
+            segment("subrole", window.match.subrole),
+            segment("index", window.match.index.map(String.init)),
+        ].joined(separator: "\u{0}")
     }
 }
 

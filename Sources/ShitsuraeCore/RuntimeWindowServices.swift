@@ -131,6 +131,16 @@ public struct SpaceInfo: Codable, Equatable {
     }
 }
 
+public enum WindowInteractionResult: Equatable {
+    case success
+    case permissionDenied
+    case failed
+
+    public var isSuccess: Bool {
+        self == .success
+    }
+}
+
 public enum WindowQueryService {
     private struct ProfileDirectoryCacheKey: Hashable {
         let bundleID: String
@@ -542,50 +552,276 @@ public enum WindowQueryService {
             return false
         }
 
-        prepareForTargetedWindowInteraction(running)
         let appElement = AXUIElementCreateApplication(running.processIdentifier)
-        guard let windowElement = matchingWindowElement(
-            windowID: windowID,
-            appElement: appElement,
-            windowIDResolver: { element in
-                var resolvedWindowID: CGWindowID = 0
-                guard AXUIElementGetWindowID(element, &resolvedWindowID) == .success else {
-                    return nil
+        var resolvedWindowElement: AXUIElement?
+        let result = withTemporarilyDisabledEnhancedUserInterface(appElement: appElement) {
+            setWindowFrameResult(
+                expectedFrame: frame,
+                isTrusted: AXIsProcessTrusted(),
+                runningApplication: { true },
+                prepareForInteraction: {
+                    prepareForTargetedWindowInteraction(running)
+                },
+                resolveWindowElement: {
+                    resolvedWindowElement = matchingWindowElement(
+                        windowID: windowID,
+                        appElement: appElement,
+                        windowIDResolver: { element in
+                            var resolvedWindowID: CGWindowID = 0
+                            guard AXUIElementGetWindowID(element, &resolvedWindowID) == .success else {
+                                return nil
+                            }
+                            return resolvedWindowID
+                        }
+                    )
+                    return resolvedWindowElement != nil
+                },
+                applySize: {
+                    guard let resolvedWindowElement else {
+                        return .failure
+                    }
+                    var size = CGSize(width: frame.width, height: frame.height)
+                    guard let sizeValue = AXValueCreate(.cgSize, &size) else {
+                        return .failure
+                    }
+                    return AXUIElementSetAttributeValue(
+                        resolvedWindowElement,
+                        kAXSizeAttribute as CFString,
+                        sizeValue
+                    )
+                },
+                applyPosition: {
+                    guard let resolvedWindowElement else {
+                        return .failure
+                    }
+                    var point = CGPoint(x: frame.x, y: frame.y)
+                    guard let pointValue = AXValueCreate(.cgPoint, &point) else {
+                        return .failure
+                    }
+                    return AXUIElementSetAttributeValue(
+                        resolvedWindowElement,
+                        kAXPositionAttribute as CFString,
+                        pointValue
+                    )
+                },
+                readFrame: {
+                    guard let resolvedWindowElement,
+                          let currentFrame = WindowQueryService.frame(of: resolvedWindowElement)
+                    else {
+                        return nil
+                    }
+                    return ResolvedFrame(
+                        x: currentFrame.origin.x,
+                        y: currentFrame.origin.y,
+                        width: currentFrame.width,
+                        height: currentFrame.height
+                    )
                 }
-                return resolvedWindowID
-            }
-        ) else {
-            return false
+            )
         }
-
-        guard focusWindowElement(
-            appElement: appElement,
-            windowElement: windowElement,
-            pid: running.processIdentifier
-        ) else {
-            return false
-        }
-
-        var point = CGPoint(x: frame.x, y: frame.y)
-        var size = CGSize(width: frame.width, height: frame.height)
-
-        guard let pointValue = AXValueCreate(.cgPoint, &point),
-              let sizeValue = AXValueCreate(.cgSize, &size)
-        else {
-            return false
-        }
-
-        let setPosition = AXUIElementSetAttributeValue(windowElement, kAXPositionAttribute as CFString, pointValue)
-        let setSize = AXUIElementSetAttributeValue(windowElement, kAXSizeAttribute as CFString, sizeValue)
-        return setPosition == .success && setSize == .success
+        return result.isSuccess
     }
 
-    @discardableResult
-    public static func focusWindow(windowID: UInt32, bundleID: String) -> Bool {
+    public static func setWindowPosition(windowID: UInt32, bundleID: String, position: CGPoint) -> Bool {
         guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first else {
             return false
         }
 
+        let appElement = AXUIElementCreateApplication(running.processIdentifier)
+        var resolvedWindowElement: AXUIElement?
+        let result = withTemporarilyDisabledEnhancedUserInterface(appElement: appElement) {
+            setWindowPositionResult(
+                expectedPosition: position,
+                isTrusted: AXIsProcessTrusted(),
+                runningApplication: { true },
+                prepareForInteraction: {
+                    prepareForTargetedWindowInteraction(running)
+                },
+                resolveWindowElement: {
+                    resolvedWindowElement = matchingWindowElement(
+                        windowID: windowID,
+                        appElement: appElement,
+                        windowIDResolver: { element in
+                            var resolvedWindowID: CGWindowID = 0
+                            guard AXUIElementGetWindowID(element, &resolvedWindowID) == .success else {
+                                return nil
+                            }
+                            return resolvedWindowID
+                        }
+                    )
+                    return resolvedWindowElement != nil
+                },
+                applyPosition: {
+                    guard let resolvedWindowElement else {
+                        return .failure
+                    }
+                    var point = position
+                    guard let pointValue = AXValueCreate(.cgPoint, &point) else {
+                        return .failure
+                    }
+                    return AXUIElementSetAttributeValue(
+                        resolvedWindowElement,
+                        kAXPositionAttribute as CFString,
+                        pointValue
+                    )
+                },
+                readPosition: {
+                    guard let resolvedWindowElement,
+                          let currentFrame = WindowQueryService.frame(of: resolvedWindowElement)
+                    else {
+                        return nil
+                    }
+                    return currentFrame.origin
+                }
+            )
+        }
+        return result.isSuccess
+    }
+
+    static func setWindowFrameResult(
+        expectedFrame: ResolvedFrame? = nil,
+        isTrusted: Bool,
+        runningApplication: () -> Bool,
+        prepareForInteraction: () -> Void,
+        resolveWindowElement: () -> Bool,
+        applySize: () -> AXError,
+        applyPosition: () -> AXError,
+        readFrame: (() -> ResolvedFrame?)? = nil
+    ) -> WindowInteractionResult {
+        guard isTrusted else {
+            return .permissionDenied
+        }
+
+        guard runningApplication() else {
+            return .failed
+        }
+
+        prepareForInteraction()
+
+        guard resolveWindowElement() else {
+            return .failed
+        }
+
+        let sizeBeforePosition = windowInteractionResult(for: applySize())
+        guard sizeBeforePosition.isSuccess else {
+            return sizeBeforePosition
+        }
+
+        let positionResult = windowInteractionResult(for: applyPosition())
+        guard positionResult.isSuccess else {
+            return positionResult
+        }
+
+        let finalSizeResult = windowInteractionResult(for: applySize())
+        guard finalSizeResult.isSuccess else {
+            return finalSizeResult
+        }
+
+        if let expectedFrame,
+           let actualFrame = readFrame?(),
+           !roughlySame(frame: actualFrame, expectedFrame: expectedFrame)
+        {
+            return .failed
+        }
+
+        return .success
+    }
+
+    static func setWindowPositionResult(
+        expectedPosition: CGPoint? = nil,
+        isTrusted: Bool,
+        runningApplication: () -> Bool,
+        prepareForInteraction: () -> Void,
+        resolveWindowElement: () -> Bool,
+        applyPosition: () -> AXError,
+        readPosition: (() -> CGPoint?)? = nil
+    ) -> WindowInteractionResult {
+        guard isTrusted else {
+            return .permissionDenied
+        }
+
+        guard runningApplication() else {
+            return .failed
+        }
+
+        prepareForInteraction()
+
+        guard resolveWindowElement() else {
+            return .failed
+        }
+
+        let positionResult = windowInteractionResult(for: applyPosition())
+        guard positionResult.isSuccess else {
+            return positionResult
+        }
+
+        if let expectedPosition,
+           let actualPosition = readPosition?(),
+           !roughlySame(position: actualPosition, expectedPosition: expectedPosition)
+        {
+            return .failed
+        }
+
+        return .success
+    }
+
+    public static func setWindowMinimizedResult(windowID: UInt32, bundleID: String, minimized: Bool) -> WindowInteractionResult {
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first
+        let appElement = running.map { AXUIElementCreateApplication($0.processIdentifier) }
+        var resolvedWindowElement: AXUIElement?
+        return setWindowMinimizedResult(
+            isTrusted: AXIsProcessTrusted(),
+            runningApplication: { running != nil },
+            prepareForInteraction: {
+                if let running {
+                    prepareForTargetedWindowInteraction(running)
+                }
+            },
+            resolveWindowElement: {
+                guard let appElement else {
+                    return false
+                }
+
+                resolvedWindowElement = matchingWindowElement(
+                    windowID: windowID,
+                    appElement: appElement,
+                    windowIDResolver: { element in
+                        var resolvedWindowID: CGWindowID = 0
+                        guard AXUIElementGetWindowID(element, &resolvedWindowID) == .success else {
+                            return nil
+                        }
+                        return resolvedWindowID
+                    }
+                )
+                return resolvedWindowElement != nil
+            },
+            applyMinimizedAttribute: {
+                guard let resolvedWindowElement else {
+                    return .failure
+                }
+                return AXUIElementSetAttributeValue(
+                    resolvedWindowElement,
+                    kAXMinimizedAttribute as CFString,
+                    minimized ? kCFBooleanTrue : kCFBooleanFalse
+                )
+            }
+        )
+    }
+
+    @discardableResult
+    public static func setWindowMinimized(windowID: UInt32, bundleID: String, minimized: Bool) -> Bool {
+        setWindowMinimizedResult(windowID: windowID, bundleID: bundleID, minimized: minimized).isSuccess
+    }
+
+    public static func focusWindowResult(windowID: UInt32, bundleID: String) -> WindowInteractionResult {
+        guard AXIsProcessTrusted() else {
+            return .permissionDenied
+        }
+
+        guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first else {
+            return .failed
+        }
+
         prepareForTargetedWindowInteraction(running)
 
         let appElement = AXUIElementCreateApplication(running.processIdentifier)
@@ -600,14 +836,19 @@ public enum WindowQueryService {
                 return resolvedWindowID
             }
         ) else {
-            return false
+            return .failed
         }
 
-        return focusWindowElement(
+        return focusWindowElementResult(
             appElement: appElement,
             windowElement: windowElement,
             pid: running.processIdentifier
         )
+    }
+
+    @discardableResult
+    public static func focusWindow(windowID: UInt32, bundleID: String) -> Bool {
+        focusWindowResult(windowID: windowID, bundleID: bundleID).isSuccess
     }
 
     @discardableResult
@@ -678,22 +919,41 @@ public enum WindowQueryService {
         windowElement: AXUIElement,
         pid: pid_t
     ) -> Bool {
+        focusWindowElementResult(
+            appElement: appElement,
+            windowElement: windowElement,
+            pid: pid
+        ).isSuccess
+    }
+
+    private static func focusWindowElementResult(
+        appElement: AXUIElement,
+        windowElement: AXUIElement,
+        pid: pid_t
+    ) -> WindowInteractionResult {
         var resolvedWindowID: CGWindowID = 0
         guard AXUIElementGetWindowID(windowElement, &resolvedWindowID) == .success else {
-            return false
+            return .failed
         }
 
-        return applyTargetedWindowFocus(
+        return applyTargetedWindowFocusResult(
             pid: pid,
             windowID: UInt32(resolvedWindowID),
             promoteWindow: promoteWindowToFront,
             applyAccessibilityFocus: {
-                _ = AXUIElementSetAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, windowElement)
-                _ = AXUIElementSetAttributeValue(appElement, kAXMainWindowAttribute as CFString, windowElement)
-                _ = AXUIElementSetAttributeValue(windowElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+                let focusedResult = windowInteractionResult(
+                    for: AXUIElementSetAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, windowElement)
+                )
+                let mainResult = windowInteractionResult(
+                    for: AXUIElementSetAttributeValue(appElement, kAXMainWindowAttribute as CFString, windowElement)
+                )
+                let windowFocusedResult = windowInteractionResult(
+                    for: AXUIElementSetAttributeValue(windowElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+                )
+                return mergeWindowInteractionResults([focusedResult, mainResult, windowFocusedResult])
             },
             raiseWindow: {
-                _ = AXUIElementPerformAction(windowElement, kAXRaiseAction as CFString)
+                windowInteractionResult(for: AXUIElementPerformAction(windowElement, kAXRaiseAction as CFString))
             }
         )
     }
@@ -712,6 +972,70 @@ public enum WindowQueryService {
         applyAccessibilityFocus()
         raiseWindow()
         return true
+    }
+
+    static func applyTargetedWindowFocusResult(
+        pid: pid_t,
+        windowID: UInt32,
+        promoteWindow: (pid_t, UInt32) -> Bool,
+        applyAccessibilityFocus: () -> WindowInteractionResult,
+        raiseWindow: () -> WindowInteractionResult
+    ) -> WindowInteractionResult {
+        guard promoteWindow(pid, windowID) else {
+            return .failed
+        }
+
+        let focusResult = applyAccessibilityFocus()
+        guard focusResult.isSuccess else {
+            return focusResult
+        }
+
+        return raiseWindow()
+    }
+
+    static func setWindowMinimizedResult(
+        isTrusted: Bool,
+        runningApplication: () -> Bool,
+        prepareForInteraction: () -> Void,
+        resolveWindowElement: () -> Bool,
+        applyMinimizedAttribute: () -> AXError
+    ) -> WindowInteractionResult {
+        guard isTrusted else {
+            return .permissionDenied
+        }
+
+        guard runningApplication() else {
+            return .failed
+        }
+
+        prepareForInteraction()
+
+        guard resolveWindowElement() else {
+            return .failed
+        }
+
+        return windowInteractionResult(for: applyMinimizedAttribute())
+    }
+
+    private static func windowInteractionResult(for error: AXError) -> WindowInteractionResult {
+        switch error {
+        case .success:
+            return .success
+        case .apiDisabled:
+            return .permissionDenied
+        default:
+            return .failed
+        }
+    }
+
+    private static func mergeWindowInteractionResults(_ results: [WindowInteractionResult]) -> WindowInteractionResult {
+        if results.contains(.permissionDenied) {
+            return .permissionDenied
+        }
+        if results.allSatisfy(\.isSuccess) {
+            return .success
+        }
+        return .failed
     }
 
     private static func getProcessSerialNumber(pid: pid_t, psn: UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus {
@@ -857,6 +1181,76 @@ public enum WindowQueryService {
             && abs(rect.origin.y - displayFrame.origin.y) <= tolerance
             && abs(rect.width - displayFrame.width) <= tolerance
             && abs(rect.height - displayFrame.height) <= tolerance
+    }
+
+    static func roughlySame(frame: ResolvedFrame, expectedFrame: ResolvedFrame) -> Bool {
+        // Use a generous tolerance for position (macOS adjusts y for the
+        // menu bar — typically 25 px — and may snap x/width to integer
+        // boundaries).  Size gets a tighter tolerance because rounding is
+        // the only expected source of drift.
+        let positionTolerance = 30.0
+        let sizeTolerance = 2.0
+        return abs(frame.x - expectedFrame.x) <= positionTolerance
+            && abs(frame.y - expectedFrame.y) <= positionTolerance
+            && abs(frame.width - expectedFrame.width) <= sizeTolerance
+            && abs(frame.height - expectedFrame.height) <= sizeTolerance
+    }
+
+    static func roughlySame(position: CGPoint, expectedPosition: CGPoint) -> Bool {
+        let tolerance: CGFloat = 2.0
+        return abs(position.x - expectedPosition.x) <= tolerance
+            && abs(position.y - expectedPosition.y) <= tolerance
+    }
+
+    private static func frame(of element: AXUIElement) -> CGRect? {
+        var positionRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionRef) == .success,
+              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success,
+              let positionRef,
+              let sizeRef
+        else {
+            return nil
+        }
+
+        let positionValue = positionRef as! AXValue
+        let sizeValue = sizeRef as! AXValue
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        AXValueGetValue(positionValue, .cgPoint, &position)
+        AXValueGetValue(sizeValue, .cgSize, &size)
+        return CGRect(origin: position, size: size)
+    }
+
+    private static func withTemporarilyDisabledEnhancedUserInterface(
+        appElement: AXUIElement,
+        body: () -> WindowInteractionResult
+    ) -> WindowInteractionResult {
+        let enhancedUserInterfaceAttribute = "AXEnhancedUserInterface" as CFString
+        var currentValue: CFTypeRef?
+        let readStatus = AXUIElementCopyAttributeValue(
+            appElement,
+            enhancedUserInterfaceAttribute,
+            &currentValue
+        )
+        let wasEnabled = readStatus == .success && (currentValue as? Bool) == true
+        if wasEnabled {
+            _ = AXUIElementSetAttributeValue(
+                appElement,
+                enhancedUserInterfaceAttribute,
+                kCFBooleanFalse
+            )
+        }
+        defer {
+            if wasEnabled {
+                _ = AXUIElementSetAttributeValue(
+                    appElement,
+                    enhancedUserInterfaceAttribute,
+                    kCFBooleanTrue
+                )
+            }
+        }
+        return body()
     }
 
     static func matchingWindowElement(
@@ -1130,6 +1524,14 @@ public enum PolicyEngine {
         }
 
         if shortcutID.hasPrefix("focusBySlot:"), disabled.contains("focusBySlot") {
+            return true
+        }
+
+        if shortcutID.hasPrefix("moveCurrentWindowToSpace:"), disabled.contains("moveCurrentWindowToSpace") {
+            return true
+        }
+
+        if shortcutID.hasPrefix("switchVirtualSpace:"), disabled.contains("switchVirtualSpace") {
             return true
         }
 

@@ -57,6 +57,14 @@ final class ArrangeDriverTests: XCTestCase {
         XCTAssertEqual(availability.1, "catalogNotFound")
     }
 
+    func testSpacesIsCallable() {
+        let driver = LiveArrangeDriver(
+            windowSpaceSwitcher: StubWindowSpaceSwitcher(result: true),
+            displayRelaySpaceSwitcher: StubWindowDisplayRelaySpaceSwitcher(result: true)
+        )
+        _ = driver.spaces()
+    }
+
     func testActivateAndSleepAreCallable() {
         let driver = LiveArrangeDriver(
             windowSpaceSwitcher: StubWindowSpaceSwitcher(result: true),

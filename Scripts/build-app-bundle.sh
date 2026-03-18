@@ -14,6 +14,7 @@ BUNDLED_CLI_NAME="shitsurae"
 CORE_BUNDLE_NAME="shitsurae_ShitsuraeCore.bundle"
 ICON_NAME="${ICON_NAME:-Shitsurae}"
 ICON_SOURCE_DIR="$ROOT_DIR/Shitsurae/Assets.xcassets/AppIcon.appiconset"
+MENU_ICON_SOURCE_DIR="$ROOT_DIR/Shitsurae/Assets.xcassets/MenuBarIcon.imageset"
 DIST_DIR="${DIST_DIR:-$ROOT_DIR/dist}"
 APP_BUNDLE_PATH="$DIST_DIR/${BUNDLE_NAME}.app"
 APP_CONTENTS_PATH="$APP_BUNDLE_PATH/Contents"
@@ -64,6 +65,8 @@ validate_version "APP_BUILD_VERSION" "$APP_BUILD_VERSION"
 
 cd "$ROOT_DIR"
 
+./Scripts/generate-icons.sh
+
 swift build -c "$CONFIGURATION"
 BIN_DIR="$(swift build -c "$CONFIGURATION" --show-bin-path)"
 
@@ -94,6 +97,11 @@ fi
 
 if [[ ! -d "$ICON_SOURCE_DIR" ]]; then
   echo "error: missing app icon source directory: $ICON_SOURCE_DIR" >&2
+  exit 1
+fi
+
+if [[ ! -d "$MENU_ICON_SOURCE_DIR" ]]; then
+  echo "error: missing menu bar icon source directory: $MENU_ICON_SOURCE_DIR" >&2
   exit 1
 fi
 
@@ -138,6 +146,8 @@ cp "$BIN_DIR/$CLI_NAME" "$APP_RESOURCES_PATH/$BUNDLED_CLI_NAME"
 cp "$ROOT_DIR/Shitsurae/Info.plist" "$APP_PLIST_PATH"
 cp "$BIN_DIR/$AGENT_NAME" "$APP_RESOURCES_PATH/$AGENT_NAME"
 cp -R "$BIN_DIR/$CORE_BUNDLE_NAME" "$APP_RESOURCES_PATH/$CORE_BUNDLE_NAME"
+cp "$MENU_ICON_SOURCE_DIR/menu-16.png" "$APP_RESOURCES_PATH/menu-16.png"
+cp "$MENU_ICON_SOURCE_DIR/menu-32.png" "$APP_RESOURCES_PATH/menu-32.png"
 iconutil -c icns "$ICONSET_DIR" -o "$APP_RESOURCES_PATH/${ICON_NAME}.icns"
 
 /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $APP_NAME" "$APP_PLIST_PATH" 2>/dev/null || \

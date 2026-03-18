@@ -131,6 +131,80 @@ final class ArrangeServiceTests: XCTestCase {
         XCTAssertTrue(driver.sleepCalls.isEmpty)
     }
 
+    func testArrangeDoesNotPreferPersistedWindowIDWhenPIDMismatches() throws {
+        let driver = FakeArrangeDriver()
+        driver.windowsQueue = [[
+            WindowSnapshot(
+                windowID: 10,
+                bundleID: "com.example.app",
+                pid: 222,
+                title: "Main",
+                role: "AXWindow",
+                subrole: nil,
+                minimized: false,
+                hidden: false,
+                frame: ResolvedFrame(x: 0, y: 0, width: 100, height: 100),
+                spaceID: 1,
+                displayID: "display-1",
+                isFullscreen: false,
+                frontIndex: 1
+            ),
+            WindowSnapshot(
+                windowID: 11,
+                bundleID: "com.example.app",
+                pid: 333,
+                title: "Main",
+                role: "AXWindow",
+                subrole: nil,
+                minimized: false,
+                hidden: false,
+                frame: ResolvedFrame(x: 10, y: 0, width: 100, height: 100),
+                spaceID: 1,
+                displayID: "display-1",
+                isFullscreen: false,
+                frontIndex: 0
+            ),
+        ]]
+        driver.allSpacesWindowsQueue = driver.windowsQueue
+
+        let logger = ShitsuraeLogger(logFileURL: tempFile("arrange-log.jsonl"))
+        let store = RuntimeStateStore(stateFileURL: tempFile("state.json"))
+        try store.saveStrict(
+            slots: [
+                SlotEntry(
+                    layoutName: "__legacy__",
+                    slot: 1,
+                    source: .window,
+                    bundleID: "com.example.app",
+                    definitionFingerprint: String(repeating: "b", count: 64),
+                    pid: 111,
+                    titleMatchKind: .none,
+                    titleMatchValue: nil,
+                    excludeTitleRegex: nil,
+                    role: nil,
+                    subrole: nil,
+                    matchIndex: nil,
+                    lastKnownTitle: "Persisted",
+                    profile: nil,
+                    spaceID: 1,
+                    nativeSpaceID: 1,
+                    displayID: "display-1",
+                    windowID: 10
+                ),
+            ],
+            stateMode: .native,
+            configGeneration: "generation-1",
+            revision: 1
+        )
+        let context = ArrangeContext(config: baseConfig(initialFocusSlot: 1), supportedBuildCatalogURL: URL(fileURLWithPath: "/tmp/missing.json"))
+        let service = ArrangeService(context: context, logger: logger, stateStore: store, driver: driver)
+
+        let result = try service.execute(layoutName: "work")
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(driver.setFrameInvocations.map(\.windowID), [11])
+    }
+
     func testWaitForWindowUsesShortPollingAndContinuesImmediatelyWhenWindowAppears() throws {
         let driver = FakeArrangeDriver()
         driver.windowsQueue = [
@@ -380,6 +454,16 @@ final class ArrangeServiceTests: XCTestCase {
         let result = try service.dryRun(layoutName: "work")
         let actions = result.plan.map(\.action)
         XCTAssertEqual(actions, ["launch", "waitWindow", "moveSpace", "setFrame", "registerSlot", "focusInitial"])
+    }
+
+    func testVirtualDryRunOmitsMoveSpaceStep() throws {
+        let driver = FakeArrangeDriver()
+        let config = baseConfig(initialFocusSlot: 1, launch: true, mode: ModeDefinition(space: .virtual))
+        let service = makeService(driver: driver, config: config)
+
+        let result = try service.dryRun(layoutName: "work")
+
+        XCTAssertEqual(result.plan.map(\.action), ["launch", "waitWindow", "setFrame", "registerSlot", "focusInitial"])
     }
 
     func testMonitorSecondaryPrefersMonitorsSecondaryID() throws {
@@ -656,20 +740,336 @@ final class ArrangeServiceTests: XCTestCase {
         XCTAssertTrue(driver.sleepCalls.isEmpty)
 
         let persisted = store.load().slots
-        XCTAssertEqual(
-            persisted,
-            [
+        XCTAssertEqual(persisted.count, 1)
+        XCTAssertEqual(persisted.first?.slot, 1)
+        XCTAssertEqual(persisted.first?.bundleID, "com.example.app")
+        XCTAssertEqual(persisted.first?.title, "com.example.app")
+        XCTAssertEqual(persisted.first?.spaceID, 1)
+        XCTAssertEqual(persisted.first?.layoutName, "__legacy__")
+        XCTAssertEqual(persisted.first?.definitionFingerprint.count, 64)
+    }
+
+    func testVirtualStateOnlyWithoutSpaceSelectionBootstrapsAllWorkspaces() throws {
+        let driver = FakeArrangeDriver()
+        let logger = ShitsuraeLogger(logFileURL: tempFile("arrange-log.jsonl"))
+        let store = RuntimeStateStore(stateFileURL: tempFile("state.json"))
+        let context = ArrangeContext(
+            config: twoSpaceScopedConfig(mode: ModeDefinition(space: .virtual)),
+            supportedBuildCatalogURL: URL(fileURLWithPath: "/tmp/missing.json"),
+            configGeneration: "generation-all-state-only"
+        )
+        let service = ArrangeService(context: context, logger: logger, stateStore: store, driver: driver)
+
+        let result = try service.execute(layoutName: "scopedWork", stateOnly: true)
+
+        XCTAssertEqual(result.exitCode, 0)
+        let persisted = store.load()
+        XCTAssertEqual(persisted.activeLayoutName, "scopedWork")
+        XCTAssertEqual(persisted.activeVirtualSpaceID, 1)
+        XCTAssertEqual(Set(persisted.slots.compactMap(\.spaceID)), Set([1, 2]))
+    }
+
+    func testVirtualLiveArrangeWithoutSpaceSelectionTracksAllWorkspaces() throws {
+        let driver = FakeArrangeDriver()
+        driver.accessibility = true
+        driver.windowsQueue = [[
+            sampleWindow(windowID: 10, bundleID: "com.example.first", spaceID: 7, displayID: "display-1"),
+            sampleWindow(windowID: 20, bundleID: "com.example.second", frontIndex: 1, spaceID: 7, displayID: "display-1"),
+        ]]
+        driver.allSpacesWindowsQueue = driver.windowsQueue
+        driver.spacesResponse = [
+            SpaceInfo(spaceID: 7, displayID: "display-1", isVisible: true, isNativeFullscreen: false),
+        ]
+
+        let logger = ShitsuraeLogger(logFileURL: tempFile("arrange-log.jsonl"))
+        let store = RuntimeStateStore(stateFileURL: tempFile("state.json"))
+        store.save(
+            slots: [],
+            stateMode: .virtual,
+            configGeneration: "generation-before",
+            activeLayoutName: "scopedWork",
+            activeVirtualSpaceID: 2,
+            revision: 1
+        )
+        let context = ArrangeContext(
+            config: twoSpaceScopedConfig(mode: ModeDefinition(space: .virtual)),
+            supportedBuildCatalogURL: URL(fileURLWithPath: "/tmp/missing.json"),
+            configGeneration: "generation-all-live"
+        )
+        let service = ArrangeService(context: context, logger: logger, stateStore: store, driver: driver)
+
+        let result = try service.execute(layoutName: "scopedWork")
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(driver.setFrameInvocations.count, 2)
+        XCTAssertEqual(Set(driver.setFrameInvocations.map(\.windowID)), Set([10, 20]))
+        let persisted = store.load()
+        XCTAssertEqual(persisted.activeLayoutName, "scopedWork")
+        XCTAssertEqual(persisted.activeVirtualSpaceID, 2)
+        XCTAssertEqual(Set(persisted.slots.compactMap(\.spaceID)), Set([1, 2]))
+        XCTAssertEqual(persisted.slots.first(where: { $0.spaceID == 1 })?.windowID, 10)
+        XCTAssertEqual(persisted.slots.first(where: { $0.spaceID == 1 })?.lastVisibleFrame?.width, 720)
+        XCTAssertEqual(persisted.slots.first(where: { $0.spaceID == 2 })?.windowID, 20)
+        XCTAssertEqual(persisted.slots.first(where: { $0.spaceID == 2 })?.lastVisibleFrame?.x, 720)
+    }
+
+    func testVirtualAllWorkspacesPartialArrangeSeedsAllSlotsAndSelectsResolvedActiveWorkspace() throws {
+        let driver = FakeArrangeDriver()
+        driver.accessibility = true
+        driver.windowsQueue = [[
+            sampleWindow(windowID: 20, bundleID: "com.example.second", frontIndex: 0, spaceID: 7, displayID: "display-1"),
+        ]]
+        driver.allSpacesWindowsQueue = driver.windowsQueue
+        driver.spacesResponse = [
+            SpaceInfo(spaceID: 7, displayID: "display-1", isVisible: true, isNativeFullscreen: false),
+        ]
+
+        let logger = ShitsuraeLogger(logFileURL: tempFile("arrange-log.jsonl"))
+        let store = RuntimeStateStore(stateFileURL: tempFile("state.json"))
+        let context = ArrangeContext(
+            config: twoSpaceScopedConfig(mode: ModeDefinition(space: .virtual)),
+            supportedBuildCatalogURL: URL(fileURLWithPath: "/tmp/missing.json"),
+            configGeneration: "generation-all-live-partial"
+        )
+        let service = ArrangeService(context: context, logger: logger, stateStore: store, driver: driver)
+
+        let result = try service.execute(layoutName: "scopedWork")
+
+        XCTAssertEqual(result.result, "partial")
+        XCTAssertEqual(result.exitCode, ErrorCode.partialSuccess.rawValue)
+        let persisted = store.load()
+        XCTAssertEqual(persisted.activeLayoutName, "scopedWork")
+        XCTAssertEqual(persisted.activeVirtualSpaceID, 2)
+        XCTAssertEqual(Set(persisted.slots.compactMap(\.spaceID)), Set([1, 2]))
+        XCTAssertNil(persisted.slots.first(where: { $0.spaceID == 1 })?.windowID)
+        XCTAssertEqual(persisted.slots.first(where: { $0.spaceID == 1 })?.lastVisibleFrame?.width, 720)
+        XCTAssertEqual(persisted.slots.first(where: { $0.spaceID == 2 })?.windowID, 20)
+    }
+
+    func testVirtualArrangeSkipsBackendChecksAndSpaceMove() throws {
+        let driver = FakeArrangeDriver()
+        driver.accessibility = true
+        driver.backendAvailableResult = (false, "unsupportedOSBuild")
+        driver.spacesMode = .global
+        driver.windowsQueue = [[sampleWindow(bundleID: "com.example.app", spaceID: 7)]]
+        driver.spacesResponse = [
+            SpaceInfo(spaceID: 7, displayID: "display-1", isVisible: true, isNativeFullscreen: false),
+        ]
+
+        let logger = ShitsuraeLogger(logFileURL: tempFile("arrange-log.jsonl"))
+        let store = RuntimeStateStore(stateFileURL: tempFile("state.json"))
+        let context = ArrangeContext(
+            config: baseConfig(initialFocusSlot: 1, mode: ModeDefinition(space: .virtual)),
+            supportedBuildCatalogURL: URL(fileURLWithPath: "/tmp/missing.json"),
+            configGeneration: "generation-1"
+        )
+        let service = ArrangeService(context: context, logger: logger, stateStore: store, driver: driver)
+
+        let result = try service.execute(layoutName: "work", spaceID: 1)
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertTrue(driver.moveWindowToSpaceCalls.isEmpty)
+        let persisted = store.load()
+        XCTAssertEqual(persisted.stateMode, .virtual)
+        XCTAssertEqual(persisted.activeLayoutName, "work")
+        XCTAssertEqual(persisted.activeVirtualSpaceID, 1)
+        XCTAssertEqual(persisted.configGeneration, "generation-1")
+        XCTAssertEqual(persisted.slots.first?.layoutName, "work")
+        XCTAssertEqual(persisted.slots.first?.nativeSpaceID, 7)
+    }
+
+    func testVirtualArrangeReturnsHostUnavailableWhenResolvedDisplayHasNoVisibleNativeSpace() throws {
+        let driver = FakeArrangeDriver()
+        driver.accessibility = true
+        driver.spacesResponse = []
+        let service = makeService(
+            driver: driver,
+            config: configForExplicitDisplay(id: "display-1")
+        )
+
+        let result = try service.execute(layoutName: "work", spaceID: 1)
+
+        XCTAssertEqual(result.exitCode, ErrorCode.validationError.rawValue)
+        XCTAssertEqual(result.subcode, "virtualHostDisplayUnavailable")
+    }
+
+    func testVirtualArrangeReturnsHostUnavailableWhenResolvedDisplayHasMultipleVisibleNativeSpaces() throws {
+        let driver = FakeArrangeDriver()
+        driver.accessibility = true
+        driver.spacesResponse = [
+            SpaceInfo(spaceID: 7, displayID: "display-1", isVisible: true, isNativeFullscreen: false),
+            SpaceInfo(spaceID: 8, displayID: "display-1", isVisible: true, isNativeFullscreen: false),
+        ]
+        let service = makeService(
+            driver: driver,
+            config: configForExplicitDisplay(id: "display-1")
+        )
+
+        let result = try service.execute(layoutName: "work", spaceID: 1)
+
+        XCTAssertEqual(result.exitCode, ErrorCode.validationError.rawValue)
+        XCTAssertEqual(result.subcode, "virtualHostDisplayUnavailable")
+    }
+
+    func testVirtualArrangeReturnsUnresolvedSlotsWhenTrackedWindowIsOutsideHostNativeSpace() throws {
+        let driver = FakeArrangeDriver()
+        driver.accessibility = true
+        driver.spacesResponse = [
+            SpaceInfo(spaceID: 7, displayID: "display-1", isVisible: true, isNativeFullscreen: false),
+        ]
+        driver.windowsQueue = [[
+            sampleWindow(bundleID: "com.example.app", spaceID: 8, displayID: "display-1"),
+        ]]
+
+        let service = makeService(
+            driver: driver,
+            config: baseConfig(initialFocusSlot: 1, mode: ModeDefinition(space: .virtual))
+        )
+
+        let result = try service.execute(layoutName: "work", spaceID: 1)
+
+        XCTAssertEqual(result.schemaVersion, 2)
+        XCTAssertEqual(result.result, "failed")
+        XCTAssertEqual(result.exitCode, ErrorCode.validationError.rawValue)
+        XCTAssertEqual(result.subcode, "virtualSpaceUnresolvedSlots")
+        XCTAssertEqual(result.unresolvedSlots, [
+            PendingUnresolvedSlot(slot: 1, spaceID: 1, reason: "hostNativeSpaceMismatch"),
+        ])
+        XCTAssertTrue(driver.setFrameInvocations.isEmpty)
+        XCTAssertTrue(driver.moveWindowToSpaceCalls.isEmpty)
+    }
+
+    func testVirtualStateOnlyBootstrapsActiveLayoutAndSpace() throws {
+        let driver = FakeArrangeDriver()
+        let logger = ShitsuraeLogger(logFileURL: tempFile("arrange-log.jsonl"))
+        let store = RuntimeStateStore(stateFileURL: tempFile("state.json"))
+        let context = ArrangeContext(
+            config: baseConfig(initialFocusSlot: 1, mode: ModeDefinition(space: .virtual)),
+            supportedBuildCatalogURL: URL(fileURLWithPath: "/tmp/missing.json"),
+            configGeneration: "generation-bootstrap"
+        )
+        let service = ArrangeService(context: context, logger: logger, stateStore: store, driver: driver)
+
+        let result = try service.execute(layoutName: "work", spaceID: 1, stateOnly: true)
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertTrue(driver.launchInvocations.isEmpty)
+        let persisted = store.load()
+        XCTAssertEqual(persisted.stateMode, .virtual)
+        XCTAssertEqual(persisted.activeLayoutName, "work")
+        XCTAssertEqual(persisted.activeVirtualSpaceID, 1)
+        XCTAssertEqual(persisted.configGeneration, "generation-bootstrap")
+        XCTAssertEqual(persisted.slots.first?.layoutName, "work")
+        XCTAssertEqual(persisted.slots.first?.lastKnownTitle, nil)
+        XCTAssertEqual(persisted.slots.first?.definitionFingerprint.count, 64)
+    }
+
+    func testVirtualStateOnlyPromotesLegacyStateToCurrentGeneration() throws {
+        let driver = FakeArrangeDriver()
+        let logger = ShitsuraeLogger(logFileURL: tempFile("arrange-log.jsonl"))
+        let store = RuntimeStateStore(stateFileURL: tempFile("state.json"))
+        store.save(
+            slots: [
                 SlotEntry(
                     slot: 1,
                     source: .window,
                     bundleID: "com.example.app",
-                    title: "com.example.app",
+                    title: "Legacy",
+                    profile: "Default",
                     spaceID: 1,
-                    displayID: nil,
-                    windowID: nil
+                    displayID: "display-1",
+                    windowID: 99
                 ),
-            ]
+            ],
+            stateMode: .native,
+            configGeneration: "legacy",
+            revision: 0
         )
+        let context = ArrangeContext(
+            config: baseConfig(initialFocusSlot: 1, mode: ModeDefinition(space: .virtual)),
+            supportedBuildCatalogURL: URL(fileURLWithPath: "/tmp/missing.json"),
+            configGeneration: "generation-promoted"
+        )
+        let service = ArrangeService(context: context, logger: logger, stateStore: store, driver: driver)
+
+        let result = try service.execute(layoutName: "work", spaceID: 1, stateOnly: true)
+
+        XCTAssertEqual(result.exitCode, 0)
+        let persisted = try XCTUnwrap(store.load().slots.first)
+        XCTAssertEqual(store.load().configGeneration, "generation-promoted")
+        XCTAssertEqual(store.load().stateMode, .virtual)
+        XCTAssertEqual(persisted.layoutName, "work")
+        XCTAssertNotEqual(persisted.definitionFingerprint, "legacy")
+        XCTAssertEqual(persisted.definitionFingerprint.count, 64)
+        XCTAssertNil(persisted.pid)
+        XCTAssertEqual(store.load().activeLayoutName, "work")
+        XCTAssertEqual(store.load().activeVirtualSpaceID, 1)
+    }
+
+    func testVirtualStateOnlyDoesNotCarryForwardMetadataWhenDefinitionFingerprintChanges() throws {
+        let driver = FakeArrangeDriver()
+        let logger = ShitsuraeLogger(logFileURL: tempFile("arrange-log.jsonl"))
+        let store = RuntimeStateStore(stateFileURL: tempFile("state.json"))
+        try store.saveStrict(
+            slots: [
+                SlotEntry(
+                    layoutName: "work",
+                    slot: 1,
+                    source: .window,
+                    bundleID: "com.example.app",
+                    definitionFingerprint: String(repeating: "a", count: 64),
+                    pid: 9001,
+                    titleMatchKind: .equals,
+                    titleMatchValue: "Old Title",
+                    excludeTitleRegex: nil,
+                    role: nil,
+                    subrole: nil,
+                    matchIndex: nil,
+                    lastKnownTitle: "Old Title",
+                    profile: "LegacyProfile",
+                    spaceID: 1,
+                    nativeSpaceID: 7,
+                    displayID: "display-legacy",
+                    windowID: 77
+                ),
+            ],
+            stateMode: .virtual,
+            configGeneration: "generation-old",
+            activeLayoutName: "work",
+            activeVirtualSpaceID: 1,
+            revision: 2
+        )
+        let context = ArrangeContext(
+            config: baseConfig(
+                initialFocusSlot: 1,
+                windowMatch: WindowMatchRule(
+                    bundleID: "com.example.app",
+                    title: TitleMatcher(equals: "New Title", contains: nil, regex: nil),
+                    role: nil,
+                    subrole: nil,
+                    profile: nil,
+                    excludeTitleRegex: nil,
+                    index: nil
+                ),
+                mode: ModeDefinition(space: .virtual)
+            ),
+            supportedBuildCatalogURL: URL(fileURLWithPath: "/tmp/missing.json"),
+            configGeneration: "generation-new"
+        )
+        let service = ArrangeService(context: context, logger: logger, stateStore: store, driver: driver)
+
+        let result = try service.execute(layoutName: "work", spaceID: 1, stateOnly: true)
+
+        XCTAssertEqual(result.exitCode, 0)
+        let persisted = try XCTUnwrap(store.load().slots.first)
+        XCTAssertEqual(persisted.definitionFingerprint.count, 64)
+        XCTAssertNotEqual(persisted.definitionFingerprint, String(repeating: "a", count: 64))
+        XCTAssertNil(persisted.pid)
+        XCTAssertNil(persisted.windowID)
+        XCTAssertEqual(persisted.nativeSpaceID, 1)
+        XCTAssertEqual(persisted.displayID, "display-1")
+        XCTAssertNotNil(persisted.lastVisibleFrame)
+        XCTAssertNil(persisted.lastKnownTitle)
     }
 
 
@@ -697,8 +1097,12 @@ final class ArrangeServiceTests: XCTestCase {
             excludeTitleRegex: nil,
             index: nil
         ),
-        executionPolicy: ExecutionPolicy = ExecutionPolicy()
+        executionPolicy: ExecutionPolicy = ExecutionPolicy(),
+        mode: ModeDefinition? = nil
     ) -> ShitsuraeConfig {
+        let virtualDisplay = mode?.space == .virtual
+            ? DisplayDefinition(monitor: .primary, id: nil, width: nil, height: nil)
+            : nil
         let window = WindowDefinition(
             source: .window,
             match: windowMatch,
@@ -710,7 +1114,7 @@ final class ArrangeServiceTests: XCTestCase {
         let layout = LayoutDefinition(
             initialFocus: InitialFocusDefinition(slot: initialFocusSlot),
             spaces: [
-                SpaceDefinition(spaceID: 1, display: nil, windows: [window]),
+                SpaceDefinition(spaceID: 1, display: virtualDisplay, windows: [window]),
             ]
         )
 
@@ -720,7 +1124,8 @@ final class ArrangeServiceTests: XCTestCase {
             executionPolicy: executionPolicy,
             monitors: nil,
             layouts: ["work": layout],
-            shortcuts: nil
+            shortcuts: nil,
+            mode: mode
         )
     }
 
@@ -750,6 +1155,37 @@ final class ArrangeServiceTests: XCTestCase {
             ),
             layouts: ["work": layout],
             shortcuts: nil
+        )
+    }
+
+    private func configForExplicitDisplay(id: String) -> ShitsuraeConfig {
+        let window = WindowDefinition(
+            source: .window,
+            match: WindowMatchRule(bundleID: "com.example.app", title: nil, role: nil, subrole: nil, profile: nil, excludeTitleRegex: nil, index: nil),
+            slot: 1,
+            launch: false,
+            frame: FrameDefinition(x: .expression("0%"), y: .expression("0%"), width: .expression("50%"), height: .expression("100%"))
+        )
+
+        let layout = LayoutDefinition(
+            initialFocus: InitialFocusDefinition(slot: 1),
+            spaces: [
+                SpaceDefinition(
+                    spaceID: 1,
+                    display: DisplayDefinition(monitor: nil, id: id, width: nil, height: nil),
+                    windows: [window]
+                ),
+            ]
+        )
+
+        return ShitsuraeConfig(
+            ignore: nil,
+            overlay: nil,
+            executionPolicy: ExecutionPolicy(),
+            monitors: nil,
+            layouts: ["work": layout],
+            shortcuts: nil,
+            mode: ModeDefinition(space: .virtual)
         )
     }
 
@@ -894,7 +1330,10 @@ final class ArrangeServiceTests: XCTestCase {
         )
     }
 
-    private func twoSpaceScopedConfig() -> ShitsuraeConfig {
+    private func twoSpaceScopedConfig(mode: ModeDefinition? = nil) -> ShitsuraeConfig {
+        let virtualDisplay = mode?.space == .virtual
+            ? DisplayDefinition(monitor: .primary, id: nil, width: nil, height: nil)
+            : nil
         let first = WindowDefinition(
             source: .window,
             match: WindowMatchRule(bundleID: "com.example.first", title: nil, role: nil, subrole: nil, excludeTitleRegex: nil, index: nil),
@@ -919,12 +1358,13 @@ final class ArrangeServiceTests: XCTestCase {
                 "scopedWork": LayoutDefinition(
                     initialFocus: nil,
                     spaces: [
-                        SpaceDefinition(spaceID: 1, display: nil, windows: [first]),
-                        SpaceDefinition(spaceID: 2, display: nil, windows: [second]),
+                        SpaceDefinition(spaceID: 1, display: virtualDisplay, windows: [first]),
+                        SpaceDefinition(spaceID: 2, display: virtualDisplay, windows: [second]),
                     ]
                 ),
             ],
-            shortcuts: nil
+            shortcuts: nil,
+            mode: mode
         )
     }
 
@@ -1044,6 +1484,7 @@ final class ArrangeServiceTests: XCTestCase {
         isFullscreen: Bool = false,
         frontIndex: Int = 0,
         spaceID: Int? = 1,
+        displayID: String = "display-1",
         profileDirectory: String? = nil
     ) -> WindowSnapshot {
         WindowSnapshot(
@@ -1057,7 +1498,7 @@ final class ArrangeServiceTests: XCTestCase {
             hidden: false,
             frame: ResolvedFrame(x: 0, y: 0, width: 100, height: 100),
             spaceID: spaceID,
-            displayID: "display-1",
+            displayID: displayID,
             profileDirectory: profileDirectory,
             isFullscreen: isFullscreen,
             frontIndex: frontIndex
@@ -1099,12 +1540,17 @@ private final class FakeArrangeDriver: ArrangeDriver {
     var spacesMode: SpacesMode? = .perDisplay
     var backendAvailableResult: (Bool, String?) = (true, nil)
     var sleepCalls: [Int] = []
+    var spacesResponse: [SpaceInfo] = []
 
     private var queryCount = 0
     private var setFrameCount = 0
 
     func displays() -> [DisplayInfo] {
         displaysResponse
+    }
+
+    func spaces() -> [SpaceInfo] {
+        spacesResponse
     }
 
     func queryWindows() -> [WindowSnapshot] {
