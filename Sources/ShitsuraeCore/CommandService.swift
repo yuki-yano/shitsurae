@@ -2695,7 +2695,10 @@ public final class CommandService {
                 )
             }
 
-            let windows = runtimeHooks.listWindowsOnAllSpaces().filter { window in
+            let windowsSource = includeAllSpaces
+                ? runtimeHooks.listWindowsOnAllSpaces()
+                : runtimeHooks.listWindows()
+            let windows = windowsSource.filter { window in
                 if window.isFullscreen || window.hidden {
                     return false
                 }

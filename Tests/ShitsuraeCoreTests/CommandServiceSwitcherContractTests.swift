@@ -426,9 +426,12 @@ final class CommandServiceSwitcherContractTests: CommandServiceContractTestCase 
             activeVirtualSpaceID: 2
         )
 
+        let currentSpaceWindows = [
+            Self.window(windowID: 801, bundleID: "com.apple.Notes", title: "Notes", spaceID: 7, frontIndex: 0),
+        ]
         let runtimeHooks = CommandServiceRuntimeHooks(
             accessibilityGranted: { true },
-            listWindows: { [] },
+            listWindows: { currentSpaceWindows },
             focusedWindow: { nil },
             activateBundle: { _ in true },
             setFocusedWindowFrame: { _ in true },
@@ -453,6 +456,80 @@ final class CommandServiceSwitcherContractTests: CommandServiceContractTestCase 
         XCTAssertEqual(payload.candidates.map(\.spaceID), [2])
         XCTAssertEqual(payload.candidates.map(\.slot), [2])
         XCTAssertEqual(payload.candidates.map(\.quickKey), ["a"])
+    }
+
+    func testSwitcherListVirtualCurrentSpaceIgnoresClosedWindowLeftInAllSpacesSnapshot() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.virtualSwitcherConfigYAML])
+        defer { workspace.cleanup() }
+
+        let stateStore = RuntimeStateStore(stateFileURL: workspace.stateFileURL)
+        stateStore.save(
+            slots: [
+                SlotEntry(
+                    layoutName: "work",
+                    slot: 1,
+                    source: .window,
+                    bundleID: "com.apple.TextEdit",
+                    definitionFingerprint: "slot-1",
+                    lastKnownTitle: "Editor",
+                    profile: nil,
+                    spaceID: 2,
+                    nativeSpaceID: 7,
+                    displayID: "display-a",
+                    windowID: 800
+                ),
+                SlotEntry(
+                    layoutName: "work",
+                    slot: 2,
+                    source: .window,
+                    bundleID: "com.yuki-yano.shitsurae",
+                    definitionFingerprint: "runtimeVirtualWorkspace\u{0}work\u{0}com.yuki-yano.shitsurae\u{0}Shitsurae\u{0}AXWindow\u{0}\u{0}",
+                    lastKnownTitle: "Shitsurae",
+                    profile: nil,
+                    spaceID: 2,
+                    nativeSpaceID: 7,
+                    displayID: "display-a",
+                    windowID: 999
+                ),
+            ],
+            stateMode: .virtual,
+            configGeneration: "generation-1",
+            activeLayoutName: "work",
+            activeVirtualSpaceID: 2
+        )
+
+        let currentSpaceWindows = [
+            Self.window(windowID: 800, bundleID: "com.apple.TextEdit", title: "Editor", spaceID: 7, frontIndex: 0),
+        ]
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: { currentSpaceWindows },
+            focusedWindow: { nil },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { _ in true },
+            displays: { [] },
+            runProcess: { _, _ in (0, "") },
+            spaces: { [] },
+            listWindowsOnAllSpaces: {
+                currentSpaceWindows + [
+                    Self.window(
+                        windowID: 999,
+                        bundleID: "com.yuki-yano.shitsurae",
+                        title: "Shitsurae",
+                        spaceID: 7,
+                        frontIndex: 1
+                    ),
+                ]
+            }
+        )
+        let service = workspace.makeService(stateStore: stateStore, runtimeHooks: runtimeHooks)
+
+        let result = service.switcherList(json: true, includeAllSpacesOverride: nil)
+        XCTAssertEqual(result.exitCode, 0)
+
+        let payload = try decode(SwitcherListJSON.self, from: result.stdout)
+        XCTAssertEqual(payload.candidates.map(\.id), ["window:800"])
+        XCTAssertEqual(payload.candidates.map(\.bundleID), ["com.apple.TextEdit"])
     }
 
     func testSwitcherListIncludeAllSpacesReturnsTrackedWindowsAcrossActiveLayoutInVirtualMode() throws {
