@@ -30,6 +30,8 @@ func slotEntry(
     SlotEntry(
         layoutName: entry.layoutName,
         slot: entry.slot,
+        layoutOriginSpaceID: entry.layoutOriginSpaceID,
+        layoutOriginSlot: entry.layoutOriginSlot,
         source: entry.source,
         bundleID: entry.bundleID,
         definitionFingerprint: entry.definitionFingerprint,
@@ -247,7 +249,7 @@ func resolveVirtualVisibleFrame(
         return layoutFrame
     }
 
-    if entry.slot >= CommandService.untrackedSlotOffset {
+    if shouldUseVirtualVisibleFrameFallback(entry: entry) {
         if let frame = entry.lastVisibleFrame,
            isWithinVisibleArea(frame: frame, hostDisplay: hostDisplay, displays: displays)
         {
@@ -260,6 +262,18 @@ func resolveVirtualVisibleFrame(
     }
 
     return nil
+}
+
+func shouldUseVirtualVisibleFrameFallback(entry: SlotEntry) -> Bool {
+    if entry.slot >= CommandService.untrackedSlotOffset {
+        return true
+    }
+
+    guard let layoutOriginSpaceID = entry.layoutOriginSpaceID else {
+        return false
+    }
+
+    return entry.spaceID != layoutOriginSpaceID
 }
 
 func isWithinVisibleArea(frame: ResolvedFrame, hostDisplay: DisplayInfo, displays: [DisplayInfo]) -> Bool {
@@ -286,9 +300,27 @@ func resolvedVirtualLayoutFrame(
     hostDisplay: DisplayInfo,
     displays: [DisplayInfo]
 ) -> ResolvedFrame? {
-    guard let targetSpaceID = entry.spaceID,
-          let space = layout.spaces.first(where: { $0.spaceID == targetSpaceID }),
-          let window = space.windows.first(where: { $0.slot == entry.slot })
+    let targetSpaceID: Int
+    let targetSlot: Int
+
+    if let layoutOriginSpaceID = entry.layoutOriginSpaceID,
+       let layoutOriginSlot = entry.layoutOriginSlot
+    {
+        guard entry.spaceID == layoutOriginSpaceID else {
+            return nil
+        }
+        targetSpaceID = layoutOriginSpaceID
+        targetSlot = layoutOriginSlot
+    } else {
+        guard let entrySpaceID = entry.spaceID else {
+            return nil
+        }
+        targetSpaceID = entrySpaceID
+        targetSlot = entry.slot
+    }
+
+    guard let space = layout.spaces.first(where: { $0.spaceID == targetSpaceID }),
+          let window = space.windows.first(where: { $0.slot == targetSlot })
     else {
         return nil
     }

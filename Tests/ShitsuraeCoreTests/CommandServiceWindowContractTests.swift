@@ -642,6 +642,233 @@ final class CommandServiceWindowContractTests: CommandServiceContractTestCase {
         XCTAssertEqual(positionCalls.first?.0, 901)
     }
 
+    func testMovedLayoutWindowCanSwitchToDestinationWorkspaceAndReturnToOriginSlotFrame() throws {
+        let workspace = try TestConfigWorkspace(files: [
+            "config.yaml": """
+            mode:
+              space: virtual
+            layouts:
+              work:
+                spaces:
+                  - spaceID: 1
+                    display:
+                      monitor: primary
+                    windows:
+                      - slot: 1
+                        launch: false
+                        match:
+                          bundleID: com.apple.TextEdit
+                        frame:
+                          x: "0%"
+                          y: "0%"
+                          width: "50%"
+                          height: "100%"
+                  - spaceID: 2
+                    display:
+                      monitor: primary
+                    windows:
+                      - slot: 1
+                        launch: false
+                        match:
+                          bundleID: com.apple.Notes
+                        frame:
+                          x: "50%"
+                          y: "0%"
+                          width: "50%"
+                          height: "100%"
+            """,
+        ])
+        defer { workspace.cleanup() }
+
+        let stateStore = RuntimeStateStore(stateFileURL: workspace.stateFileURL)
+        let customTextEditFrame = ResolvedFrame(x: 120, y: 100, width: 640, height: 420)
+        let notesFrame = ResolvedFrame(x: 800, y: 0, width: 800, height: 977)
+        stateStore.save(
+            slots: [
+                SlotEntry(
+                    layoutName: "work",
+                    slot: 1,
+                    layoutOriginSpaceID: 1,
+                    layoutOriginSlot: 1,
+                    source: .window,
+                    bundleID: "com.apple.TextEdit",
+                    definitionFingerprint: "slot-1-textedit",
+                    lastKnownTitle: "Editor",
+                    profile: nil,
+                    spaceID: 1,
+                    nativeSpaceID: 7,
+                    displayID: "display-a",
+                    windowID: 800,
+                    lastVisibleFrame: customTextEditFrame,
+                    visibilityState: .visible
+                ),
+                SlotEntry(
+                    layoutName: "work",
+                    slot: 1,
+                    layoutOriginSpaceID: 2,
+                    layoutOriginSlot: 1,
+                    source: .window,
+                    bundleID: "com.apple.Notes",
+                    definitionFingerprint: "slot-1-notes",
+                    lastKnownTitle: "Notes",
+                    profile: nil,
+                    spaceID: 2,
+                    nativeSpaceID: 7,
+                    displayID: "display-a",
+                    windowID: 801,
+                    lastVisibleFrame: notesFrame,
+                    lastHiddenFrame: ResolvedFrame(x: 1599, y: 0, width: 800, height: 977),
+                    visibilityState: .hiddenOffscreen
+                ),
+            ],
+            stateMode: .virtual,
+            configGeneration: "test",
+            activeLayoutName: "work",
+            activeVirtualSpaceID: 1,
+            revision: 10
+        )
+
+        var liveWindows: [WindowSnapshot] = [
+            WindowSnapshot(
+                windowID: 800,
+                bundleID: "com.apple.TextEdit",
+                pid: 800,
+                title: "Editor",
+                role: "AXWindow",
+                subrole: nil,
+                minimized: false,
+                hidden: false,
+                frame: customTextEditFrame,
+                spaceID: 7,
+                displayID: "display-a",
+                isFullscreen: false,
+                frontIndex: 0
+            ),
+            WindowSnapshot(
+                windowID: 801,
+                bundleID: "com.apple.Notes",
+                pid: 801,
+                title: "Notes",
+                role: "AXWindow",
+                subrole: nil,
+                minimized: false,
+                hidden: false,
+                frame: ResolvedFrame(x: 1599, y: 0, width: 800, height: 977),
+                spaceID: 7,
+                displayID: "display-a",
+                isFullscreen: false,
+                frontIndex: 1
+            ),
+        ]
+        var frameCalls: [(UInt32, ResolvedFrame)] = []
+        var positionCalls: [(UInt32, CGPoint)] = []
+
+        func updateLiveWindow(windowID: UInt32, frame: ResolvedFrame? = nil, minimized: Bool? = nil) {
+            guard let index = liveWindows.firstIndex(where: { $0.windowID == windowID }) else {
+                return
+            }
+            let current = liveWindows[index]
+            liveWindows[index] = WindowSnapshot(
+                windowID: current.windowID,
+                bundleID: current.bundleID,
+                pid: current.pid,
+                title: current.title,
+                role: current.role,
+                subrole: current.subrole,
+                minimized: minimized ?? current.minimized,
+                hidden: current.hidden,
+                frame: frame ?? current.frame,
+                spaceID: current.spaceID,
+                displayID: current.displayID,
+                profileDirectory: current.profileDirectory,
+                isFullscreen: current.isFullscreen,
+                frontIndex: current.frontIndex
+            )
+        }
+
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: { liveWindows },
+            focusedWindow: { liveWindows.first(where: { $0.windowID == 800 }) },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { _ in true },
+            displays: {
+                [
+                    DisplayInfo(
+                        id: "display-a",
+                        width: 3200,
+                        height: 2000,
+                        scale: 2.0,
+                        isPrimary: true,
+                        frame: CGRect(x: 0, y: 0, width: 1600, height: 1000),
+                        visibleFrame: CGRect(x: 0, y: 23, width: 1600, height: 977)
+                    ),
+                ]
+            },
+            runProcess: { _, _ in (0, "") },
+            focusWindow: { _, _ in .success },
+            setWindowMinimized: { _, _, _ in .success },
+            setWindowFrame: { windowID, _, frame in
+                frameCalls.append((windowID, frame))
+                updateLiveWindow(windowID: windowID, frame: frame, minimized: false)
+                return true
+            },
+            setWindowPosition: { windowID, _, position in
+                positionCalls.append((windowID, position))
+                let currentFrame = liveWindows.first(where: { $0.windowID == windowID })?.frame
+                updateLiveWindow(
+                    windowID: windowID,
+                    frame: ResolvedFrame(
+                        x: position.x,
+                        y: position.y,
+                        width: currentFrame?.width ?? 640,
+                        height: currentFrame?.height ?? 480
+                    )
+                )
+                return true
+            },
+            spaces: {
+                [
+                    SpaceInfo(spaceID: 7, displayID: "display-a", isVisible: true, isNativeFullscreen: false),
+                ]
+            },
+            listWindowsOnAllSpaces: { liveWindows }
+        )
+
+        let service = workspace.makeService(stateStore: stateStore, runtimeHooks: runtimeHooks)
+
+        let moveToWorkspace2 = service.windowWorkspace(spaceID: 2, json: true)
+        XCTAssertEqual(moveToWorkspace2.exitCode, 0)
+        XCTAssertEqual(try stateStore.loadStrict().slots.first(where: { $0.windowID == 800 })?.slot, 2)
+
+        let switchToWorkspace2 = service.spaceSwitch(spaceID: 2, json: true)
+        XCTAssertEqual(switchToWorkspace2.exitCode, 0)
+        XCTAssertTrue(frameCalls.contains(where: { $0.0 == 800 && $0.1 == customTextEditFrame }))
+        XCTAssertEqual(try stateStore.loadStrict().activeVirtualSpaceID, 2)
+
+        let moveBackToWorkspace1 = service.windowWorkspace(
+            target: WindowTargetSelector(windowID: 800, bundleID: nil, title: nil),
+            spaceID: 1,
+            json: true
+        )
+        XCTAssertEqual(moveBackToWorkspace1.exitCode, 0)
+        XCTAssertEqual(try stateStore.loadStrict().slots.first(where: { $0.windowID == 800 })?.slot, 1)
+
+        let switchBackToWorkspace1 = service.spaceSwitch(spaceID: 1, json: true)
+        XCTAssertEqual(switchBackToWorkspace1.exitCode, 0)
+
+        let expectedOriginLayoutFrame = ResolvedFrame(x: 0, y: 0, width: 800, height: 977)
+        XCTAssertTrue(frameCalls.contains(where: { $0.0 == 800 && $0.1 == expectedOriginLayoutFrame }))
+
+        let updated = try stateStore.loadStrict()
+        let textEditEntry = updated.slots.first(where: { $0.windowID == 800 })
+        XCTAssertEqual(updated.activeVirtualSpaceID, 1)
+        XCTAssertEqual(textEditEntry?.spaceID, 1)
+        XCTAssertEqual(textEditEntry?.slot, 1)
+        XCTAssertEqual(textEditEntry?.visibilityState, .visible)
+        XCTAssertFalse(positionCalls.isEmpty)
+    }
+
     func testRestoreVirtualWorkspaceWindowsForShutdownRestoresHiddenWindowsAndClearsActiveState() throws {
         let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.virtualMultiSpaceConfigYAML])
         defer { workspace.cleanup() }

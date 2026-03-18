@@ -34,6 +34,8 @@ public enum WindowStatusResolver {
         return SlotEntry(
             layoutName: entry.layoutName,
             slot: entry.slot,
+            layoutOriginSpaceID: entry.layoutOriginSpaceID,
+            layoutOriginSlot: entry.layoutOriginSlot,
             source: entry.source,
             bundleID: window.bundleID,
             definitionFingerprint: entry.definitionFingerprint,

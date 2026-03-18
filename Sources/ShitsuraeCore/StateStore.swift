@@ -123,6 +123,8 @@ public enum VirtualWindowVisibilityState: String, Codable, Equatable {
 public struct SlotEntry: Codable, Equatable {
     public let layoutName: String
     public let slot: Int
+    public let layoutOriginSpaceID: Int?
+    public let layoutOriginSlot: Int?
     public let source: WindowSource
     public let bundleID: String
     public let definitionFingerprint: String
@@ -151,6 +153,8 @@ public struct SlotEntry: Codable, Equatable {
     public init(
         layoutName: String = "__legacy__",
         slot: Int,
+        layoutOriginSpaceID: Int? = nil,
+        layoutOriginSlot: Int? = nil,
         source: WindowSource,
         bundleID: String,
         definitionFingerprint: String = "legacy",
@@ -175,6 +179,8 @@ public struct SlotEntry: Codable, Equatable {
     ) {
         self.layoutName = layoutName
         self.slot = slot
+        self.layoutOriginSpaceID = layoutOriginSpaceID
+        self.layoutOriginSlot = layoutOriginSlot
         self.source = source
         self.bundleID = bundleID
         self.definitionFingerprint = definitionFingerprint
@@ -224,6 +230,8 @@ public struct SlotEntry: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case layoutName
         case slot
+        case layoutOriginSpaceID
+        case layoutOriginSlot
         case source
         case bundleID
         case definitionFingerprint
@@ -251,6 +259,8 @@ public struct SlotEntry: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         layoutName = try container.decodeIfPresent(String.self, forKey: .layoutName) ?? "__legacy__"
         slot = try container.decode(Int.self, forKey: .slot)
+        layoutOriginSpaceID = try container.decodeIfPresent(Int.self, forKey: .layoutOriginSpaceID)
+        layoutOriginSlot = try container.decodeIfPresent(Int.self, forKey: .layoutOriginSlot)
         source = try container.decode(WindowSource.self, forKey: .source)
         bundleID = try container.decode(String.self, forKey: .bundleID)
         definitionFingerprint = try container.decodeIfPresent(String.self, forKey: .definitionFingerprint) ?? "legacy"
@@ -278,6 +288,8 @@ public struct SlotEntry: Codable, Equatable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(layoutName, forKey: .layoutName)
         try container.encode(slot, forKey: .slot)
+        try container.encodeIfPresent(layoutOriginSpaceID, forKey: .layoutOriginSpaceID)
+        try container.encodeIfPresent(layoutOriginSlot, forKey: .layoutOriginSlot)
         try container.encode(source, forKey: .source)
         try container.encode(bundleID, forKey: .bundleID)
         try container.encode(definitionFingerprint, forKey: .definitionFingerprint)

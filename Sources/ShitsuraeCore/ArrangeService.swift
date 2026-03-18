@@ -1147,6 +1147,8 @@ public final class ArrangeService {
         return SlotEntry(
             layoutName: isVirtualMode ? layoutName : "__legacy__",
             slot: window.slot,
+            layoutOriginSpaceID: isVirtualMode ? spaceID : nil,
+            layoutOriginSlot: isVirtualMode ? window.slot : nil,
             source: window.source ?? .window,
             bundleID: window.match.bundleID,
             definitionFingerprint: definitionFingerprint(layoutName: layoutName, spaceID: spaceID, window: window),
@@ -1189,6 +1191,8 @@ public final class ArrangeService {
         return SlotEntry(
             layoutName: isVirtualMode ? layoutName : "__legacy__",
             slot: window.slot,
+            layoutOriginSpaceID: isVirtualMode ? spaceID : nil,
+            layoutOriginSlot: isVirtualMode ? window.slot : nil,
             source: window.source ?? .window,
             bundleID: window.match.bundleID,
             definitionFingerprint: definitionFingerprint(layoutName: layoutName, spaceID: spaceID, window: window),

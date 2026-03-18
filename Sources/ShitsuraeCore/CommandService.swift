@@ -3057,6 +3057,15 @@ public final class CommandService {
                 .map(\.slot)
         )
 
+        if let existingEntry,
+           let layoutOriginSpaceID = effectiveLayoutOriginSpaceID(for: existingEntry),
+           let layoutOriginSlot = effectiveLayoutOriginSlot(for: existingEntry),
+           targetSpaceID == layoutOriginSpaceID,
+           !occupied.contains(layoutOriginSlot)
+        {
+            return layoutOriginSlot
+        }
+
         if let existingSlot = existingEntry?.slot, !occupied.contains(existingSlot) {
             return existingSlot
         }
@@ -3080,9 +3089,13 @@ public final class CommandService {
         window: WindowSnapshot
     ) -> SlotEntry {
         if let existingEntry {
+            let layoutOriginSpaceID = effectiveLayoutOriginSpaceID(for: existingEntry)
+            let layoutOriginSlot = effectiveLayoutOriginSlot(for: existingEntry)
             return SlotEntry(
                 layoutName: layoutName,
                 slot: slot,
+                layoutOriginSpaceID: layoutOriginSpaceID,
+                layoutOriginSlot: layoutOriginSlot,
                 source: existingEntry.source,
                 bundleID: existingEntry.bundleID,
                 definitionFingerprint: existingEntry.definitionFingerprint,
@@ -3101,7 +3114,8 @@ public final class CommandService {
                 windowID: window.windowID,
                 lastVisibleFrame: existingEntry.lastVisibleFrame,
                 lastHiddenFrame: existingEntry.lastHiddenFrame,
-                visibilityState: existingEntry.visibilityState
+                visibilityState: existingEntry.visibilityState,
+                lastActivatedAt: existingEntry.lastActivatedAt
             )
         }
 
@@ -3110,6 +3124,8 @@ public final class CommandService {
         return SlotEntry(
             layoutName: layoutName,
             slot: slot,
+            layoutOriginSpaceID: nil,
+            layoutOriginSlot: nil,
             source: .window,
             bundleID: window.bundleID,
             definitionFingerprint: runtimeVirtualWorkspaceFingerprint(layoutName: layoutName, window: window),
@@ -3130,6 +3146,26 @@ public final class CommandService {
             lastHiddenFrame: nil,
             visibilityState: .visible
         )
+    }
+
+    private func effectiveLayoutOriginSpaceID(for entry: SlotEntry) -> Int? {
+        if let layoutOriginSpaceID = entry.layoutOriginSpaceID {
+            return layoutOriginSpaceID
+        }
+        guard !isRuntimeManagedVirtualWorkspaceEntry(entry) else {
+            return nil
+        }
+        return entry.spaceID
+    }
+
+    private func effectiveLayoutOriginSlot(for entry: SlotEntry) -> Int? {
+        if let layoutOriginSlot = entry.layoutOriginSlot {
+            return layoutOriginSlot
+        }
+        guard !isRuntimeManagedVirtualWorkspaceEntry(entry) else {
+            return nil
+        }
+        return entry.slot
     }
 
     private func runtimeVirtualWorkspaceFingerprint(layoutName: String, window: WindowSnapshot) -> String {
