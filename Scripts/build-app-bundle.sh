@@ -146,8 +146,8 @@ cp "$BIN_DIR/$CLI_NAME" "$APP_RESOURCES_PATH/$BUNDLED_CLI_NAME"
 cp "$ROOT_DIR/Shitsurae/Info.plist" "$APP_PLIST_PATH"
 cp "$BIN_DIR/$AGENT_NAME" "$APP_RESOURCES_PATH/$AGENT_NAME"
 cp -R "$BIN_DIR/$CORE_BUNDLE_NAME" "$APP_RESOURCES_PATH/$CORE_BUNDLE_NAME"
-cp "$MENU_ICON_SOURCE_DIR/menu-16.png" "$APP_RESOURCES_PATH/menu-16.png"
-cp "$MENU_ICON_SOURCE_DIR/menu-32.png" "$APP_RESOURCES_PATH/menu-32.png"
+cp "$MENU_ICON_SOURCE_DIR/menu-22.png" "$APP_RESOURCES_PATH/menu-22.png"
+cp "$MENU_ICON_SOURCE_DIR/menu-44.png" "$APP_RESOURCES_PATH/menu-44.png"
 iconutil -c icns "$ICONSET_DIR" -o "$APP_RESOURCES_PATH/${ICON_NAME}.icns"
 
 /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $APP_NAME" "$APP_PLIST_PATH" 2>/dev/null || \

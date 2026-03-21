@@ -8,8 +8,7 @@ APP_ICONSET_DIR="$ASSETS_DIR/AppIcon.appiconset"
 MENU_ICONSET_DIR="$ASSETS_DIR/MenuBarIcon.imageset"
 
 SOURCE_APP_ICON="$ASSET_SOURCES_DIR/icon.png"
-SOURCE_MENU_16="$ASSET_SOURCES_DIR/menubar-icon-template-16.png"
-SOURCE_MENU_32="$ASSET_SOURCES_DIR/menubar-icon-template-32.png"
+SOURCE_MENU_ICON="$ASSET_SOURCES_DIR/menubar-icon-template.svg"
 
 mkdir -p "$APP_ICONSET_DIR" "$MENU_ICONSET_DIR"
 
@@ -18,8 +17,8 @@ if [[ ! -f "$SOURCE_APP_ICON" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$SOURCE_MENU_16" || ! -f "$SOURCE_MENU_32" ]]; then
-  echo "missing source: menubar icon templates" >&2
+if [[ ! -f "$SOURCE_MENU_ICON" ]]; then
+  echo "missing source: $SOURCE_MENU_ICON" >&2
   exit 1
 fi
 
@@ -45,8 +44,13 @@ for entry in "${ICONS[@]}"; do
   echo "generated $out"
 done
 
-cp "$SOURCE_MENU_16" "$MENU_ICONSET_DIR/menu-16.png"
-cp "$SOURCE_MENU_32" "$MENU_ICONSET_DIR/menu-32.png"
+for entry in "22:22" "44:44"; do
+  name="${entry%%:*}"
+  size="${entry##*:}"
+  out="$MENU_ICONSET_DIR/menu-${name}.png"
+  sips -s format png -z "$size" "$size" "$SOURCE_MENU_ICON" --out "$out" >/dev/null
+  echo "generated $out"
+done
 
 cat > "$APP_ICONSET_DIR/Contents.json" <<'JSON'
 {
@@ -72,8 +76,8 @@ JSON
 cat > "$MENU_ICONSET_DIR/Contents.json" <<'JSON'
 {
   "images" : [
-    { "filename" : "menu-16.png", "idiom" : "mac", "scale" : "1x" },
-    { "filename" : "menu-32.png", "idiom" : "mac", "scale" : "2x" }
+    { "filename" : "menu-22.png", "idiom" : "mac", "scale" : "1x" },
+    { "filename" : "menu-44.png", "idiom" : "mac", "scale" : "2x" }
   ],
   "info" : {
     "author" : "xcode",

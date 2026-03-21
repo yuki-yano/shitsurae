@@ -13,9 +13,9 @@ private func executeRemoteCommand(_ request: AgentCommandRequest) -> CommandResu
 }
 
 private let menuBarIconImage: NSImage = {
-    let image = NSImage(size: NSSize(width: 16, height: 16))
+    let image = NSImage(size: NSSize(width: 22, height: 22))
 
-    for fileName in ["menu-16.png", "menu-32.png"] {
+    for fileName in ["menu-22.png", "menu-44.png"] {
         guard let resourceURL = Bundle.main.resourceURL?.appendingPathComponent(fileName) else {
             continue
         }

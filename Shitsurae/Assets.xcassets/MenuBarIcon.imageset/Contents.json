@@ -1,7 +1,7 @@
 {
   "images" : [
-    { "filename" : "menu-16.png", "idiom" : "mac", "scale" : "1x" },
-    { "filename" : "menu-32.png", "idiom" : "mac", "scale" : "2x" }
+    { "filename" : "menu-22.png", "idiom" : "mac", "scale" : "1x" },
+    { "filename" : "menu-44.png", "idiom" : "mac", "scale" : "2x" }
   ],
   "info" : {
     "author" : "xcode",
