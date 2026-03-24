@@ -2521,6 +2521,10 @@ public final class CommandService {
         }
 
         if let windowID = normalizedTarget.windowID {
+            if let virtualFocusResult = focusVirtualTrackedWindowIfNeeded(windowID: windowID) {
+                return virtualFocusResult
+            }
+
             let windows = runtimeHooks.listWindows()
             guard let window = windows.first(where: { $0.windowID == windowID }) else {
                 return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
@@ -2633,6 +2637,165 @@ public final class CommandService {
         }
 
         return CommandResult(exitCode: 0)
+    }
+
+    private func focusVirtualTrackedWindowIfNeeded(windowID: UInt32) -> CommandResult? {
+        let persistedState = stateStore.load()
+        let loadedConfig = try? loadConfig(trigger: "manual")
+        let readContext = reconciledRuntimeStateForRead(state: persistedState, loadedConfig: loadedConfig)
+        let state = readContext.state
+        guard RuntimeStateReadResolver.effectiveSpaceInterpretationMode(
+            loadedConfig: loadedConfig,
+            state: state
+        ) == .virtual,
+              let activeLayoutName = state.activeLayoutName,
+              let activeSpaceID = state.activeVirtualSpaceID,
+              let trackedEntry = RuntimeStateReadResolver.slotEntriesForEffectiveMode(
+                  loadedConfig: loadedConfig,
+                  state: state
+              ).first(where: {
+                  $0.layoutName == activeLayoutName
+                      && $0.spaceID == activeSpaceID
+                      && $0.windowID == windowID
+              }),
+              trackedEntry.visibilityState == .hiddenOffscreen
+        else {
+            return nil
+        }
+
+        let requestID = UUID().uuidString.lowercased()
+
+        do {
+            return try withStateMutationLock(requestID: requestID) {
+                let lockedPreparation = loadLockedRuntimeStateMutationContext(
+                    requestID: requestID,
+                    json: false
+                )
+                let lockedContext: LockedRuntimeStateMutationContext
+                switch lockedPreparation {
+                case let .ready(context):
+                    lockedContext = context
+                case let .result(result):
+                    return result
+                }
+
+                let lockedState = lockedContext.readContext.state
+                guard RuntimeStateReadResolver.effectiveSpaceInterpretationMode(
+                    loadedConfig: lockedContext.loadedConfig,
+                    state: lockedState
+                ) == .virtual,
+                      let lockedLayoutName = lockedState.activeLayoutName,
+                      let lockedActiveSpaceID = lockedState.activeVirtualSpaceID,
+                      lockedLayoutName == activeLayoutName,
+                      lockedActiveSpaceID == activeSpaceID,
+                      let layout = RuntimeStateReadResolver.activeVirtualLayout(
+                          loadedConfig: lockedContext.loadedConfig,
+                          state: lockedState
+                      ),
+                      let entryIndex = lockedState.slots.firstIndex(where: {
+                          $0.layoutName == lockedLayoutName
+                              && $0.spaceID == lockedActiveSpaceID
+                              && $0.windowID == windowID
+                      })
+                else {
+                    return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
+                }
+
+                let entry = lockedState.slots[entryIndex]
+                guard entry.visibilityState == .hiddenOffscreen else {
+                    let windows = runtimeHooks.listWindows()
+                    guard let window = windows.first(where: { $0.windowID == windowID }) else {
+                        return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
+                    }
+                    guard runtimeHooks.focusWindow(window.windowID, window.bundleID).isSuccess else {
+                        return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
+                    }
+                    return CommandResult(exitCode: 0)
+                }
+
+                let windows = runtimeHooks.listWindowsOnAllSpaces()
+                guard let window = windows.first(where: { $0.windowID == windowID }) else {
+                    return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
+                }
+
+                let displays = runtimeHooks.displays()
+                guard let hostDisplay = resolveVirtualHostDisplay(
+                    layout: layout,
+                    config: lockedContext.loadedConfig?.config,
+                    focusedWindow: window,
+                    displays: displays,
+                    spaces: runtimeHooks.spaces()
+                ) ?? displays.first(where: \.isPrimary) ?? displays.first else {
+                    return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
+                }
+
+                guard let visibilityPlan = planVirtualVisibility(
+                    entry: entry,
+                    window: window,
+                    transition: .show,
+                    layout: layout,
+                    hostDisplay: hostDisplay,
+                    displays: displays
+                ),
+                applyVirtualVisibilityPlan(
+                    window: window,
+                    plan: visibilityPlan,
+                    hooks: runtimeHooks,
+                    logger: logger
+                ) else {
+                    return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
+                }
+
+                let focusResult = runtimeHooks.focusWindow(window.windowID, window.bundleID)
+                if !focusResult.isSuccess, !runtimeHooks.activateBundle(window.bundleID) {
+                    return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
+                }
+                _ = runtimeHooks.activateBundle(window.bundleID)
+
+                var updatedSlots = lockedState.slots
+                updatedSlots[entryIndex] = visibilityPlan.updatedEntry
+                updatedSlots = markVirtualActivatedWindow(
+                    window,
+                    in: updatedSlots,
+                    layoutName: lockedLayoutName,
+                    spaceID: lockedActiveSpaceID,
+                    activatedAt: runtimeHooks.now()
+                )
+
+                do {
+                    try stateStore.saveStrict(
+                        state: lockedState.with(
+                            updatedAt: Date.rfc3339UTC(),
+                            slots: updatedSlots
+                        ),
+                        expecting: RuntimeStateWriteExpectation(
+                            revision: lockedContext.persistedState.revision,
+                            configGeneration: lockedContext.persistedState.configGeneration
+                        )
+                    )
+                } catch {
+                    return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
+                }
+
+                return CommandResult(exitCode: 0)
+            }
+        } catch let error as VirtualSpaceStateMutationLockError {
+            return stateMutationLockBusyResult(
+                error,
+                event: "focus.window.busy",
+                message: "virtual focus mutation is busy",
+                requestID: requestID,
+                state: state,
+                loadedConfig: loadedConfig,
+                attemptedTargetSpaceID: activeSpaceID,
+                json: false
+            )
+        } catch {
+            return CommandResult(
+                exitCode: Int32(ErrorCode.validationError.rawValue),
+                stderr: error.localizedDescription + "\n"
+            )
+        }
     }
 
     public func shouldHandleFocusShortcut(slot: Int) -> Bool {
