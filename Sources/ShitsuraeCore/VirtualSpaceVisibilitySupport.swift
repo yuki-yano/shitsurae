@@ -1,6 +1,10 @@
 import CoreGraphics
 import Foundation
 
+private func virtualSwitchNowMS() -> Int {
+    Int(ProcessInfo.processInfo.systemUptime * 1000)
+}
+
 enum VirtualVisibilityTransition {
     case show
     case hide
@@ -158,7 +162,6 @@ func applyVirtualVisibilityPlan(
             break
         }
         guard hooks.setWindowFrame(window.windowID, window.bundleID, frame) else {
-            let actualWindow = hooks.listWindowsOnAllSpaces().first(where: { $0.windowID == window.windowID })
             logger.log(
                 level: "error",
                 event: "virtual.visibility.apply.failed",
@@ -173,16 +176,6 @@ func applyVirtualVisibilityPlan(
                         "width": frame.width,
                         "height": frame.height,
                     ],
-                    "actualFrame": actualWindow.map { actual in
-                        [
-                            "x": actual.frame.x,
-                            "y": actual.frame.y,
-                            "width": actual.frame.width,
-                            "height": actual.frame.height,
-                        ]
-                    } ?? NSNull(),
-                    "actualSpaceID": actualWindow?.spaceID as Any,
-                    "actualDisplayID": actualWindow?.displayID as Any,
                 ]
             )
             return false
@@ -195,7 +188,6 @@ func applyVirtualVisibilityPlan(
             break
         }
         guard hooks.setWindowPosition(window.windowID, window.bundleID, position) else {
-            let actualWindow = hooks.listWindowsOnAllSpaces().first(where: { $0.windowID == window.windowID })
             logger.log(
                 level: "error",
                 event: "virtual.visibility.apply.failed",
@@ -208,22 +200,6 @@ func applyVirtualVisibilityPlan(
                         "x": position.x,
                         "y": position.y,
                     ],
-                    "actualPosition": actualWindow.map { actual in
-                        [
-                            "x": actual.frame.x,
-                            "y": actual.frame.y,
-                        ]
-                    } ?? NSNull(),
-                    "actualFrame": actualWindow.map { actual in
-                        [
-                            "x": actual.frame.x,
-                            "y": actual.frame.y,
-                            "width": actual.frame.width,
-                            "height": actual.frame.height,
-                        ]
-                    } ?? NSNull(),
-                    "actualSpaceID": actualWindow?.spaceID as Any,
-                    "actualDisplayID": actualWindow?.displayID as Any,
                 ]
             )
             return false
@@ -447,12 +423,26 @@ func performVirtualSpaceSwitch(
             failedOperation: "hostDisplayResolve",
             rootCauseCategory: "virtualHostDisplayUnavailable",
             appliedChanges: [],
-            focusedTarget: nil
+            focusedTarget: nil,
+            frameMutationCount: 0,
+            positionMutationCount: 0,
+            profile: VirtualSwitchOperationProfile(
+                displaysLoadMS: 0,
+                targetPlanMS: 0,
+                showTargetsMS: 0,
+                hideOthersMS: 0,
+                focusMS: 0
+            )
         )
     }
 
+    let displaysStartMS = virtualSwitchNowMS()
     let displays = hooks.displays()
+    let displaysLoadMS = virtualSwitchNowMS() - displaysStartMS
     var appliedChanges: [AppliedVirtualVisibilityChange] = []
+    var frameMutationCount = 0
+    var positionMutationCount = 0
+    let targetPlanStartMS = virtualSwitchNowMS()
     let targetPlans: [(target: VirtualSwitchWindow, plan: VirtualVisibilityPlan)] =
         targets.sorted(by: virtualSwitchWindowOrdering).compactMap { target in
         guard let plan = planVirtualVisibility(
@@ -468,6 +458,7 @@ func performVirtualSpaceSwitch(
 
         return (target: target, plan: plan)
     }
+    let targetPlanMS = virtualSwitchNowMS() - targetPlanStartMS
 
     guard targetPlans.count == targets.count else {
         return VirtualSwitchOperationResult(
@@ -475,11 +466,29 @@ func performVirtualSpaceSwitch(
             failedOperation: "visibleFrameResolve",
             rootCauseCategory: "virtualVisibleFrameUnavailable",
             appliedChanges: [],
-            focusedTarget: nil
+            focusedTarget: nil,
+            frameMutationCount: 0,
+            positionMutationCount: 0,
+            profile: VirtualSwitchOperationProfile(
+                displaysLoadMS: displaysLoadMS,
+                targetPlanMS: targetPlanMS,
+                showTargetsMS: 0,
+                hideOthersMS: 0,
+                focusMS: 0
+            )
         )
     }
 
+    let showTargetsStartMS = virtualSwitchNowMS()
     for (target, plan) in targetPlans {
+        switch plan.mutation {
+        case .frame:
+            frameMutationCount += 1
+        case .position:
+            positionMutationCount += 1
+        case .none:
+            break
+        }
         let showSucceeded = applyVirtualVisibilityPlan(
             window: target.window,
             plan: plan,
@@ -504,12 +513,15 @@ func performVirtualSpaceSwitch(
                 window: target.window,
                 originalEntry: target.entry,
                 updatedEntry: effectiveEntry,
+                desiredEntry: plan.updatedEntry,
                 previousFrame: target.window.frame,
                 restoredFromMinimized: plan.restoreFromMinimized
             )
         )
     }
+    let showTargetsMS = virtualSwitchNowMS() - showTargetsStartMS
 
+    let hideOthersStartMS = virtualSwitchNowMS()
     for other in others.sorted(by: virtualSwitchWindowOrdering) {
         guard let plan = planVirtualVisibility(
             entry: other.entry,
@@ -520,6 +532,14 @@ func performVirtualSpaceSwitch(
             displays: displays
         ) else {
             continue
+        }
+        switch plan.mutation {
+        case .frame:
+            frameMutationCount += 1
+        case .position:
+            positionMutationCount += 1
+        case .none:
+            break
         }
         let hideSucceeded = applyVirtualVisibilityPlan(
             window: other.window,
@@ -545,14 +565,17 @@ func performVirtualSpaceSwitch(
                 window: other.window,
                 originalEntry: other.entry,
                 updatedEntry: effectiveEntry,
+                desiredEntry: plan.updatedEntry,
                 previousFrame: other.window.frame,
                 restoredFromMinimized: plan.restoreFromMinimized
             )
         )
     }
+    let hideOthersMS = virtualSwitchNowMS() - hideOthersStartMS
 
     let preferredFocusTarget = preferredVirtualFocusTarget(from: targets)
     var appliedFocusTarget: VirtualSwitchWindow?
+    let focusStartMS = virtualSwitchNowMS()
     if let focusTarget = preferredFocusTarget {
         let interactionResult = hooks.focusWindow(focusTarget.window.windowID, focusTarget.window.bundleID)
         if interactionResult.isSuccess || hooks.activateBundle(focusTarget.window.bundleID) {
@@ -569,12 +592,181 @@ func performVirtualSpaceSwitch(
             )
         }
     }
+    let focusMS = virtualSwitchNowMS() - focusStartMS
 
     return VirtualSwitchOperationResult(
         succeeded: true,
         failedOperation: nil,
         rootCauseCategory: nil,
         appliedChanges: appliedChanges,
-        focusedTarget: appliedFocusTarget
+        focusedTarget: appliedFocusTarget,
+        frameMutationCount: frameMutationCount,
+        positionMutationCount: positionMutationCount,
+        profile: VirtualSwitchOperationProfile(
+            displaysLoadMS: displaysLoadMS,
+            targetPlanMS: targetPlanMS,
+            showTargetsMS: showTargetsMS,
+            hideOthersMS: hideOthersMS,
+            focusMS: focusMS
+        )
     )
+}
+
+struct VirtualVisibilityConvergenceProfile {
+    let retryCount: Int
+    let verifyCount: Int
+}
+
+func resolveVirtualVisibilityConvergence(
+    changes: [AppliedVirtualVisibilityChange],
+    hooks: CommandServiceRuntimeHooks,
+    logger: ShitsuraeLogger,
+    retryDelaysMS: [Int]
+) -> (resolvedChanges: [AppliedVirtualVisibilityChange], hasPending: Bool, profile: VirtualVisibilityConvergenceProfile) {
+    guard !changes.isEmpty else {
+        return ([], false, VirtualVisibilityConvergenceProfile(retryCount: 0, verifyCount: 0))
+    }
+
+    var latestWindows = hooks.listWindowsOnAllSpaces()
+    var verifyCount = 1
+    var retryCount = 0
+    var pendingChanges = changes.filter { !virtualVisibilityMatchesDesiredState(change: $0, windows: latestWindows) }
+
+    for delayMS in retryDelaysMS where !pendingChanges.isEmpty {
+        retryCount += 1
+        retryVirtualVisibilityChanges(pendingChanges, hooks: hooks, logger: logger)
+        Thread.sleep(forTimeInterval: TimeInterval(delayMS) / 1000)
+        latestWindows = hooks.listWindowsOnAllSpaces()
+        verifyCount += 1
+        pendingChanges = changes.filter { !virtualVisibilityMatchesDesiredState(change: $0, windows: latestWindows) }
+    }
+
+    let unresolvedWindowIDs = Set(pendingChanges.map { $0.window.windowID })
+    let resolvedChanges = changes.map { change in
+        guard !unresolvedWindowIDs.contains(change.window.windowID) else {
+            return AppliedVirtualVisibilityChange(
+                window: change.window,
+                originalEntry: change.originalEntry,
+                updatedEntry: change.originalEntry,
+                desiredEntry: change.desiredEntry,
+                previousFrame: change.previousFrame,
+                restoredFromMinimized: change.restoredFromMinimized
+            )
+        }
+
+        return AppliedVirtualVisibilityChange(
+            window: change.window,
+            originalEntry: change.originalEntry,
+            updatedEntry: change.desiredEntry,
+            desiredEntry: change.desiredEntry,
+            previousFrame: change.previousFrame,
+            restoredFromMinimized: change.restoredFromMinimized
+        )
+    }
+
+    return (
+        resolvedChanges,
+        !pendingChanges.isEmpty,
+        VirtualVisibilityConvergenceProfile(
+            retryCount: retryCount,
+            verifyCount: verifyCount
+        )
+    )
+}
+
+private func virtualVisibilityMatchesDesiredState(
+    change: AppliedVirtualVisibilityChange,
+    windows: [WindowSnapshot]
+) -> Bool {
+    guard let actualWindow = windows.first(where: { $0.windowID == change.window.windowID }) else {
+        return false
+    }
+
+    switch change.desiredEntry.visibilityState {
+    case .visible:
+        guard !actualWindow.minimized else {
+            return false
+        }
+        if let expectedFrame = change.desiredEntry.lastVisibleFrame {
+            return virtualVisibilityFrameMatches(actualWindow.frame, expectedFrame)
+        }
+        return true
+    case .hiddenOffscreen:
+        if actualWindow.minimized || actualWindow.isFullscreen {
+            return true
+        }
+        guard let expectedFrame = change.desiredEntry.lastHiddenFrame else {
+            return false
+        }
+        return virtualVisibilityPositionMatches(actualWindow.frame, expectedFrame)
+    case nil:
+        return true
+    }
+}
+
+private func retryVirtualVisibilityChanges(
+    _ changes: [AppliedVirtualVisibilityChange],
+    hooks: CommandServiceRuntimeHooks,
+    logger: ShitsuraeLogger
+) {
+    for change in changes {
+        switch change.desiredEntry.visibilityState {
+        case .visible:
+            guard let frame = change.desiredEntry.lastVisibleFrame else {
+                continue
+            }
+            if !hooks.setWindowFrame(change.window.windowID, change.window.bundleID, frame) {
+                logger.log(
+                    level: "warn",
+                    event: "virtual.visibility.retry.failed",
+                    fields: [
+                        "windowID": Int(change.window.windowID),
+                        "bundleID": change.window.bundleID,
+                        "action": "show",
+                    ]
+                )
+            }
+        case .hiddenOffscreen:
+            guard let frame = change.desiredEntry.lastHiddenFrame else {
+                continue
+            }
+            if !hooks.setWindowPosition(
+                change.window.windowID,
+                change.window.bundleID,
+                CGPoint(x: frame.x, y: frame.y)
+            ) {
+                logger.log(
+                    level: "warn",
+                    event: "virtual.visibility.retry.failed",
+                    fields: [
+                        "windowID": Int(change.window.windowID),
+                        "bundleID": change.window.bundleID,
+                        "action": "hide",
+                    ]
+                )
+            }
+        case nil:
+            continue
+        }
+    }
+}
+
+private func virtualVisibilityFrameMatches(
+    _ actual: ResolvedFrame,
+    _ expected: ResolvedFrame,
+    tolerance: Double = 4
+) -> Bool {
+    abs(actual.x - expected.x) <= tolerance
+        && abs(actual.y - expected.y) <= tolerance
+        && abs(actual.width - expected.width) <= tolerance
+        && abs(actual.height - expected.height) <= tolerance
+}
+
+private func virtualVisibilityPositionMatches(
+    _ actual: ResolvedFrame,
+    _ expected: ResolvedFrame,
+    tolerance: Double = 4
+) -> Bool {
+    abs(actual.x - expected.x) <= tolerance
+        && abs(actual.y - expected.y) <= tolerance
 }

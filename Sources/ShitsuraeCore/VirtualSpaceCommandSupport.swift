@@ -15,6 +15,7 @@ struct AppliedVirtualVisibilityChange {
     let window: WindowSnapshot
     let originalEntry: SlotEntry
     let updatedEntry: SlotEntry
+    let desiredEntry: SlotEntry
     let previousFrame: ResolvedFrame
     let restoredFromMinimized: Bool
 }
@@ -25,6 +26,17 @@ struct VirtualSwitchOperationResult {
     let rootCauseCategory: String?
     let appliedChanges: [AppliedVirtualVisibilityChange]
     let focusedTarget: VirtualSwitchWindow?
+    let frameMutationCount: Int
+    let positionMutationCount: Int
+    let profile: VirtualSwitchOperationProfile
+}
+
+struct VirtualSwitchOperationProfile {
+    let displaysLoadMS: Int
+    let targetPlanMS: Int
+    let showTargetsMS: Int
+    let hideOthersMS: Int
+    let focusMS: Int
 }
 
 func uniqueSpaces(in layout: LayoutDefinition) -> [SpaceDefinition] {

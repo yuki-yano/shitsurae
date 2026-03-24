@@ -108,6 +108,28 @@ public struct PendingSwitchTransaction: Codable, Equatable {
     }
 }
 
+public struct PendingVisibilityConvergence: Codable, Equatable {
+    public let requestID: String
+    public let startedAt: String
+    public let layoutName: String
+    public let targetSpaceID: Int
+    public let unresolvedSlots: [PendingUnresolvedSlot]
+
+    public init(
+        requestID: String,
+        startedAt: String,
+        layoutName: String,
+        targetSpaceID: Int,
+        unresolvedSlots: [PendingUnresolvedSlot] = []
+    ) {
+        self.requestID = requestID
+        self.startedAt = startedAt
+        self.layoutName = layoutName
+        self.targetSpaceID = targetSpaceID
+        self.unresolvedSlots = unresolvedSlots
+    }
+}
+
 public enum PersistedTitleMatchKind: String, Codable, Equatable {
     case none
     case equals
@@ -322,6 +344,7 @@ public struct RuntimeState: Codable, Equatable {
     public let activeLayoutName: String?
     public let activeVirtualSpaceID: Int?
     public let pendingSwitchTransaction: PendingSwitchTransaction?
+    public let pendingVisibilityConvergence: PendingVisibilityConvergence?
     public let slots: [SlotEntry]
 
     public init(
@@ -333,6 +356,7 @@ public struct RuntimeState: Codable, Equatable {
         activeLayoutName: String? = nil,
         activeVirtualSpaceID: Int? = nil,
         pendingSwitchTransaction: PendingSwitchTransaction? = nil,
+        pendingVisibilityConvergence: PendingVisibilityConvergence? = nil,
         slots: [SlotEntry]
     ) {
         self.updatedAt = updatedAt
@@ -343,6 +367,7 @@ public struct RuntimeState: Codable, Equatable {
         self.activeLayoutName = activeLayoutName
         self.activeVirtualSpaceID = activeVirtualSpaceID
         self.pendingSwitchTransaction = pendingSwitchTransaction
+        self.pendingVisibilityConvergence = pendingVisibilityConvergence
         self.slots = slots
     }
 
@@ -355,6 +380,7 @@ public struct RuntimeState: Codable, Equatable {
         case activeLayoutName
         case activeVirtualSpaceID
         case pendingSwitchTransaction
+        case pendingVisibilityConvergence
         case slots
     }
 
@@ -368,6 +394,7 @@ public struct RuntimeState: Codable, Equatable {
         activeLayoutName = try container.decodeIfPresent(String.self, forKey: .activeLayoutName)
         activeVirtualSpaceID = try container.decodeIfPresent(Int.self, forKey: .activeVirtualSpaceID)
         pendingSwitchTransaction = try container.decodeIfPresent(PendingSwitchTransaction.self, forKey: .pendingSwitchTransaction)
+        pendingVisibilityConvergence = try container.decodeIfPresent(PendingVisibilityConvergence.self, forKey: .pendingVisibilityConvergence)
         slots = try container.decodeIfPresent([SlotEntry].self, forKey: .slots) ?? []
     }
 }
@@ -400,6 +427,7 @@ extension RuntimeState {
             activeLayoutName: activeLayoutName,
             activeVirtualSpaceID: activeVirtualSpaceID,
             pendingSwitchTransaction: pendingSwitchTransaction,
+            pendingVisibilityConvergence: pendingVisibilityConvergence,
             slots: slots ?? self.slots
         )
     }
@@ -413,6 +441,7 @@ extension RuntimeState {
         layoutName: String,
         spaceID: Int?,
         pendingSwitchTransaction: PendingSwitchTransaction? = nil,
+        pendingVisibilityConvergence: PendingVisibilityConvergence? = nil,
         slots: [SlotEntry]? = nil
     ) -> RuntimeState {
         RuntimeState(
@@ -424,6 +453,7 @@ extension RuntimeState {
             activeLayoutName: layoutName,
             activeVirtualSpaceID: spaceID,
             pendingSwitchTransaction: pendingSwitchTransaction,
+            pendingVisibilityConvergence: pendingVisibilityConvergence,
             slots: slots ?? self.slots
         )
     }
@@ -435,6 +465,7 @@ extension RuntimeState {
         configGeneration: String? = nil,
         liveArrangeRecoveryRequired: Bool? = nil,
         pendingSwitchTransaction: PendingSwitchTransaction? = nil,
+        pendingVisibilityConvergence: PendingVisibilityConvergence? = nil,
         slots: [SlotEntry]? = nil
     ) -> RuntimeState {
         RuntimeState(
@@ -446,6 +477,7 @@ extension RuntimeState {
             activeLayoutName: nil,
             activeVirtualSpaceID: nil,
             pendingSwitchTransaction: pendingSwitchTransaction,
+            pendingVisibilityConvergence: pendingVisibilityConvergence,
             slots: slots ?? self.slots
         )
     }
@@ -583,6 +615,7 @@ public final class RuntimeStateStore {
         activeVirtualSpaceID: Int? = nil,
         revision: UInt64 = 0,
         pendingSwitchTransaction: PendingSwitchTransaction? = nil,
+        pendingVisibilityConvergence: PendingVisibilityConvergence? = nil,
         expecting expectation: RuntimeStateWriteExpectation? = nil
     ) throws {
         try saveStrict(
@@ -595,6 +628,7 @@ public final class RuntimeStateStore {
                 activeLayoutName: activeLayoutName,
                 activeVirtualSpaceID: activeVirtualSpaceID,
                 pendingSwitchTransaction: pendingSwitchTransaction,
+                pendingVisibilityConvergence: pendingVisibilityConvergence,
                 slots: slots
             ),
             expecting: expectation
@@ -609,7 +643,8 @@ public final class RuntimeStateStore {
         activeLayoutName: String? = nil,
         activeVirtualSpaceID: Int? = nil,
         revision: UInt64 = 0,
-        pendingSwitchTransaction: PendingSwitchTransaction? = nil
+        pendingSwitchTransaction: PendingSwitchTransaction? = nil,
+        pendingVisibilityConvergence: PendingVisibilityConvergence? = nil
     ) {
         try? saveStrict(
             state: RuntimeState(
@@ -621,6 +656,7 @@ public final class RuntimeStateStore {
                 activeLayoutName: activeLayoutName,
                 activeVirtualSpaceID: activeVirtualSpaceID,
                 pendingSwitchTransaction: pendingSwitchTransaction,
+                pendingVisibilityConvergence: pendingVisibilityConvergence,
                 slots: slots
             ),
             expecting: nil

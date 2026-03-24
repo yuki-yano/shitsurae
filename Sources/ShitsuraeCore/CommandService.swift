@@ -107,10 +107,16 @@ public struct CommandServiceRuntimeHooks: @unchecked Sendable {
 public final class CommandService {
     public static let bundledSupportedBuildCatalogURL = BundledResourceLocator.supportedBuildCatalogURL()
     static let virtualSpaceCriticalSectionTimeoutMS = 10_000
+    static let virtualVisibilitySwitchRetryDelaysMS: [Int] = []
+    static let virtualVisibilityRetryDelaysMS = [60]
 
     private struct WatchStatus {
         let debounceMs: Int
         let watcherRunning: Bool
+    }
+
+    private static func profileNowMS() -> Int {
+        Int(ProcessInfo.processInfo.systemUptime * 1000)
     }
 
     private let configLoader: ConfigLoader
@@ -1009,6 +1015,7 @@ public final class CommandService {
         case .virtual:
             do {
                 return try withStateMutationLock(requestID: requestID) {
+                    let prepareStartMS = Self.profileNowMS()
                     switch prepareVirtualSpaceSwitch(
                         requestID: requestID,
                         targetSpaceID: spaceID,
@@ -1018,6 +1025,8 @@ public final class CommandService {
                     case let .result(result):
                         return result
                     case let .ready(context):
+                        let prepareDurationMS = Self.profileNowMS() - prepareStartMS
+                        let operationStartMS = Self.profileNowMS()
                         let operation = performVirtualSpaceSwitch(
                         targets: context.resolvedTargets,
                         others: context.resolvedOthers,
@@ -1026,12 +1035,19 @@ public final class CommandService {
                         hooks: runtimeHooks,
                         logger: logger
                     )
+                        let operationDurationMS = Self.profileNowMS() - operationStartMS
                         return finalizeVirtualSpaceSwitch(
                             context: context,
                             targetSpaceID: spaceID,
                             requestID: requestID,
                             json: json,
-                            operation: operation
+                            operation: operation,
+                            profile: VirtualSpaceSwitchProfile(
+                                prepareDurationMS: prepareDurationMS,
+                                operationDurationMS: operationDurationMS,
+                                verifyDurationMS: 0,
+                                saveDurationMS: 0
+                            )
                         )
                     }
                 }
@@ -1341,6 +1357,12 @@ public final class CommandService {
 
         let previousSpaceID = lockedState.activeVirtualSpaceID
         let didChangeSpace = previousSpaceID != targetSpaceID
+        let shouldAutoReconcilePendingVisibility =
+            !reconcile
+            && !didChangeSpace
+            && lockedState.pendingVisibilityConvergence?.layoutName == layoutName
+            && lockedState.pendingVisibilityConvergence?.targetSpaceID == targetSpaceID
+        let effectiveReconcile = reconcile || shouldAutoReconcilePendingVisibility
         logger.log(
             event: "space.switch.started",
             fields: [
@@ -1349,12 +1371,12 @@ public final class CommandService {
                 "previousSpaceID": previousSpaceID as Any,
                 "targetSpaceID": targetSpaceID,
                 "didChangeSpace": didChangeSpace,
-                "reconcile": reconcile,
+                "reconcile": effectiveReconcile,
             ]
         )
 
-        let windows = runtimeHooks.listWindowsOnAllSpaces()
-        if !didChangeSpace && !reconcile {
+        let allWindows = runtimeHooks.listWindowsOnAllSpaces()
+        if !didChangeSpace && !effectiveReconcile {
             return .result(noopSpaceSwitchResult(
                 requestID: requestID,
                 layoutName: layoutName,
@@ -1362,7 +1384,7 @@ public final class CommandService {
                 targetSpaceID: targetSpaceID,
                 previousSpaceID: previousSpaceID,
                 state: lockedState,
-                windows: windows,
+                windows: allWindows,
                 json: json
             ))
         }
@@ -1386,21 +1408,38 @@ public final class CommandService {
             ))
         }
 
+        let needsHostDisplayPreflight = requiresVirtualHostDisplayPreflight(
+            didChangeSpace: didChangeSpace,
+            reconcile: effectiveReconcile
+        )
+        let focusedWindow = (previousSpaceID != nil || needsHostDisplayPreflight)
+            ? runtimeHooks.focusedWindow()
+            : nil
+        let onScreenWindows = runtimeHooks.listWindows()
+        let displays = needsHostDisplayPreflight ? runtimeHooks.displays() : []
+        let spaces = needsHostDisplayPreflight ? runtimeHooks.spaces() : []
+        let executionContext = VirtualSpaceSwitchExecutionContext(
+            displays: displays,
+            spaces: spaces,
+            allWindows: allWindows,
+            onScreenWindows: onScreenWindows,
+            focusedWindow: focusedWindow
+        )
+
         let hostDisplay: DisplayInfo?
-        if requiresVirtualHostDisplayPreflight(didChangeSpace: didChangeSpace, reconcile: reconcile) {
-            let displays = runtimeHooks.displays()
+        if needsHostDisplayPreflight {
             hostDisplay = resolveVirtualHostDisplay(
                 layout: layout,
                 config: lockedLoadedConfig?.config,
-                focusedWindow: runtimeHooks.focusedWindow(),
-                displays: displays,
-                spaces: runtimeHooks.spaces()
-            ) ?? displays.first(where: \.isPrimary) ?? displays.first
+                focusedWindow: executionContext.focusedWindow,
+                displays: executionContext.displays,
+                spaces: executionContext.spaces
+            ) ?? executionContext.displays.first(where: \.isPrimary) ?? executionContext.displays.first
         } else {
             hostDisplay = nil
         }
 
-        if requiresVirtualHostDisplayPreflight(didChangeSpace: didChangeSpace, reconcile: reconcile),
+        if needsHostDisplayPreflight,
            hostDisplay == nil
         {
             return .result(spaceSwitchError(
@@ -1422,14 +1461,15 @@ public final class CommandService {
             layoutName: layoutName,
             previousSpaceID: previousSpaceID,
             targetSpaceID: targetSpaceID,
-            state: lockedState
+            state: lockedState,
+            executionContext: executionContext
         )
         let resolvedWindows = resolveSpaceSwitchWindows(
             requestID: requestID,
             targetSpaceID: targetSpaceID,
             layoutName: layoutName,
             slots: slotsWithAdopted,
-            windows: windows
+            windows: executionContext.allWindows
         )
 
         return .ready(VirtualSpaceSwitchContext(
@@ -1443,10 +1483,11 @@ public final class CommandService {
             previousSpaceID: previousSpaceID,
             didChangeSpace: didChangeSpace,
             hostDisplay: hostDisplay,
-            windows: windows,
+            windows: executionContext.allWindows,
             slotsWithAdopted: slotsWithAdopted,
             resolvedTargets: resolvedWindows.targets,
             resolvedOthers: resolvedWindows.others,
+            unresolvedTargetSlots: resolvedWindows.unresolvedTargetSlots,
             configGeneration: lockedLoadedConfig?.configGeneration ?? lockedState.configGeneration
         ))
     }
@@ -1491,11 +1532,12 @@ public final class CommandService {
         layoutName: String,
         previousSpaceID: Int?,
         targetSpaceID: Int,
-        state: RuntimeState
+        state: RuntimeState,
+        executionContext: VirtualSpaceSwitchExecutionContext
     ) -> [SlotEntry] {
         let slotsWithUpdatedActivation: [SlotEntry]
         if let previousSpaceID,
-           let focusedWindow = runtimeHooks.focusedWindow()
+           let focusedWindow = executionContext.focusedWindow
         {
             slotsWithUpdatedActivation = markVirtualActivatedWindow(
                 focusedWindow,
@@ -1511,7 +1553,7 @@ public final class CommandService {
         let slotsWithPrunedRuntimeManagedWindows = pruneGoneRuntimeManagedWindows(
             slots: slotsWithUpdatedActivation,
             layoutName: layoutName,
-            windows: runtimeHooks.listWindowsOnAllSpaces()
+            windows: executionContext.allWindows
         )
         let prunedCount = slotsWithUpdatedActivation.count - slotsWithPrunedRuntimeManagedWindows.count
         if prunedCount > 0 {
@@ -1527,7 +1569,7 @@ public final class CommandService {
 
         let currentAdoptSpaceID = previousSpaceID ?? targetSpaceID
         let adoptedEntries = adoptUntrackedWindows(
-            windows: runtimeHooks.listWindows(),
+            windows: executionContext.onScreenWindows,
             existingSlots: slotsWithPrunedRuntimeManagedWindows,
             layoutName: layoutName,
             targetSpaceID: currentAdoptSpaceID
@@ -1553,24 +1595,24 @@ public final class CommandService {
         layoutName: String,
         slots: [SlotEntry],
         windows: [WindowSnapshot]
-    ) -> (targets: [VirtualSwitchWindow], others: [VirtualSwitchWindow]) {
+    ) -> (targets: [VirtualSwitchWindow], others: [VirtualSwitchWindow], unresolvedTargetSlots: [PendingUnresolvedSlot]) {
         let trackedEntries = slots.filter { $0.layoutName == layoutName }
         let targetEntries = trackedEntries.filter { $0.spaceID == targetSpaceID }
         let otherEntries = trackedEntries.filter { $0.spaceID != targetSpaceID }
         let resolvedTargets = targetEntries.compactMap { resolveVirtualSwitchWindow(entry: $0, windows: windows) }
+        let unresolvedSlots = targetEntries.compactMap { entry -> PendingUnresolvedSlot? in
+            let resolvedFingerprints = Set(resolvedTargets.map(\.entry.definitionFingerprint))
+            guard !resolvedFingerprints.contains(entry.definitionFingerprint) else {
+                return nil
+            }
+            return PendingUnresolvedSlot(
+                slot: entry.slot,
+                spaceID: entry.spaceID ?? targetSpaceID,
+                reason: "trackedWindowNotResolved"
+            )
+        }
 
         if resolvedTargets.count != targetEntries.count {
-            let resolvedFingerprints = Set(resolvedTargets.map(\.entry.definitionFingerprint))
-            let unresolvedSlots = targetEntries.compactMap { entry -> PendingUnresolvedSlot? in
-                guard !resolvedFingerprints.contains(entry.definitionFingerprint) else {
-                    return nil
-                }
-                return PendingUnresolvedSlot(
-                    slot: entry.slot,
-                    spaceID: entry.spaceID ?? targetSpaceID,
-                    reason: "trackedWindowNotResolved"
-                )
-            }
             logger.log(
                 level: "warn",
                 event: "space.switch.unresolvedSlots",
@@ -1587,7 +1629,7 @@ public final class CommandService {
         let resolvedOthersRaw = otherEntries.compactMap { resolveVirtualSwitchWindow(entry: $0, windows: windows) }
         let targetWindowIDs = Set(resolvedTargets.map(\.window.windowID))
         let resolvedOthers = resolvedOthersRaw.filter { !targetWindowIDs.contains($0.window.windowID) }
-        return (resolvedTargets, resolvedOthers)
+        return (resolvedTargets, resolvedOthers, unresolvedSlots)
     }
 
     private func finalizeVirtualSpaceSwitch(
@@ -1595,11 +1637,23 @@ public final class CommandService {
         targetSpaceID: Int,
         requestID: String,
         json: Bool,
-        operation: VirtualSwitchOperationResult
+        operation: VirtualSwitchOperationResult,
+        profile: VirtualSpaceSwitchProfile
     ) -> CommandResult {
         let action = context.didChangeSpace ? "switch" : "reconcile"
+        let retryDelaysMS = context.didChangeSpace
+            ? Self.virtualVisibilitySwitchRetryDelaysMS
+            : Self.virtualVisibilityRetryDelaysMS
+        let verifyStartMS = Self.profileNowMS()
+        let convergence = resolveVirtualVisibilityConvergence(
+            changes: operation.appliedChanges,
+            hooks: runtimeHooks,
+            logger: logger,
+            retryDelaysMS: retryDelaysMS
+        )
+        let verifyDurationMS = Self.profileNowMS() - verifyStartMS
         var nextSlots = applyVirtualVisibilityChanges(
-            operation.appliedChanges,
+            convergence.resolvedChanges,
             to: context.slotsWithAdopted
         )
         nextSlots = markVirtualActivatedWindow(
@@ -1609,6 +1663,18 @@ public final class CommandService {
             spaceID: targetSpaceID,
             activatedAt: runtimeHooks.now()
         )
+        let pendingVisibilityConvergence: PendingVisibilityConvergence?
+        if convergence.hasPending || !context.unresolvedTargetSlots.isEmpty {
+            pendingVisibilityConvergence = PendingVisibilityConvergence(
+                requestID: requestID,
+                startedAt: Date.rfc3339UTC(),
+                layoutName: context.layoutName,
+                targetSpaceID: targetSpaceID,
+                unresolvedSlots: context.unresolvedTargetSlots
+            )
+        } else {
+            pendingVisibilityConvergence = nil
+        }
         let nextState = context.state.withActiveVirtualContext(
             updatedAt: Date.rfc3339UTC(),
             revision: context.state.revision + (context.didChangeSpace ? 1 : 0),
@@ -1617,9 +1683,11 @@ public final class CommandService {
             liveArrangeRecoveryRequired: false,
             layoutName: context.layoutName,
             spaceID: targetSpaceID,
+            pendingVisibilityConvergence: pendingVisibilityConvergence,
             slots: nextSlots
         )
 
+        let saveStartMS = Self.profileNowMS()
         do {
             try stateStore.saveStrict(
                 state: nextState,
@@ -1649,6 +1717,7 @@ public final class CommandService {
                 rootCauseCategory: runtimeStateWriteRootCause(error)
             )
         }
+        let saveDurationMS = Self.profileNowMS() - saveStartMS
 
         logger.log(
             event: "space.switch.completed",
@@ -1662,9 +1731,48 @@ public final class CommandService {
                 "action": action,
                 "targetCount": context.resolvedTargets.count,
                 "otherCount": context.resolvedOthers.count,
+                "retryCount": convergence.profile.retryCount,
+                "retryVerifyCount": convergence.profile.verifyCount,
+                "frameMutationCount": operation.frameMutationCount,
+                "positionMutationCount": operation.positionMutationCount,
+                "unresolvedTargetSlotCount": context.unresolvedTargetSlots.count,
+                "prepareDurationMS": profile.prepareDurationMS,
+                "operationDurationMS": profile.operationDurationMS,
+                "operationDisplaysLoadMS": operation.profile.displaysLoadMS,
+                "operationTargetPlanMS": operation.profile.targetPlanMS,
+                "operationShowTargetsMS": operation.profile.showTargetsMS,
+                "operationHideOthersMS": operation.profile.hideOthersMS,
+                "operationFocusMS": operation.profile.focusMS,
+                "verifyDurationMS": verifyDurationMS,
+                "saveDurationMS": saveDurationMS,
+                "hasPendingVisibilityConvergence": pendingVisibilityConvergence != nil,
                 "focusedWindowID": operation.focusedTarget?.window.windowID as Any,
             ]
         )
+
+        if let pendingVisibilityConvergence {
+            logger.log(
+                level: "warn",
+                event: "space.switch.visibility.pending",
+                fields: [
+                    "requestID": requestID,
+                    "layoutName": context.layoutName,
+                    "targetSpaceID": targetSpaceID,
+                    "retryCount": convergence.profile.retryCount,
+                    "retryVerifyCount": convergence.profile.verifyCount,
+                    "frameMutationCount": operation.frameMutationCount,
+                    "positionMutationCount": operation.positionMutationCount,
+                    "prepareDurationMS": profile.prepareDurationMS,
+                    "operationDurationMS": profile.operationDurationMS,
+                    "operationShowTargetsMS": operation.profile.showTargetsMS,
+                    "operationHideOthersMS": operation.profile.hideOthersMS,
+                    "operationFocusMS": operation.profile.focusMS,
+                    "verifyDurationMS": verifyDurationMS,
+                    "saveDurationMS": saveDurationMS,
+                    "unresolvedSlotCount": pendingVisibilityConvergence.unresolvedSlots.count,
+                ]
+            )
+        }
 
         let payload = SpaceSwitchJSON(
             requestID: requestID,
@@ -1778,6 +1886,7 @@ public final class CommandService {
                 activeLayoutName: state.activeLayoutName,
                 activeVirtualSpaceID: state.activeVirtualSpaceID,
                 revision: state.revision,
+                pendingVisibilityConvergence: state.pendingVisibilityConvergence,
                 expecting: RuntimeStateWriteExpectation(
                     revision: state.revision,
                     configGeneration: state.configGeneration
@@ -1817,6 +1926,17 @@ public final class CommandService {
             )
         }
         return adoptedCount
+    }
+
+    @discardableResult
+    public func reconcilePendingVirtualVisibilityIfNeeded() -> Bool {
+        let state = stateStore.load()
+        guard state.stateMode == .virtual,
+              let pending = state.pendingVisibilityConvergence
+        else { return false }
+
+        let result = spaceSwitch(spaceID: pending.targetSpaceID, json: true, reconcile: true)
+        return result.exitCode == 0
     }
 
     public func restoreVirtualWorkspaceWindowsForShutdown() -> CommandResult {
@@ -3310,7 +3430,8 @@ public final class CommandService {
                 liveArrangeRecoveryRequired: state.liveArrangeRecoveryRequired,
                 activeLayoutName: state.activeLayoutName,
                 activeVirtualSpaceID: state.activeVirtualSpaceID,
-                revision: state.revision
+                revision: state.revision,
+                pendingVisibilityConvergence: state.pendingVisibilityConvergence
             )
             logger.log(
                 event: "arrange.restoredHiddenWindows",
@@ -4097,6 +4218,21 @@ private struct VirtualSpaceRecoveryContext {
     let warning: String
 }
 
+private struct VirtualSpaceSwitchProfile {
+    let prepareDurationMS: Int
+    let operationDurationMS: Int
+    let verifyDurationMS: Int
+    let saveDurationMS: Int
+}
+
+private struct VirtualSpaceSwitchExecutionContext {
+    let displays: [DisplayInfo]
+    let spaces: [SpaceInfo]
+    let allWindows: [WindowSnapshot]
+    let onScreenWindows: [WindowSnapshot]
+    let focusedWindow: WindowSnapshot?
+}
+
 struct VirtualSpaceSwitchContext {
     let persistedState: RuntimeState
     let loadedConfig: LoadedConfig?
@@ -4112,6 +4248,7 @@ struct VirtualSpaceSwitchContext {
     let slotsWithAdopted: [SlotEntry]
     let resolvedTargets: [VirtualSwitchWindow]
     let resolvedOthers: [VirtualSwitchWindow]
+    let unresolvedTargetSlots: [PendingUnresolvedSlot]
     let configGeneration: String
 }
 

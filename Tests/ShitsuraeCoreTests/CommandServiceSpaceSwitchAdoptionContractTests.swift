@@ -51,7 +51,7 @@ final class CommandServiceSpaceSwitchAdoptionContractTests: CommandServiceContra
         )
 
         var positionCalls: [(UInt32, CGPoint)] = []
-        let onScreenWindows = [
+        var onScreenWindows = [
             Self.window(windowID: 800, bundleID: "com.apple.TextEdit", title: "Editor", spaceID: 7, frontIndex: 0),
             Self.window(windowID: 801, bundleID: "com.apple.Notes", title: "Notes", spaceID: 7, frontIndex: 1),
             // Untracked window — should be adopted into workspace 1
@@ -83,6 +83,31 @@ final class CommandServiceSpaceSwitchAdoptionContractTests: CommandServiceContra
             setWindowFrame: { _, _, _ in true },
             setWindowPosition: { windowID, _, position in
                 positionCalls.append((windowID, position))
+                guard let index = onScreenWindows.firstIndex(where: { $0.windowID == windowID }) else {
+                    return false
+                }
+                let existing = onScreenWindows[index]
+                onScreenWindows[index] = WindowSnapshot(
+                    windowID: existing.windowID,
+                    bundleID: existing.bundleID,
+                    pid: existing.pid,
+                    title: existing.title,
+                    role: existing.role,
+                    subrole: existing.subrole,
+                    minimized: existing.minimized,
+                    hidden: existing.hidden,
+                    frame: ResolvedFrame(
+                        x: position.x,
+                        y: position.y,
+                        width: existing.frame.width,
+                        height: existing.frame.height
+                    ),
+                    spaceID: existing.spaceID,
+                    displayID: existing.displayID,
+                    profileDirectory: existing.profileDirectory,
+                    isFullscreen: existing.isFullscreen,
+                    frontIndex: existing.frontIndex
+                )
                 return true
             },
             spaces: {
@@ -250,6 +275,11 @@ final class CommandServiceSpaceSwitchAdoptionContractTests: CommandServiceContra
         )
 
         var frameCalls: [(UInt32, ResolvedFrame)] = []
+        var liveWindows = [
+            Self.window(windowID: 800, bundleID: "com.apple.TextEdit", title: "Editor", spaceID: 7, frontIndex: 0),
+            Self.window(windowID: 801, bundleID: "com.apple.Notes", title: "Notes", spaceID: 7, frontIndex: 1),
+            Self.window(windowID: 900, bundleID: "com.apple.Finder", title: "Desktop", spaceID: 7, frontIndex: 2),
+        ]
         let runtimeHooks = CommandServiceRuntimeHooks(
             accessibilityGranted: { true },
             listWindows: { [] },
@@ -273,19 +303,33 @@ final class CommandServiceSpaceSwitchAdoptionContractTests: CommandServiceContra
             focusWindow: { _, _ in .success },
             setWindowFrame: { windowID, _, frame in
                 frameCalls.append((windowID, frame))
+                guard let index = liveWindows.firstIndex(where: { $0.windowID == windowID }) else {
+                    return false
+                }
+                let existing = liveWindows[index]
+                liveWindows[index] = WindowSnapshot(
+                    windowID: existing.windowID,
+                    bundleID: existing.bundleID,
+                    pid: existing.pid,
+                    title: existing.title,
+                    role: existing.role,
+                    subrole: existing.subrole,
+                    minimized: existing.minimized,
+                    hidden: existing.hidden,
+                    frame: frame,
+                    spaceID: existing.spaceID,
+                    displayID: existing.displayID,
+                    profileDirectory: existing.profileDirectory,
+                    isFullscreen: existing.isFullscreen,
+                    frontIndex: existing.frontIndex
+                )
                 return true
             },
             setWindowPosition: { _, _, _ in true },
             spaces: {
                 [SpaceInfo(spaceID: 7, displayID: "display-a", isVisible: true, isNativeFullscreen: false)]
             },
-            listWindowsOnAllSpaces: {
-                [
-                    Self.window(windowID: 800, bundleID: "com.apple.TextEdit", title: "Editor", spaceID: 7, frontIndex: 0),
-                    Self.window(windowID: 801, bundleID: "com.apple.Notes", title: "Notes", spaceID: 7, frontIndex: 1),
-                    Self.window(windowID: 900, bundleID: "com.apple.Finder", title: "Desktop", spaceID: 7, frontIndex: 2),
-                ]
-            }
+            listWindowsOnAllSpaces: { liveWindows }
         )
         let service = workspace.makeService(stateStore: stateStore, runtimeHooks: runtimeHooks)
 
