@@ -2250,49 +2250,83 @@ private struct WindowPositionPreview: View {
                     )
 
                 ForEach(Array(slotsWithFrames.enumerated()), id: \.offset) { _, item in
-                    let color = colorForSlot(item.entry.slot)
-                    let isHidden = item.entry.visibilityState == .hiddenOffscreen
-                    let f = item.frame
-                    let nx = (f.x - bounds.origin.x) / bounds.width
-                    let ny = (f.y - bounds.origin.y) / bounds.height
-                    let nw = f.width / bounds.width
-                    let nh = f.height / bounds.height
-                    let gap: CGFloat = 1.5
-
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(color.opacity(isHidden ? 0.05 : 0.15))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 3)
-                                .strokeBorder(
-                                    color.opacity(isHidden ? 0.2 : 0.5),
-                                    style: isHidden ? StrokeStyle(lineWidth: 1, dash: [4, 3]) : StrokeStyle(lineWidth: 1)
-                                )
-                        )
-                        .overlay {
-                            VStack(spacing: 1) {
-                                Text("\(item.entry.slot)")
-                                    .font(.system(.caption2, design: .rounded, weight: .bold))
-                                    .foregroundStyle(color.opacity(isHidden ? 0.5 : 1))
-                                Text(shortBundleID(item.entry.bundleID))
-                                    .font(.system(size: 8))
-                                    .foregroundStyle(.secondary.opacity(isHidden ? 0.5 : 1))
-                                    .lineLimit(1)
-                            }
-                        }
-                        .frame(
-                            width: max(0, previewWidth * nw - gap * 2),
-                            height: max(0, previewHeight * nh - gap * 2)
-                        )
-                        .position(
-                            x: previewWidth * (nx + nw / 2),
-                            y: previewHeight * (ny + nh / 2)
-                        )
+                    previewItem(
+                        item: item,
+                        bounds: bounds,
+                        previewWidth: previewWidth,
+                        previewHeight: previewHeight
+                    )
                 }
             }
             .frame(height: previewHeight)
         }
         .aspectRatio(1 / aspectRatio, contentMode: .fit)
         .frame(maxWidth: 400)
+    }
+
+    @ViewBuilder
+    private func previewItem(
+        item: (entry: SlotEntry, frame: ResolvedFrame),
+        bounds: CGRect,
+        previewWidth: CGFloat,
+        previewHeight: CGFloat
+    ) -> some View {
+        let color = colorForSlot(item.entry.slot)
+        let isHidden = item.entry.visibilityState == .hiddenOffscreen
+        let normalizedFrame = normalizePreviewFrame(item.frame, bounds: bounds)
+        let gap: CGFloat = 1.5
+
+        previewTile(
+            slot: item.entry.slot,
+            bundleID: item.entry.bundleID,
+            color: color,
+            isHidden: isHidden
+        )
+        .frame(
+            width: max(0, previewWidth * normalizedFrame.width - gap * 2),
+            height: max(0, previewHeight * normalizedFrame.height - gap * 2)
+        )
+        .position(
+            x: previewWidth * (normalizedFrame.x + normalizedFrame.width / 2),
+            y: previewHeight * (normalizedFrame.y + normalizedFrame.height / 2)
+        )
+    }
+
+    private func normalizePreviewFrame(_ frame: ResolvedFrame, bounds: CGRect) -> ProportionalRect {
+        ProportionalRect(
+            x: (frame.x - bounds.origin.x) / bounds.width,
+            y: (frame.y - bounds.origin.y) / bounds.height,
+            width: frame.width / bounds.width,
+            height: frame.height / bounds.height
+        )
+    }
+
+    @ViewBuilder
+    private func previewTile(
+        slot: Int,
+        bundleID: String,
+        color: Color,
+        isHidden: Bool
+    ) -> some View {
+        let borderStyle = isHidden ? StrokeStyle(lineWidth: 1, dash: [4, 3]) : StrokeStyle(lineWidth: 1)
+
+        RoundedRectangle(cornerRadius: 3)
+            .fill(color.opacity(isHidden ? 0.05 : 0.15))
+            .overlay(
+                RoundedRectangle(cornerRadius: 3)
+                    .strokeBorder(color.opacity(isHidden ? 0.2 : 0.5), style: borderStyle)
+            )
+            .overlay {
+                VStack(spacing: 1) {
+                    Text("\(slot)")
+                        .font(.system(.caption2, design: .rounded, weight: .bold))
+                        .foregroundStyle(color.opacity(isHidden ? 0.5 : 1))
+                    Text(shortBundleID(bundleID))
+                        .font(.system(size: 8))
+                        .foregroundStyle(.secondary.opacity(isHidden ? 0.5 : 1))
+                        .lineLimit(1)
+                }
+            }
     }
 }
 
@@ -2324,41 +2358,59 @@ private struct VisualLayoutPreview: View {
                     )
 
                 ForEach(Array(rects.enumerated()), id: \.offset) { _, item in
-                    let color = colorForSlot(item.win.slot)
-                    let r = item.rect
-                    let gap: CGFloat = 1.5
-
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(color.opacity(0.15))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 3)
-                                .strokeBorder(color.opacity(0.5), lineWidth: 1)
-                        )
-                        .overlay {
-                            VStack(spacing: 2) {
-                                Text("\(item.win.slot)")
-                                    .font(.system(compact ? .caption2 : .caption, design: .rounded, weight: .bold))
-                                    .foregroundStyle(color)
-                                Text(shortBundleID(item.win.match.bundleID))
-                                    .font(.system(size: compact ? 8 : 10))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
-                        }
-                        .frame(
-                            width: max(0, previewWidth * r.width - gap * 2),
-                            height: max(0, previewHeight * r.height - gap * 2)
-                        )
-                        .position(
-                            x: previewWidth * (r.x + r.width / 2),
-                            y: previewHeight * (r.y + r.height / 2)
-                        )
+                    previewItem(
+                        item: item,
+                        previewWidth: previewWidth,
+                        previewHeight: previewHeight
+                    )
                 }
             }
             .frame(height: previewHeight)
         }
         .aspectRatio(1 / displayAspectRatio, contentMode: .fit)
         .frame(maxWidth: compact ? 280 : 400)
+    }
+
+    @ViewBuilder
+    private func previewItem(
+        item: (win: WindowDefinition, rect: ProportionalRect),
+        previewWidth: CGFloat,
+        previewHeight: CGFloat
+    ) -> some View {
+        let gap: CGFloat = 1.5
+
+        previewTile(win: item.win)
+            .frame(
+                width: max(0, previewWidth * item.rect.width - gap * 2),
+                height: max(0, previewHeight * item.rect.height - gap * 2)
+            )
+            .position(
+                x: previewWidth * (item.rect.x + item.rect.width / 2),
+                y: previewHeight * (item.rect.y + item.rect.height / 2)
+            )
+    }
+
+    @ViewBuilder
+    private func previewTile(win: WindowDefinition) -> some View {
+        let color = colorForSlot(win.slot)
+
+        RoundedRectangle(cornerRadius: 3)
+            .fill(color.opacity(0.15))
+            .overlay(
+                RoundedRectangle(cornerRadius: 3)
+                    .strokeBorder(color.opacity(0.5), lineWidth: 1)
+            )
+            .overlay {
+                VStack(spacing: 2) {
+                    Text("\(win.slot)")
+                        .font(.system(compact ? .caption2 : .caption, design: .rounded, weight: .bold))
+                        .foregroundStyle(color)
+                    Text(shortBundleID(win.match.bundleID))
+                        .font(.system(size: compact ? 8 : 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
     }
 }
 

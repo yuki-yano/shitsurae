@@ -436,6 +436,9 @@ func performVirtualSpaceSwitch(
         )
     }
 
+    let managedTargets = targets.filter { isManagedByVirtualHostDisplay($0, hostDisplayID: hostDisplay.id) }
+    let managedOthers = others.filter { isManagedByVirtualHostDisplay($0, hostDisplayID: hostDisplay.id) }
+
     let displaysStartMS = virtualSwitchNowMS()
     let displays = hooks.displays()
     let displaysLoadMS = virtualSwitchNowMS() - displaysStartMS
@@ -444,7 +447,7 @@ func performVirtualSpaceSwitch(
     var positionMutationCount = 0
     let targetPlanStartMS = virtualSwitchNowMS()
     let targetPlans: [(target: VirtualSwitchWindow, plan: VirtualVisibilityPlan)] =
-        targets.sorted(by: virtualSwitchWindowOrdering).compactMap { target in
+        managedTargets.sorted(by: virtualSwitchWindowOrdering).compactMap { target in
         guard let plan = planVirtualVisibility(
             entry: target.entry,
             window: target.window,
@@ -460,7 +463,7 @@ func performVirtualSpaceSwitch(
     }
     let targetPlanMS = virtualSwitchNowMS() - targetPlanStartMS
 
-    guard targetPlans.count == targets.count else {
+    guard targetPlans.count == managedTargets.count else {
         return VirtualSwitchOperationResult(
             succeeded: false,
             failedOperation: "visibleFrameResolve",
@@ -522,7 +525,7 @@ func performVirtualSpaceSwitch(
     let showTargetsMS = virtualSwitchNowMS() - showTargetsStartMS
 
     let hideOthersStartMS = virtualSwitchNowMS()
-    for other in others.sorted(by: virtualSwitchWindowOrdering) {
+    for other in managedOthers.sorted(by: virtualSwitchWindowOrdering) {
         guard let plan = planVirtualVisibility(
             entry: other.entry,
             window: other.window,
@@ -573,7 +576,7 @@ func performVirtualSpaceSwitch(
     }
     let hideOthersMS = virtualSwitchNowMS() - hideOthersStartMS
 
-    let preferredFocusTarget = preferredVirtualFocusTarget(from: targets)
+    let preferredFocusTarget = preferredVirtualFocusTarget(from: managedTargets)
     var appliedFocusTarget: VirtualSwitchWindow?
     let focusStartMS = virtualSwitchNowMS()
     if let focusTarget = preferredFocusTarget {

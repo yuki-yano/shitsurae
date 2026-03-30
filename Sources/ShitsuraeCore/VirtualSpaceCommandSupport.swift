@@ -39,6 +39,14 @@ struct VirtualSwitchOperationProfile {
     let focusMS: Int
 }
 
+func isManagedByVirtualHostDisplay(
+    _ target: VirtualSwitchWindow,
+    hostDisplayID: String
+) -> Bool {
+    let displayID = target.window.displayID ?? target.entry.displayID
+    return displayID == hostDisplayID
+}
+
 func uniqueSpaces(in layout: LayoutDefinition) -> [SpaceDefinition] {
     var seen = Set<Int>()
     return layout.spaces
