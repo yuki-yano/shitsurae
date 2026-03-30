@@ -82,6 +82,7 @@ final class ShortcutManager {
     private var overlaySelectionObserver: NSObjectProtocol?
     private var activeSpaceObserver: NSObjectProtocol?
     private var appActivationObserver: NSObjectProtocol?
+    private var appUnhideObserver: NSObjectProtocol?
     private var overlaySession: ShortcutOverlaySession?
     private var currentIgnoreFocusRules: IgnoreRuleSet?
     private var spaceCycleStates: [CycleStateKey: SpaceCycleState] = [:]
@@ -1491,13 +1492,19 @@ final class ShortcutManager {
             cancelOverlay()
         }
         resetCycleState()
-        logger.log(event: "workspace.activeSpace.changed")
+        let reconciledPendingVisibility = reconcilePendingVirtualVisibilityIfNeeded(trigger: "activeSpaceDidChange")
+        logger.log(
+            event: "workspace.activeSpace.changed",
+            fields: ["reconciledPendingVisibility": reconciledPendingVisibility]
+        )
     }
 
     private func handleAppActivatedForFollowFocus() {
         guard isConfiguredVirtualMode else {
             return
         }
+
+        _ = reconcilePendingVirtualVisibilityIfNeeded(trigger: "appActivated")
 
         guard let focused = focusedWindowProvider() else {
             return
@@ -1542,12 +1549,32 @@ final class ShortcutManager {
         )
     }
 
+    private func handleAppUnhiddenForVirtualVisibility() {
+        _ = reconcilePendingVirtualVisibilityIfNeeded(trigger: "appUnhidden")
+    }
+
     private func shouldRegisterSwitcherReverseHotkey(trigger: HotkeyDefinition) -> Bool {
         canonicalHotkeyKey(trigger.key) == "tab" && normalizedModifiers(trigger.modifiers) == ["cmd"]
     }
 
     private var isConfiguredVirtualMode: Bool {
         currentLoadedConfig?.config.resolvedSpaceInterpretationMode == .virtual
+    }
+
+    @discardableResult
+    private func reconcilePendingVirtualVisibilityIfNeeded(trigger: String) -> Bool {
+        guard isConfiguredVirtualMode else {
+            return false
+        }
+
+        let reconciled = commandService.reconcilePendingVirtualVisibilityIfNeeded()
+        if reconciled {
+            logger.log(
+                event: "virtual.visibility.reconciledOnWorkspaceEvent",
+                fields: ["trigger": trigger]
+            )
+        }
+        return reconciled
     }
 
     private func syncNativeSwitcherHotKeys() {
@@ -1653,6 +1680,13 @@ final class ShortcutManager {
         ) { _ in
             managerBox.manager?.handleAppActivatedForFollowFocus()
         }
+        appUnhideObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didUnhideApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            managerBox.manager?.handleAppUnhiddenForVirtualVisibility()
+        }
     }
 
     private func stopWorkspaceObservers() {
@@ -1663,6 +1697,10 @@ final class ShortcutManager {
         if let appActivationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(appActivationObserver)
             self.appActivationObserver = nil
+        }
+        if let appUnhideObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(appUnhideObserver)
+            self.appUnhideObserver = nil
         }
     }
 
