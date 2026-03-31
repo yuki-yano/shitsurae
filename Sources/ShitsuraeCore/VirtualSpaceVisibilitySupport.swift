@@ -436,7 +436,10 @@ func performVirtualSpaceSwitch(
         )
     }
 
-    let managedTargets = targets.filter { isManagedByVirtualHostDisplay($0, hostDisplayID: hostDisplay.id) }
+    // Targets belong to the selected virtual workspace, so switch should
+    // always attempt to bring them onto the host display even when their
+    // current display metadata is stale or drifted to another display.
+    let managedTargets = targets
     let managedOthers = others.filter { isManagedByVirtualHostDisplay($0, hostDisplayID: hostDisplay.id) }
 
     let displaysStartMS = virtualSwitchNowMS()

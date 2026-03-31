@@ -1060,6 +1060,132 @@ final class CommandServiceSpaceSwitchContractTests: CommandServiceContractTestCa
         XCTAssertTrue(frameCalls.allSatisfy { $0.0 != 800 })
     }
 
+    func testSpaceSwitchShowsTargetWindowEvenWhenCurrentlyOnNonHostDisplay() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.virtualMultiSpaceConfigYAML])
+        defer { workspace.cleanup() }
+
+        let stateStore = RuntimeStateStore(stateFileURL: workspace.stateFileURL)
+        stateStore.save(
+            slots: [
+                SlotEntry(
+                    layoutName: "work",
+                    slot: 1,
+                    source: .window,
+                    bundleID: "com.apple.TextEdit",
+                    definitionFingerprint: "slot-1",
+                    lastKnownTitle: "Editor",
+                    profile: nil,
+                    spaceID: 1,
+                    nativeSpaceID: 8,
+                    displayID: "display-b",
+                    windowID: 800,
+                    lastVisibleFrame: ResolvedFrame(x: 1600, y: 0, width: 640, height: 480),
+                    visibilityState: .hiddenOffscreen
+                ),
+                SlotEntry(
+                    layoutName: "work",
+                    slot: 2,
+                    source: .window,
+                    bundleID: "com.apple.Notes",
+                    definitionFingerprint: "slot-2",
+                    lastKnownTitle: "Notes",
+                    profile: nil,
+                    spaceID: 2,
+                    nativeSpaceID: 7,
+                    displayID: "display-a",
+                    windowID: 801,
+                    lastVisibleFrame: ResolvedFrame(x: 800, y: 23, width: 800, height: 977),
+                    visibilityState: .visible
+                ),
+            ],
+            stateMode: .virtual,
+            configGeneration: "generation-1",
+            activeLayoutName: "work",
+            activeVirtualSpaceID: 2,
+            revision: 3
+        )
+
+        var frameCalls: [(UInt32, ResolvedFrame)] = []
+        var positionCalls: [(UInt32, CGPoint)] = []
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: { [] },
+            focusedWindow: {
+                Self.window(windowID: 801, bundleID: "com.apple.Notes", title: "Notes", spaceID: 7, frontIndex: 0)
+            },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { _ in true },
+            displays: {
+                [
+                    DisplayInfo(
+                        id: "display-a",
+                        width: 3200,
+                        height: 2000,
+                        scale: 2.0,
+                        isPrimary: true,
+                        frame: CGRect(x: 0, y: 0, width: 1600, height: 1000),
+                        visibleFrame: CGRect(x: 0, y: 23, width: 1600, height: 977)
+                    ),
+                    DisplayInfo(
+                        id: "display-b",
+                        width: 2560,
+                        height: 2000,
+                        scale: 2.0,
+                        isPrimary: false,
+                        frame: CGRect(x: 1600, y: 0, width: 1280, height: 1000),
+                        visibleFrame: CGRect(x: 1600, y: 0, width: 1280, height: 1000)
+                    ),
+                ]
+            },
+            runProcess: { _, _ in (0, "") },
+            focusWindow: { _, _ in .success },
+            setWindowMinimized: { _, _, _ in .success },
+            setWindowFrame: { windowID, _, frame in
+                frameCalls.append((windowID, frame))
+                return true
+            },
+            setWindowPosition: { windowID, _, position in
+                positionCalls.append((windowID, position))
+                return true
+            },
+            spaces: {
+                [
+                    SpaceInfo(spaceID: 7, displayID: "display-a", isVisible: true, isNativeFullscreen: false),
+                    SpaceInfo(spaceID: 8, displayID: "display-b", isVisible: true, isNativeFullscreen: false),
+                ]
+            },
+            listWindowsOnAllSpaces: {
+                [
+                    WindowSnapshot(
+                        windowID: 800,
+                        bundleID: "com.apple.TextEdit",
+                        pid: 800,
+                        title: "Editor",
+                        role: "AXWindow",
+                        subrole: nil,
+                        minimized: false,
+                        hidden: false,
+                        frame: ResolvedFrame(x: 1600, y: 0, width: 640, height: 480),
+                        spaceID: 8,
+                        displayID: "display-b",
+                        profileDirectory: nil,
+                        isFullscreen: false,
+                        frontIndex: 1
+                    ),
+                    Self.window(windowID: 801, bundleID: "com.apple.Notes", title: "Notes", spaceID: 7, frontIndex: 0),
+                ]
+            }
+        )
+
+        let service = workspace.makeService(stateStore: stateStore, runtimeHooks: runtimeHooks)
+        let result = service.spaceSwitch(spaceID: 1, json: true, reconcile: false)
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertTrue(frameCalls.contains(where: { $0.0 == 800 }))
+        XCTAssertTrue(positionCalls.contains(where: { $0.0 == 801 }))
+        XCTAssertEqual(stateStore.load().activeVirtualSpaceID, 1)
+    }
+
     func testSpaceSwitchContinuesShowingTargetWindowWhenRestoreFromMinimizedFails() throws {
         let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.virtualMultiSpaceConfigYAML])
         defer { workspace.cleanup() }
