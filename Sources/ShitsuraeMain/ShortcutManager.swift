@@ -77,6 +77,9 @@ final class ShortcutManager {
     private var eventTapPort: CFMachPort?
     private var eventTapRunLoopSource: CFRunLoopSource?
     private var modifierReleasePollingTimer: Timer?
+    private var deferredAppActivationUntil: Date?
+    private var pendingDeferredAppActivationWorkItem: DispatchWorkItem?
+    private var pendingDeferredAppUnhideWorkItem: DispatchWorkItem?
 
     private let overlayController = SwitcherOverlayController()
     private var overlaySelectionObserver: NSObjectProtocol?
@@ -97,6 +100,7 @@ final class ShortcutManager {
     private var lastEventTapOverlayAdvanceShortcutID: String?
     private var lastEventTapOverlayAdvanceAt: Date?
     private let overlayAdvanceDedupeThreshold: TimeInterval = 0.12
+    private let appActivationGraceInterval: TimeInterval = 0.18
     private var loggedShortcutUnavailableHints: Set<String> = []
 
     private(set) var currentShortcuts = ResolvedShortcuts(from: nil)
@@ -138,6 +142,7 @@ final class ShortcutManager {
         unregisterHotkeys()
         stopEventTap()
         stopModifierReleasePolling()
+        cancelDeferredWorkspaceEventHandling()
         restoreNativeSwitcherHotKeys()
         overlaySession = nil
         overlayController.hide()
@@ -154,6 +159,7 @@ final class ShortcutManager {
         unregisterHotkeys()
         stopEventTap()
         stopModifierReleasePolling()
+        cancelDeferredWorkspaceEventHandling()
 
         do {
             let loaded = try configLoader.loadFromDefaultDirectory()
@@ -1016,10 +1022,14 @@ final class ShortcutManager {
                 "selectedBundleID": candidate.bundleID ?? "",
             ]
         )
-        activate(candidate: candidate)
         overlaySession = nil
         stopModifierReleasePolling()
         overlayController.hide()
+        beginAppActivationGraceWindow()
+        let managerBox = WeakShortcutManagerBox(manager: self)
+        DispatchQueue.main.async {
+            managerBox.manager?.activate(candidate: candidate)
+        }
     }
 
     private func acceptOverlay(candidateID: String) {
@@ -1500,6 +1510,12 @@ final class ShortcutManager {
     }
 
     private func handleAppActivatedForFollowFocus() {
+        let delay = appActivationHandlingDelay()
+        guard delay == 0 else {
+            scheduleDeferredAppActivationHandling(after: delay)
+            return
+        }
+        pendingDeferredAppActivationWorkItem = nil
         guard isConfiguredVirtualMode else {
             return
         }
@@ -1550,7 +1566,55 @@ final class ShortcutManager {
     }
 
     private func handleAppUnhiddenForVirtualVisibility() {
+        let delay = appActivationHandlingDelay()
+        guard delay == 0 else {
+            scheduleDeferredAppUnhideHandling(after: delay)
+            return
+        }
+        pendingDeferredAppUnhideWorkItem = nil
         _ = reconcilePendingVirtualVisibilityIfNeeded(trigger: "appUnhidden")
+    }
+
+    private func beginAppActivationGraceWindow(now: Date = Date()) {
+        deferredAppActivationUntil = now.addingTimeInterval(appActivationGraceInterval)
+    }
+
+    private func appActivationHandlingDelay(now: Date = Date()) -> TimeInterval {
+        let delay = InteractiveActivationTiming(
+            deferredUntil: deferredAppActivationUntil
+        ).handlingDelay(now: now)
+        if delay == 0 {
+            deferredAppActivationUntil = nil
+        }
+        return delay
+    }
+
+    private func scheduleDeferredAppActivationHandling(after delay: TimeInterval) {
+        pendingDeferredAppActivationWorkItem?.cancel()
+        let managerBox = WeakShortcutManagerBox(manager: self)
+        let workItem = DispatchWorkItem {
+            managerBox.manager?.handleAppActivatedForFollowFocus()
+        }
+        pendingDeferredAppActivationWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func scheduleDeferredAppUnhideHandling(after delay: TimeInterval) {
+        pendingDeferredAppUnhideWorkItem?.cancel()
+        let managerBox = WeakShortcutManagerBox(manager: self)
+        let workItem = DispatchWorkItem {
+            managerBox.manager?.handleAppUnhiddenForVirtualVisibility()
+        }
+        pendingDeferredAppUnhideWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func cancelDeferredWorkspaceEventHandling() {
+        pendingDeferredAppActivationWorkItem?.cancel()
+        pendingDeferredAppActivationWorkItem = nil
+        pendingDeferredAppUnhideWorkItem?.cancel()
+        pendingDeferredAppUnhideWorkItem = nil
+        deferredAppActivationUntil = nil
     }
 
     private func shouldRegisterSwitcherReverseHotkey(trigger: HotkeyDefinition) -> Bool {
