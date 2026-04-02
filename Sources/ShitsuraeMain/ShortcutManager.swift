@@ -567,6 +567,7 @@ final class ShortcutManager {
         case let .focus(slot):
             cancelOverlay()
             resetCycleState()
+            beginInteractiveWindowActivation()
             _ = commandService.focus(slot: slot)
         case let .moveCurrentWindowToSpace(spaceID):
             cancelOverlay()
@@ -584,6 +585,7 @@ final class ShortcutManager {
         case let .switchVirtualSpace(spaceID):
             cancelOverlay()
             resetCycleState()
+            beginInteractiveVirtualSpaceSwitch()
             let result = commandService.spaceSwitch(spaceID: spaceID, json: true)
             logShortcutCommandResult(
                 shortcutID: action.shortcutID,
@@ -1025,7 +1027,7 @@ final class ShortcutManager {
         overlaySession = nil
         stopModifierReleasePolling()
         overlayController.hide()
-        beginAppActivationGraceWindow()
+        beginInteractiveWindowActivation()
         let managerBox = WeakShortcutManagerBox(manager: self)
         DispatchQueue.main.async {
             managerBox.manager?.activate(candidate: candidate)
@@ -1368,11 +1370,21 @@ final class ShortcutManager {
     }
 
     private func activate(candidate: SwitcherCandidate) {
+        beginInteractiveWindowActivation()
+
         if let windowID = candidateWindowID(from: candidate.id) {
-            let result = commandService.focus(
+            var result = commandService.focus(
                 slot: nil,
                 target: WindowTargetSelector(windowID: windowID, bundleID: nil, title: nil)
             )
+            if result.exitCode != 0,
+               let bundleID = candidate.bundleID
+            {
+                result = commandService.focus(
+                    slot: nil,
+                    target: WindowTargetSelector(windowID: nil, bundleID: bundleID, title: candidate.title)
+                )
+            }
             logger.log(
                 event: "candidate.activate.window",
                 fields: [
@@ -1579,6 +1591,18 @@ final class ShortcutManager {
         deferredAppActivationUntil = now.addingTimeInterval(appActivationGraceInterval)
     }
 
+    private func beginInteractiveWindowActivation(now: Date = Date()) {
+        beginAppActivationGraceWindow(now: now)
+        lastFollowFocusSwitchAt = now
+    }
+
+    private func beginInteractiveVirtualSpaceSwitch(now: Date = Date()) {
+        // Virtual workspace changes do not emit native active-space change
+        // notifications, so debounce follow-focus explicitly to avoid
+        // immediate rebound switches caused by trailing app-activation events.
+        beginInteractiveWindowActivation(now: now)
+    }
+
     private func appActivationHandlingDelay(now: Date = Date()) -> TimeInterval {
         let delay = InteractiveActivationTiming(
             deferredUntil: deferredAppActivationUntil
@@ -1628,6 +1652,10 @@ final class ShortcutManager {
     @discardableResult
     private func reconcilePendingVirtualVisibilityIfNeeded(trigger: String) -> Bool {
         guard isConfiguredVirtualMode else {
+            return false
+        }
+
+        if trigger == "appActivated" {
             return false
         }
 

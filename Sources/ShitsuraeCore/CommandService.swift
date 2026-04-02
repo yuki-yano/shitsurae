@@ -501,11 +501,13 @@ public final class CommandService {
                 let savedState = stateStore.load()
                 if savedState.activeLayoutName == layoutName {
                     let onScreenWindows = runtimeHooks.listWindows()
+                    let displays = runtimeHooks.displays()
                     let newEntries = adoptUntrackedWindows(
                         windows: onScreenWindows,
                         existingSlots: savedState.slots,
                         layoutName: layoutName,
-                        targetSpaceID: firstSpace.spaceID
+                        targetSpaceID: firstSpace.spaceID,
+                        displays: displays
                     )
                     if !newEntries.isEmpty {
                         logger.log(
@@ -521,7 +523,6 @@ public final class CommandService {
                     let allSlots = savedState.slots + newEntries
                     let activeSpaceID = savedState.activeVirtualSpaceID ?? firstSpace.spaceID
                     let allWindows = runtimeHooks.listWindowsOnAllSpaces()
-                    let displays = runtimeHooks.displays()
 
                     if let hostDisplay = resolveVirtualHostDisplay(
                         layout: layout,
@@ -1572,7 +1573,8 @@ public final class CommandService {
             windows: executionContext.onScreenWindows,
             existingSlots: slotsWithPrunedRuntimeManagedWindows,
             layoutName: layoutName,
-            targetSpaceID: currentAdoptSpaceID
+            targetSpaceID: currentAdoptSpaceID,
+            displays: executionContext.displays
         )
         guard !adoptedEntries.isEmpty else {
             return slotsWithPrunedRuntimeManagedWindows
@@ -1868,7 +1870,8 @@ public final class CommandService {
             windows: onScreenWindows,
             existingSlots: prunedSlots,
             layoutName: layoutName,
-            targetSpaceID: activeSpaceID
+            targetSpaceID: activeSpaceID,
+            displays: runtimeHooks.displays()
         )
         let adoptedCount = newEntries.count
         let prunedCount = state.slots.count - prunedSlots.count
@@ -2529,7 +2532,8 @@ public final class CommandService {
             guard let window = windows.first(where: { $0.windowID == windowID }) else {
                 return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
             }
-            guard runtimeHooks.focusWindow(window.windowID, window.bundleID).isSuccess else {
+            let focusResult = runtimeHooks.focusWindow(window.windowID, window.bundleID)
+            guard focusResult.isSuccess || runtimeHooks.activateBundle(window.bundleID) else {
                 return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
             }
             return CommandResult(exitCode: 0)
@@ -2546,7 +2550,8 @@ public final class CommandService {
         if let title = normalizedTarget.title {
             let windows = runtimeHooks.listWindows()
             if let window = resolveWindow(bundleID: bundleID, title: title, windows: windows) {
-                activated = runtimeHooks.focusWindow(window.windowID, window.bundleID).isSuccess
+                let focusResult = runtimeHooks.focusWindow(window.windowID, window.bundleID)
+                activated = focusResult.isSuccess || runtimeHooks.activateWindowWithTitle(bundleID, title)
             } else {
                 activated = runtimeHooks.activateWindowWithTitle(bundleID, title)
             }
@@ -2622,13 +2627,9 @@ public final class CommandService {
 
         if let window = resolveTrackedSlotWindow(entry: entry, windows: windows) {
             let focusResult = runtimeHooks.focusWindow(window.windowID, window.bundleID)
-            // Supplement with activateBundle to ensure the app is brought to
-            // the foreground.  The SkyLight private API used by focusWindow
-            // doesn't reliably raise the app on all macOS versions.
             if !focusResult.isSuccess, !runtimeHooks.activateBundle(window.bundleID) {
                 return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
             }
-            _ = runtimeHooks.activateBundle(window.bundleID)
             return CommandResult(exitCode: 0)
         }
 
@@ -2750,7 +2751,6 @@ public final class CommandService {
                 if !focusResult.isSuccess, !runtimeHooks.activateBundle(window.bundleID) {
                     return CommandResult(exitCode: Int32(ErrorCode.targetWindowNotFound.rawValue))
                 }
-                _ = runtimeHooks.activateBundle(window.bundleID)
 
                 var updatedSlots = lockedState.slots
                 updatedSlots[entryIndex] = visibilityPlan.updatedEntry
@@ -3498,7 +3498,8 @@ public final class CommandService {
         windows: [WindowSnapshot],
         existingSlots: [SlotEntry],
         layoutName: String,
-        targetSpaceID: Int
+        targetSpaceID: Int,
+        displays: [DisplayInfo]
     ) -> [SlotEntry] {
         let trackedWindowIDs = Set(existingSlots.compactMap(\.windowID))
 
@@ -3517,6 +3518,8 @@ public final class CommandService {
             guard !trackedWindowIDs.contains(window.windowID) else { continue }
             guard !window.bundleID.isEmpty else { continue }
             guard !window.minimized, !window.hidden, !window.isFullscreen else { continue }
+            guard !isVirtualHiddenWindowFrame(frame: window.frame, displays: displays) else { continue }
+            guard isEligibleForRuntimeWorkspaceAdoption(window: window) else { continue }
 
             let titleMatchValue = window.title.isEmpty ? nil : window.title
             let titleMatchKind: PersistedTitleMatchKind = titleMatchValue == nil ? .none : .equals
@@ -3544,6 +3547,21 @@ public final class CommandService {
         }
 
         return newEntries
+    }
+
+    private func isEligibleForRuntimeWorkspaceAdoption(window: WindowSnapshot) -> Bool {
+        guard window.role == "AXWindow" else {
+            return false
+        }
+
+        switch window.subrole {
+        case nil, "AXStandardWindow":
+            return true
+        case "AXDialog", "AXSheet", "AXSystemDialog":
+            return false
+        default:
+            return true
+        }
     }
 
     private func restoreHiddenWindowsBeforeArrange(layoutName: String, layout: LayoutDefinition) {

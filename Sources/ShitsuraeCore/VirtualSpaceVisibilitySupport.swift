@@ -23,6 +23,11 @@ struct VirtualVisibilityPlan {
     let action: String
 }
 
+func isVirtualHiddenWindowFrame(frame: ResolvedFrame, displays: [DisplayInfo]) -> Bool {
+    isVirtualOffscreenFrame(frame: frame, displays: displays)
+        || isVirtualEdgePinnedHiddenFrame(frame: frame, displays: displays)
+}
+
 func slotEntry(
     _ entry: SlotEntry,
     window: WindowSnapshot?,
@@ -227,13 +232,25 @@ func resolveVirtualVisibleFrame(
 
     if shouldUseVirtualVisibleFrameFallback(entry: entry) {
         if let frame = entry.lastVisibleFrame,
-           isWithinVisibleArea(frame: frame, hostDisplay: hostDisplay, displays: displays)
+           isWithinVisibleArea(frame: frame, hostDisplay: hostDisplay, displays: displays),
+           !isVirtualHiddenWindowFrame(frame: frame, displays: displays)
         {
             return frame
         }
 
-        if isWithinVisibleArea(frame: window.frame, hostDisplay: hostDisplay, displays: displays) {
+        if isWithinVisibleArea(frame: window.frame, hostDisplay: hostDisplay, displays: displays),
+           !isVirtualHiddenWindowFrame(frame: window.frame, displays: displays)
+        {
             return window.frame
+        }
+
+        if entry.slot >= CommandService.untrackedSlotOffset {
+            return recoveredVirtualRuntimeManagedFrame(
+                entry: entry,
+                window: window,
+                hostDisplay: hostDisplay,
+                displays: displays
+            )
         }
     }
 
@@ -268,6 +285,54 @@ func isWithinVisibleArea(frame: ResolvedFrame, hostDisplay: DisplayInfo, display
         return frame.x < hostDisplay.frame.width && frame.y < hostDisplay.frame.height
     }
     return false
+}
+
+func recoveredVirtualRuntimeManagedFrame(
+    entry: SlotEntry,
+    window: WindowSnapshot,
+    hostDisplay: DisplayInfo,
+    displays: [DisplayInfo]
+) -> ResolvedFrame {
+    let basis = virtualCoordinateRect(hostDisplay.visibleFrame, displays: displays)
+    let source = entry.lastVisibleFrame ?? window.frame
+    let width = min(max(1, source.width), basis.width)
+    let height = min(max(1, source.height), basis.height)
+    let maxX = max(basis.minX, basis.maxX - width)
+    let maxY = max(basis.minY, basis.maxY - height)
+    let x = min(max(source.x, basis.minX), maxX)
+    let y = min(max(source.y, basis.minY), maxY)
+    return ResolvedFrame(x: x, y: y, width: width, height: height)
+}
+
+private func isVirtualOffscreenFrame(frame: ResolvedFrame, displays: [DisplayInfo]) -> Bool {
+    let windowRect = CGRect(
+        x: frame.x,
+        y: frame.y,
+        width: frame.width,
+        height: frame.height
+    )
+    guard !displays.isEmpty else {
+        return false
+    }
+    return displays.allSatisfy { !windowRect.intersects($0.frame) }
+}
+
+private func isVirtualEdgePinnedHiddenFrame(frame: ResolvedFrame, displays: [DisplayInfo]) -> Bool {
+    let windowRect = CGRect(
+        x: frame.x,
+        y: frame.y,
+        width: frame.width,
+        height: frame.height
+    )
+
+    return displays.contains { display in
+        let overlap = windowRect.intersection(display.frame)
+        guard !overlap.isNull else {
+            return false
+        }
+
+        return overlap.width <= 1 || overlap.height <= 1
+    }
 }
 
 func resolvedVirtualLayoutFrame(

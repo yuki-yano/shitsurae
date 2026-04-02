@@ -406,9 +406,7 @@ final class CommandServiceFocusContractTests: CommandServiceContractTestCase {
         XCTAssertEqual(result.exitCode, 0)
         XCTAssertEqual(focusedTargets.map(\.0), [202])
         XCTAssertEqual(focusedTargets.map(\.1), ["com.apple.TextEdit"])
-        // activateBundle is always called as a supplement to ensure the app
-        // is brought to the foreground on all macOS versions.
-        XCTAssertEqual(activatedBundleIDs, ["com.apple.TextEdit"])
+        XCTAssertTrue(activatedBundleIDs.isEmpty)
     }
 
     func testShouldHandleFocusShortcutReturnsFalseWhenSlotStateIsEmpty() throws {
@@ -764,6 +762,42 @@ final class CommandServiceFocusContractTests: CommandServiceContractTestCase {
         XCTAssertEqual(focusedTargets.map(\.1), ["com.apple.TextEdit"])
     }
 
+    func testFocusTargetWindowIDFallsBackToBundleActivationWhenTargetedFocusFails() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.validConfigYAML])
+        defer { workspace.cleanup() }
+
+        let windows = [
+            Self.window(windowID: 202, bundleID: "org.alacritty", title: "Alacritty", spaceID: 1, frontIndex: 0),
+        ]
+        var focusedTargets: [(UInt32, String)] = []
+        var activatedBundleIDs: [String] = []
+
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: { windows },
+            focusedWindow: { nil },
+            activateBundle: { bundleID in
+                activatedBundleIDs.append(bundleID)
+                return true
+            },
+            setFocusedWindowFrame: { _ in true },
+            displays: { [] },
+            runProcess: { _, _ in (0, "") },
+            focusWindow: { windowID, bundleID in
+                focusedTargets.append((windowID, bundleID))
+                return .failed
+            }
+        )
+
+        let service = workspace.makeService(runtimeHooks: runtimeHooks)
+        let result = service.focus(slot: nil, target: WindowTargetSelector(windowID: 202, bundleID: nil, title: nil))
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(focusedTargets.map(\.0), [202])
+        XCTAssertEqual(focusedTargets.map(\.1), ["org.alacritty"])
+        XCTAssertEqual(activatedBundleIDs, ["org.alacritty"])
+    }
+
     func testFocusTargetWindowIDRestoresHiddenOffscreenVirtualWindow() throws {
         let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.virtualMultiSpaceConfigYAML])
         defer { workspace.cleanup() }
@@ -878,7 +912,7 @@ final class CommandServiceFocusContractTests: CommandServiceContractTestCase {
         XCTAssertEqual(frameCalls.first?.1, expectedVisibleFrame)
         XCTAssertEqual(focusedTargets.map(\.0), [801])
         XCTAssertEqual(focusedTargets.map(\.1), ["com.apple.Notes"])
-        XCTAssertEqual(activatedBundleIDs, ["com.apple.Notes"])
+        XCTAssertTrue(activatedBundleIDs.isEmpty)
 
         let updated = try stateStore.loadStrict()
         let notesEntry = try XCTUnwrap(updated.slots.first(where: { $0.windowID == 801 }))

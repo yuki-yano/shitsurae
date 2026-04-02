@@ -638,6 +638,155 @@ final class CommandServiceArrangeContractTests: CommandServiceContractTestCase {
         XCTAssertEqual(persisted.slots.count, 1)
     }
 
+    func testPeriodicAdoptionSkipsEdgePinnedHiddenWindows() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.virtualMultiSpaceConfigYAML])
+        defer { workspace.cleanup() }
+
+        let stateStore = RuntimeStateStore(stateFileURL: workspace.stateFileURL)
+        stateStore.save(
+            slots: [
+                SlotEntry(
+                    layoutName: "work",
+                    slot: 1,
+                    source: .window,
+                    bundleID: "com.apple.TextEdit",
+                    definitionFingerprint: "slot-1",
+                    lastKnownTitle: "Editor",
+                    profile: nil,
+                    spaceID: 1,
+                    nativeSpaceID: 7,
+                    displayID: "display-a",
+                    windowID: 800,
+                    lastVisibleFrame: ResolvedFrame(x: 0, y: 0, width: 800, height: 977),
+                    visibilityState: .visible
+                ),
+            ],
+            stateMode: .virtual,
+            configGeneration: "generation-1",
+            activeLayoutName: "work",
+            activeVirtualSpaceID: 1,
+            revision: 3
+        )
+
+        let hiddenFrame = ResolvedFrame(x: 1599, y: 120, width: 600, height: 400)
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: {
+                [
+                    Self.window(windowID: 800, bundleID: "com.apple.TextEdit", title: "Editor", spaceID: 7, frontIndex: 0),
+                    WindowSnapshot(
+                        windowID: 900,
+                        bundleID: "com.apple.Finder",
+                        pid: 900,
+                        title: "Desktop",
+                        role: "AXWindow",
+                        subrole: nil,
+                        minimized: false,
+                        hidden: false,
+                        frame: hiddenFrame,
+                        spaceID: 7,
+                        displayID: "display-a",
+                        isFullscreen: false,
+                        frontIndex: 1
+                    ),
+                ]
+            },
+            focusedWindow: { nil },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { _ in true },
+            displays: {
+                [
+                    DisplayInfo(
+                        id: "display-a",
+                        width: 3200,
+                        height: 2000,
+                        scale: 2.0,
+                        isPrimary: true,
+                        frame: CGRect(x: 0, y: 0, width: 1600, height: 1000),
+                        visibleFrame: CGRect(x: 0, y: 23, width: 1600, height: 977)
+                    ),
+                ]
+            },
+            runProcess: { _, _ in (0, "") },
+            focusWindow: { _, _ in .success }
+        )
+        let service = workspace.makeService(stateStore: stateStore, runtimeHooks: runtimeHooks)
+
+        let adopted = service.adoptUntrackedWindowsIntoCurrentWorkspace()
+        XCTAssertEqual(adopted, 0)
+
+        let persisted = stateStore.load()
+        XCTAssertNil(persisted.slots.first(where: { $0.windowID == 900 }))
+    }
+
+    func testPeriodicAdoptionSkipsTransientDialogWindows() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.virtualMultiSpaceConfigYAML])
+        defer { workspace.cleanup() }
+
+        let stateStore = RuntimeStateStore(stateFileURL: workspace.stateFileURL)
+        stateStore.save(
+            slots: [
+                SlotEntry(
+                    layoutName: "work",
+                    slot: 1,
+                    source: .window,
+                    bundleID: "com.apple.TextEdit",
+                    definitionFingerprint: "slot-1",
+                    lastKnownTitle: "Editor",
+                    profile: nil,
+                    spaceID: 1,
+                    nativeSpaceID: 7,
+                    displayID: "display-a",
+                    windowID: 800,
+                    lastVisibleFrame: ResolvedFrame(x: 0, y: 0, width: 800, height: 977),
+                    visibilityState: .visible
+                ),
+            ],
+            stateMode: .virtual,
+            configGeneration: "generation-1",
+            activeLayoutName: "work",
+            activeVirtualSpaceID: 1,
+            revision: 3
+        )
+
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: {
+                [
+                    Self.window(windowID: 800, bundleID: "com.apple.TextEdit", title: "Editor", spaceID: 7, frontIndex: 0),
+                    WindowSnapshot(
+                        windowID: 901,
+                        bundleID: "com.apple.SecurityAgent",
+                        pid: 901,
+                        title: "Use Touch ID",
+                        role: "AXWindow",
+                        subrole: "AXDialog",
+                        minimized: false,
+                        hidden: false,
+                        frame: ResolvedFrame(x: 200, y: 120, width: 480, height: 320),
+                        spaceID: 7,
+                        displayID: "display-a",
+                        isFullscreen: false,
+                        frontIndex: 1
+                    ),
+                ]
+            },
+            focusedWindow: { nil },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { _ in true },
+            displays: { [] },
+            runProcess: { _, _ in (0, "") },
+            focusWindow: { _, _ in .success }
+        )
+        let service = workspace.makeService(stateStore: stateStore, runtimeHooks: runtimeHooks)
+
+        let adopted = service.adoptUntrackedWindowsIntoCurrentWorkspace()
+        XCTAssertEqual(adopted, 0)
+
+        let persisted = stateStore.load()
+        XCTAssertNil(persisted.slots.first(where: { $0.windowID == 901 }))
+    }
+
     func testPeriodicAdoptionPrunesGoneRuntimeManagedWindows() throws {
         let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.virtualMultiSpaceConfigYAML])
         defer { workspace.cleanup() }

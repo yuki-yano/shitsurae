@@ -113,43 +113,10 @@ public enum WindowStatusResolver {
             return .hiddenOffscreen
         }
 
-        if isOffscreen(frame: window.frame, displays: displays)
-            || isEdgePinnedHiddenFrame(frame: window.frame, displays: displays)
-        {
+        if isVirtualHiddenWindowFrame(frame: window.frame, displays: displays) {
             return .hiddenOffscreen
         }
         return .visible
-    }
-
-    private static func isOffscreen(frame: ResolvedFrame, displays: [DisplayInfo]) -> Bool {
-        let windowRect = CGRect(
-            x: frame.x,
-            y: frame.y,
-            width: frame.width,
-            height: frame.height
-        )
-        guard !displays.isEmpty else {
-            return false
-        }
-        return displays.allSatisfy { !windowRect.intersects($0.frame) }
-    }
-
-    private static func isEdgePinnedHiddenFrame(frame: ResolvedFrame, displays: [DisplayInfo]) -> Bool {
-        let windowRect = CGRect(
-            x: frame.x,
-            y: frame.y,
-            width: frame.width,
-            height: frame.height
-        )
-
-        return displays.contains { display in
-            let overlap = windowRect.intersection(display.frame)
-            guard !overlap.isNull else {
-                return false
-            }
-
-            return overlap.width <= 1 || overlap.height <= 1
-        }
     }
 
     private static func approximatelyEquals(_ lhs: ResolvedFrame, _ rhs: ResolvedFrame, tolerance: Double = 1) -> Bool {

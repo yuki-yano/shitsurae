@@ -2639,6 +2639,136 @@ final class CommandServiceSpaceSwitchContractTests: CommandServiceContractTestCa
                        "visibilityState must stay .hiddenOffscreen when show fails")
     }
 
+    func testSpaceSwitchRecoversRuntimeManagedWindowWhenLastVisibleFrameWasCorruptedToHiddenFrame() throws {
+        let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.virtualMultiSpaceConfigYAML])
+        defer { workspace.cleanup() }
+
+        let stateStore = RuntimeStateStore(stateFileURL: workspace.stateFileURL)
+        let hiddenFrame = ResolvedFrame(x: 1599, y: 100, width: 600, height: 400)
+        stateStore.save(
+            slots: [
+                SlotEntry(
+                    layoutName: "work",
+                    slot: 1,
+                    source: .window,
+                    bundleID: "com.apple.TextEdit",
+                    definitionFingerprint: "slot-1",
+                    lastKnownTitle: "Editor",
+                    profile: nil,
+                    spaceID: 2,
+                    nativeSpaceID: 7,
+                    displayID: "display-a",
+                    windowID: 800,
+                    lastVisibleFrame: ResolvedFrame(x: 800, y: 0, width: 800, height: 977),
+                    visibilityState: .visible
+                ),
+                SlotEntry(
+                    layoutName: "work",
+                    slot: 100,
+                    source: .window,
+                    bundleID: "com.apple.Finder",
+                    definitionFingerprint: "runtime-finder",
+                    lastKnownTitle: "Desktop",
+                    profile: nil,
+                    spaceID: 1,
+                    nativeSpaceID: 7,
+                    displayID: "display-a",
+                    windowID: 900,
+                    lastVisibleFrame: hiddenFrame,
+                    lastHiddenFrame: hiddenFrame,
+                    visibilityState: .hiddenOffscreen
+                ),
+            ],
+            stateMode: .virtual,
+            configGeneration: "generation-1",
+            activeLayoutName: "work",
+            activeVirtualSpaceID: 2,
+            revision: 5
+        )
+
+        let recoveredFrame = ResolvedFrame(x: 1000, y: 100, width: 600, height: 400)
+        var frameCalls: [(UInt32, ResolvedFrame)] = []
+        var liveWindows: [WindowSnapshot] = [
+            Self.window(windowID: 800, bundleID: "com.apple.TextEdit", title: "Editor", spaceID: 7, frontIndex: 0),
+            WindowSnapshot(
+                windowID: 900,
+                bundleID: "com.apple.Finder",
+                pid: 900,
+                title: "Desktop",
+                role: "AXWindow",
+                subrole: nil,
+                minimized: false,
+                hidden: false,
+                frame: hiddenFrame,
+                spaceID: 7,
+                displayID: "display-a",
+                isFullscreen: false,
+                frontIndex: 1
+            ),
+        ]
+        let runtimeHooks = CommandServiceRuntimeHooks(
+            accessibilityGranted: { true },
+            listWindows: { [] },
+            focusedWindow: { nil },
+            activateBundle: { _ in true },
+            setFocusedWindowFrame: { _ in true },
+            displays: {
+                [
+                    DisplayInfo(
+                        id: "display-a",
+                        width: 3200,
+                        height: 2000,
+                        scale: 2.0,
+                        isPrimary: true,
+                        frame: CGRect(x: 0, y: 0, width: 1600, height: 1000),
+                        visibleFrame: CGRect(x: 0, y: 23, width: 1600, height: 977)
+                    ),
+                ]
+            },
+            runProcess: { _, _ in (0, "") },
+            focusWindow: { _, _ in .success },
+            setWindowFrame: { windowID, _, frame in
+                frameCalls.append((windowID, frame))
+                guard let index = liveWindows.firstIndex(where: { $0.windowID == windowID }) else {
+                    return false
+                }
+                let existing = liveWindows[index]
+                liveWindows[index] = WindowSnapshot(
+                    windowID: existing.windowID,
+                    bundleID: existing.bundleID,
+                    pid: existing.pid,
+                    title: existing.title,
+                    role: existing.role,
+                    subrole: existing.subrole,
+                    minimized: existing.minimized,
+                    hidden: existing.hidden,
+                    frame: frame,
+                    spaceID: existing.spaceID,
+                    displayID: existing.displayID,
+                    profileDirectory: existing.profileDirectory,
+                    isFullscreen: existing.isFullscreen,
+                    frontIndex: existing.frontIndex
+                )
+                return true
+            },
+            setWindowPosition: { _, _, _ in true },
+            spaces: {
+                [SpaceInfo(spaceID: 7, displayID: "display-a", isVisible: true, isNativeFullscreen: false)]
+            },
+            listWindowsOnAllSpaces: { liveWindows }
+        )
+        let service = workspace.makeService(stateStore: stateStore, runtimeHooks: runtimeHooks)
+
+        let result = service.spaceSwitch(spaceID: 1, json: true, reconcile: false)
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertTrue(frameCalls.contains(where: { $0.0 == 900 && $0.1 == recoveredFrame }))
+
+        let persisted = stateStore.load()
+        let finderEntry = persisted.slots.first(where: { $0.windowID == 900 })
+        XCTAssertEqual(finderEntry?.visibilityState, .visible)
+        XCTAssertEqual(finderEntry?.lastVisibleFrame, recoveredFrame)
+    }
+
     func testSpaceSwitchPreservesLastVisibleFrameWhenHidingAlreadyHiddenWindow() throws {
         let workspace = try TestConfigWorkspace(files: ["config.yaml": Self.virtualMultiSpaceConfigYAML])
         defer { workspace.cleanup() }
