@@ -36,6 +36,13 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         return windowsByID[id]
     }
 
+    /// Simulates a window closing (app quit etc.).
+    func removeWindow(_ id: UInt32) {
+        lock.lock()
+        defer { lock.unlock() }
+        windowsByID.removeValue(forKey: id)
+    }
+
     /// When set, restricts what onScreenWindowIDs() reports (simulates
     /// windows on other native Spaces / invisible helper windows).
     var onScreenWindowIDsOverride: Set<UInt32>?

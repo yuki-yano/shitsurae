@@ -181,6 +181,25 @@ struct WindowRegistryTests {
         #expect(resolution.unassignedWindows.map(\.windowID) == [5])
     }
 
+    // Codex指摘回帰: 完全割当が存在するなら貪欲で詰まらず全件解決する(増加道)
+    @Test func augmentingPathFindsCompleteAssignment() {
+        // w1 matches both rules; w2 matches only "y". A greedy pass that
+        // hands w1 to the "y" entry first would starve the "x" entry.
+        let windows = [
+            makeWindow(id: 1, bundleID: "app", title: "x y", frontIndex: 0),
+            makeWindow(id: 2, bundleID: "app", title: "y", frontIndex: 1),
+        ]
+        let entries = [
+            entry("wants-y", bundleID: "app", title: TitleMatcher(contains: "y")),
+            entry("wants-x", bundleID: "app", title: TitleMatcher(contains: "x")),
+        ]
+
+        let resolution = WindowRegistry.resolve(entries: entries, windows: windows)
+        #expect(resolution.unresolved.isEmpty)
+        #expect(resolution.assignments["wants-x"]?.windowID == 1)
+        #expect(resolution.assignments["wants-y"]?.windowID == 2)
+    }
+
     // バグ1-c 回帰: lookup は曖昧なら nil(誤エントリへの書き込み禁止)
     @Test func lookupIsNilWhenAmbiguous() {
         let window = makeWindow(id: 1, bundleID: "app")

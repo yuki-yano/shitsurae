@@ -20,8 +20,12 @@ public struct SpaceSwitchPlan: Equatable, Sendable {
     public let hides: [VisibilityPlan]
     /// The window to focus after switching (MRU within the target workspace).
     public let focusTarget: BoundWindow?
-    /// Entries that could not be bound to any live window.
+    /// Layout entries that could not be bound to any live window.
     public let unresolvedSlots: [PendingUnresolvedSlot]
+    /// Adopted entries whose window no longer exists — prune them instead of
+    /// reporting recovery (their fingerprint contains the dead windowID, so
+    /// they can never resolve again).
+    public let staleAdoptedEntryIDs: [String]
     /// Live windows no entry claimed (candidates for adoption).
     public let unassignedWindows: [WindowSnapshot]
 }
@@ -95,8 +99,9 @@ public enum SpaceSwitchPlanner {
                 )
             }
 
-        let unresolvedSlots = resolution.unresolved
-            .compactMap { entryByID[$0] }
+        let unresolvedEntries = resolution.unresolved.compactMap { entryByID[$0] }
+        let unresolvedSlots = unresolvedEntries
+            .filter { $0.origin == .layout }
             .map { entry in
                 PendingUnresolvedSlot(
                     slot: entry.slot,
@@ -108,6 +113,9 @@ public enum SpaceSwitchPlanner {
                 if lhs.spaceID != rhs.spaceID { return lhs.spaceID < rhs.spaceID }
                 return lhs.slot < rhs.slot
             }
+        let staleAdoptedEntryIDs = unresolvedEntries
+            .filter { $0.origin == .adopted }
+            .map(\.id)
 
         return SpaceSwitchPlan(
             layoutName: layoutName,
@@ -116,6 +124,7 @@ public enum SpaceSwitchPlanner {
             hides: hides,
             focusTarget: preferredFocusTarget(from: targets),
             unresolvedSlots: unresolvedSlots,
+            staleAdoptedEntryIDs: staleAdoptedEntryIDs,
             unassignedWindows: resolution.unassignedWindows
         )
     }

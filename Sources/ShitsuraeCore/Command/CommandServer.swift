@@ -11,7 +11,8 @@ public enum CommandSocket {
 }
 
 /// Newline-delimited JSON over a unix domain socket. One request per
-/// connection. Peer authentication = same UID (getpeereid).
+/// connection. Peers must be the same UID AND carry an allowlisted
+/// code-signing identity (PeerAuthService).
 ///
 /// This replaces v1's Agent + XPC + launchctl stack: the GUI app is the
 /// single state owner and serves the CLI directly.
@@ -19,6 +20,7 @@ public final class CommandServer: @unchecked Sendable {
     private let router: CommandRouter
     private let logger: ShitsuraeLogger
     private let socketURL: URL
+    private let auth: PeerAuthService
     private var listenFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
     private let queue = DispatchQueue(label: "shitsurae.command-server")
@@ -26,11 +28,13 @@ public final class CommandServer: @unchecked Sendable {
     public init(
         router: CommandRouter,
         logger: ShitsuraeLogger,
-        socketURL: URL = CommandSocket.socketURL()
+        socketURL: URL = CommandSocket.socketURL(),
+        auth: PeerAuthService = PeerAuthService()
     ) {
         self.router = router
         self.logger = logger
         self.socketURL = socketURL
+        self.auth = auth
     }
 
     deinit {
@@ -117,32 +121,33 @@ public final class CommandServer: @unchecked Sendable {
             return
         }
 
-        guard Self.peerIsSameUser(fd: clientFD) else {
-            logger.log(level: "warn", event: "server.peerRejected", fields: [:])
-            close(clientFD)
-            return
-        }
+        // Hand the connection off immediately: auth + read run per
+        // connection so one slow client can never stall the accept loop.
+        Task.detached { [router, logger, auth] in
+            Self.configureTimeouts(fd: clientFD)
 
-        let requestData = Self.readRequest(fd: clientFD)
-        guard let requestData else {
-            close(clientFD)
-            return
-        }
+            guard auth.authorize(fd: clientFD) else {
+                logger.log(level: "warn", event: "server.peerRejected", fields: [:])
+                close(clientFD)
+                return
+            }
 
-        Task { [router] in
+            guard let requestData = Self.readRequest(fd: clientFD) else {
+                close(clientFD)
+                return
+            }
+
             let response = await router.handle(requestData: requestData)
             Self.writeAll(fd: clientFD, data: response + Data("\n".utf8))
             close(clientFD)
         }
     }
 
-    static func peerIsSameUser(fd: Int32) -> Bool {
-        var uid: uid_t = 0
-        var gid: gid_t = 0
-        guard getpeereid(fd, &uid, &gid) == 0 else {
-            return false
-        }
-        return uid == getuid()
+    static func configureTimeouts(fd: Int32, seconds: Int = 5) {
+        var timeout = timeval(tv_sec: seconds, tv_usec: 0)
+        let size = socklen_t(MemoryLayout<timeval>.size)
+        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, size)
+        _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, size)
     }
 
     static func readRequest(fd: Int32, maxBytes: Int = 1 << 20) -> Data? {

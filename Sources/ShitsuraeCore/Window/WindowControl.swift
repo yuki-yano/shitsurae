@@ -9,6 +9,8 @@ public protocol WindowControl: Sendable {
     /// Cheap on-screen check (IDs only, no AX traffic) for filtering
     /// candidate lists.
     func onScreenWindowIDs() -> Set<UInt32>
+    /// Whether AX-based window mutations can succeed at all.
+    func accessibilityGranted() -> Bool
     func focusedWindow() -> WindowSnapshot?
     func displays() -> [DisplayInfo]
 
@@ -33,5 +35,9 @@ public extension WindowControl {
 
     func onScreenWindowIDs() -> Set<UInt32> {
         Set(listWindows().map(\.windowID))
+    }
+
+    func accessibilityGranted() -> Bool {
+        true
     }
 }

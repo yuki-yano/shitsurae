@@ -4,9 +4,6 @@
   "title": "Shitsurae Config",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "layouts"
-  ],
   "properties": {
     "app": {
       "$ref": "#/$defs/appDefinition"

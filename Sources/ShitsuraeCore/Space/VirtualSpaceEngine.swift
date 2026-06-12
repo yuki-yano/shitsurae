@@ -88,6 +88,7 @@ public actor VirtualSpaceEngine {
         config: LoadedConfig,
         reconcile: Bool = false
     ) throws -> SpaceSwitchOutcome {
+        try ensureAccessibility()
         guard let layoutName = state.activeLayoutName else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
@@ -181,8 +182,20 @@ public actor VirtualSpaceEngine {
             entry.lastActivatedAt = Date.rfc3339UTC()
             slotsByID[entry.id] = entry
         }
+        // Adopted entries whose window is gone can never resolve again
+        // (their fingerprint embeds the dead windowID) — drop them so they
+        // do not pollute recovery state forever.
+        for staleID in plan.staleAdoptedEntryIDs {
+            slotsByID.removeValue(forKey: staleID)
+        }
         newState.slots = Array(slotsByID.values)
         newState.setActiveSpace(displayID: hostDisplay.id, spaceID: targetSpaceID)
+        // ⑥ Drop active-space records of displays that are no longer
+        // connected; a reconnect can change the display UUID and the stale
+        // first entry would otherwise shadow the live one.
+        newState.activeSpaces.removeAll { entry in
+            !displays.contains(where: { $0.id == entry.displayID })
+        }
         newState.activeLayoutName = layoutName
         newState.pendingVisibilityConvergence = convergence.hasPending || !plan.unresolvedSlots.isEmpty
             ? PendingVisibilityConvergence(
@@ -222,6 +235,14 @@ public actor VirtualSpaceEngine {
         )
     }
 
+    /// Mutating commands need AX; failing early gives the CLI/GUI a clear
+    /// missingPermission error instead of a silent visual no-op.
+    func ensureAccessibility() throws {
+        guard control.accessibilityGranted() else {
+            throw ShitsuraeError(.missingPermission, "Accessibility permission is required")
+        }
+    }
+
     private func focusTarget(_ target: BoundWindow?) -> UInt32? {
         guard let target else { return nil }
 
@@ -255,6 +276,7 @@ public actor VirtualSpaceEngine {
         toSpaceID: Int,
         config: LoadedConfig
     ) throws -> WorkspaceMoveOutcome {
+        try ensureAccessibility()
         guard let layoutName = state.activeLayoutName else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
@@ -474,11 +496,22 @@ public actor VirtualSpaceEngine {
 
     /// Shutdown path: restore every offscreen-hidden window of the active
     /// layout so nothing stays stranded while Shitsurae is not running.
-    public func restoreAllForShutdown(config: LoadedConfig) {
-        guard let layoutName = state.activeLayoutName,
-              let layout = config.config.layouts[layoutName]
-        else {
-            return
+    /// Returns true when every hidden window was restored (and converged) —
+    /// only then is it safe to discard the runtime state.
+    @discardableResult
+    public func restoreAllForShutdown(config: LoadedConfig) -> Bool {
+        guard let layoutName = state.activeLayoutName else {
+            return true // nothing tracked, nothing to restore
+        }
+        guard let layout = config.config.layouts[layoutName] else {
+            return state.slots(layoutName: layoutName)
+                .allSatisfy { $0.visibilityState != .hiddenOffscreen }
+        }
+
+        let hiddenEntries = state.slots(layoutName: layoutName)
+            .filter { $0.visibilityState == .hiddenOffscreen }
+        guard !hiddenEntries.isEmpty else {
+            return true
         }
 
         let displays = control.displays()
@@ -487,30 +520,31 @@ public actor VirtualSpaceEngine {
             config: config.config,
             displays: displays
         ) else {
-            return
+            return false
         }
 
         let windows = control.listAllWindows()
-        let hiddenEntries = state.slots(layoutName: layoutName)
-            .filter { $0.visibilityState == .hiddenOffscreen }
-
         let resolution = WindowRegistry.resolve(
             entries: hiddenEntries.map(\.registryEntry),
             windows: windows
         )
 
         var plans: [VisibilityPlan] = []
+        var unresolvedCount = 0
         for entry in hiddenEntries {
-            guard let window = resolution.assignments[entry.id],
-                  let plan = VisibilityPlanner.plan(
-                      entry: entry,
-                      window: window,
-                      transition: .show,
-                      layout: layout,
-                      hostDisplay: hostDisplay,
-                      displays: displays
-                  )
-            else {
+            guard let window = resolution.assignments[entry.id] else {
+                // The window is gone (app quit); nothing left to restore.
+                continue
+            }
+            guard let plan = VisibilityPlanner.plan(
+                entry: entry,
+                window: window,
+                transition: .show,
+                layout: layout,
+                hostDisplay: hostDisplay,
+                displays: displays
+            ) else {
+                unresolvedCount += 1
                 continue
             }
             plans.append(plan)
@@ -531,6 +565,8 @@ public actor VirtualSpaceEngine {
         }
         newState.slots = Array(slotsByID.values)
         try? persist(newState)
+
+        return !convergence.hasPending && unresolvedCount == 0
     }
 
     // MARK: - Persistence

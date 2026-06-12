@@ -318,6 +318,32 @@ struct VirtualSpaceEngineTests {
         #expect(outcome.shownCount == 0)
     }
 
+    // Codex指摘回帰: 閉じられた adopted ウィンドウは prune され recovery を汚染しない
+    @Test func closedAdoptedWindowIsPrunedOnSwitch() async throws {
+        var windows = standardWindows()
+        windows.append(TestFixtures.window(id: 9, bundleID: "com.apple.finder", title: "Downloads", frontIndex: 3))
+
+        let (engine, control, url) = makeEngine(windows: windows)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        _ = try await engine.switchSpace(to: 2, config: config) // adopts Finder into space 1
+
+        var state = await engine.currentState
+        #expect(state.slots.contains { $0.origin == .adopted })
+
+        // The Finder window goes away (app quit).
+        control.removeWindow(9)
+
+        let outcome = try await engine.switchSpace(to: 1, config: config)
+        #expect(outcome.unresolvedSlots.isEmpty)
+        #expect(outcome.converged)
+
+        state = await engine.currentState
+        #expect(!state.slots.contains { $0.origin == .adopted })
+        #expect(!state.recoveryRequired)
+    }
+
     @Test func clearPendingResetsRecovery() async throws {
         let windows = [TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit")]
         let (engine, _, url) = makeEngine(windows: windows)

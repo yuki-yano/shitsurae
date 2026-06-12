@@ -185,6 +185,48 @@ struct ArrangeTests {
         #expect(firstIDs == secondIDs)
     }
 
+    // Codex指摘回帰: index:1 / index:2 が arrange で両方解決される
+    @Test func arrangeResolvesMultipleIndexEntriesOfSameApp() async throws {
+        let windows = [
+            TestFixtures.window(id: 1, bundleID: "com.apple.Terminal", title: "t1", frontIndex: 0),
+            TestFixtures.window(id: 2, bundleID: "com.apple.Terminal", title: "t2", frontIndex: 1),
+        ]
+        let layout = LayoutDefinition(spaces: [
+            SpaceDefinition(spaceID: 1, windows: [
+                WindowDefinition(
+                    match: WindowMatchRule(bundleID: "com.apple.Terminal", index: 1),
+                    slot: 1,
+                    launch: false,
+                    frame: TestFixtures.frameDef("0%", "0%", "50%", "100%")
+                ),
+                WindowDefinition(
+                    match: WindowMatchRule(bundleID: "com.apple.Terminal", index: 2),
+                    slot: 2,
+                    launch: false,
+                    frame: TestFixtures.frameDef("50%", "0%", "50%", "100%")
+                ),
+            ]),
+        ])
+        let config = TestFixtures.loadedConfig(layouts: ["term": layout])
+
+        let (engine, control, url) = makeEngine(windows: windows)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "term", activeSpaceID: 1, config: config)
+        let result = try await engine.arrange(layoutName: "term", spaceID: nil, config: config)
+
+        #expect(result.result == "success")
+        #expect(result.softErrors.isEmpty)
+
+        // Both terminals placed side by side, bound to distinct windows.
+        let state = await engine.currentState
+        let boundIDs = Set(state.slots.compactMap(\.windowID))
+        #expect(boundIDs == [1, 2])
+        let first = control.window(1)!
+        let second = control.window(2)!
+        #expect(first.frame.x != second.frame.x)
+    }
+
     @Test func ignoredAppIsSkipped() async throws {
         let layout = TestFixtures.twoSpaceLayout()
         let configWithIgnore = LoadedConfig(

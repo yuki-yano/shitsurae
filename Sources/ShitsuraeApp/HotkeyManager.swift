@@ -95,16 +95,20 @@ final class HotkeyManager {
     func reload(shortcuts: ResolvedShortcuts?) {
         self.shortcuts = shortcuts
 
-        // Own Cmd+Tab only when the switcher trigger actually is Cmd+Tab.
+        // Own Cmd+Tab only when our switcher can actually run: the trigger
+        // is Cmd+Tab AND the event tap exists. Without the tap (e.g. missing
+        // Accessibility permission) disabling the system hotkey would leave
+        // the user with no working Cmd+Tab at all.
         let triggerIsCommandTab = shortcuts.map {
             $0.switcherTrigger.key.lowercased() == "tab"
                 && Set($0.switcherTrigger.modifiers.map { $0.lowercased() }) == ["cmd"]
         } ?? false
+        let shouldOwnCommandTab = triggerIsCommandTab && eventTap != nil
 
-        if triggerIsCommandTab, !commandTabDisabled {
+        if shouldOwnCommandTab, !commandTabDisabled {
             SymbolicHotKeyController.setEnabled(false, hotKeys: SymbolicHotKeyController.commandTabGroup)
             commandTabDisabled = true
-        } else if !triggerIsCommandTab, commandTabDisabled {
+        } else if !shouldOwnCommandTab, commandTabDisabled {
             restoreNativeSwitcherHotKeys()
         }
     }
@@ -158,13 +162,13 @@ final class HotkeyManager {
         if eventMatchesHotkey(event: event, key: shortcuts.nextWindow.key, modifiers: shortcuts.nextWindow.modifiers),
            !disabled("nextWindow")
         {
-            cycle(forward: true, shortcuts: shortcuts, event: event)
+            cycle(forward: true, shortcuts: shortcuts, trigger: shortcuts.nextWindow)
             return true
         }
         if eventMatchesHotkey(event: event, key: shortcuts.prevWindow.key, modifiers: shortcuts.prevWindow.modifiers),
            !disabled("prevWindow")
         {
-            cycle(forward: false, shortcuts: shortcuts, event: event)
+            cycle(forward: false, shortcuts: shortcuts, trigger: shortcuts.prevWindow)
             return true
         }
 
@@ -273,7 +277,7 @@ final class HotkeyManager {
         }
     }
 
-    private func cycle(forward: Bool, shortcuts: ResolvedShortcuts, event: CGEvent) {
+    private func cycle(forward: Bool, shortcuts: ResolvedShortcuts, trigger: HotkeyDefinition) {
         guard shortcuts.cycleMode == .overlay else {
             model?.cycleWindow(forward: forward)
             return
@@ -283,7 +287,9 @@ final class HotkeyManager {
             return
         }
         let engine = model.engine
-        let holdModifiers = Set(shortcuts.nextWindow.modifiers.map { $0.lowercased() })
+        // Release detection must track the hotkey that actually fired —
+        // prevWindow may use different modifiers than nextWindow.
+        let holdModifiers = Set(trigger.modifiers.map { $0.lowercased() })
 
         sessionGeneration += 1
         let generation = sessionGeneration

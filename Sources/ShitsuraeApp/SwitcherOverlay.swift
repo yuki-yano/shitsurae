@@ -45,8 +45,14 @@ final class SwitcherOverlayController {
         self.hosting = hosting
         panel.contentView = hosting
 
-        let size = hosting.fittingSize
+        // Cap to the screen: with many candidates the card row scrolls
+        // horizontally instead of running off the display.
         let screenFrame = NSScreen.main?.visibleFrame ?? .zero
+        let fitting = hosting.fittingSize
+        let size = CGSize(
+            width: min(fitting.width, max(320, screenFrame.width - 80)),
+            height: fitting.height
+        )
         let origin = CGPoint(
             x: screenFrame.midX - size.width / 2,
             y: screenFrame.midY - size.height / 2
@@ -77,19 +83,32 @@ struct OverlayContent: View {
     let onSelect: (Int) -> Void
 
     var body: some View {
-        HStack(spacing: 10) {
-            ForEach(Array(candidates.enumerated()), id: \.element.id) { index, candidate in
-                CandidateCard(
-                    candidate: candidate,
-                    isSelected: index == selectedIndex,
-                    showThumbnail: showThumbnails
-                )
-                .onTapGesture {
-                    onSelect(index)
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(Array(candidates.enumerated()), id: \.element.id) { index, candidate in
+                        CandidateCard(
+                            candidate: candidate,
+                            isSelected: index == selectedIndex,
+                            showThumbnail: showThumbnails
+                        )
+                        .id(index)
+                        .onTapGesture {
+                            onSelect(index)
+                        }
+                    }
+                }
+                .padding(16)
+            }
+            .onAppear {
+                proxy.scrollTo(selectedIndex, anchor: .center)
+            }
+            .onChange(of: selectedIndex) { _, newValue in
+                withAnimation(.easeOut(duration: 0.1)) {
+                    proxy.scrollTo(newValue, anchor: .center)
                 }
             }
         }
-        .padding(16)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
         .padding(8)
     }

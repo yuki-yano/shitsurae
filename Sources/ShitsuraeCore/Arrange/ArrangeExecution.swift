@@ -78,7 +78,7 @@ public extension VirtualSpaceEngine {
     ) throws -> ArrangeExecutionJSON {
         logger.log(event: "arrange.start", fields: ["layout": layoutName])
 
-        guard SystemProbe.accessibilityGranted() else {
+        guard control.accessibilityGranted() else {
             return ArrangeExecutionJSON(
                 layout: layoutName,
                 result: "failed",
@@ -414,17 +414,25 @@ public extension VirtualSpaceEngine {
             .windowID
 
         while Date() <= deadline {
-            let pool = control.listAllWindows()
-                .filter { !alreadyBound.contains($0.windowID) }
-            let nonFullscreen = pool.filter { !$0.isFullscreen }
+            // index rules must see the FULL pool: shrinking it per bound
+            // window shifts the index positions and breaks index:2 after
+            // index:1 has bound (same bug class as v1's switch path).
+            // alreadyBound is enforced after selection instead.
+            let nonFullscreen = control.listAllWindows().filter { !$0.isFullscreen }
 
             if let preferredWindowID,
+               !alreadyBound.contains(preferredWindowID),
                let preferred = nonFullscreen.first(where: { $0.windowID == preferredWindowID })
             {
                 return preferred
             }
 
-            if let found = selectWindow(rule: rule, candidates: nonFullscreen, preLaunchWindowIDs: preLaunchWindowIDs) {
+            if let found = selectWindow(
+                rule: rule,
+                candidates: nonFullscreen,
+                preLaunchWindowIDs: preLaunchWindowIDs,
+                alreadyBound: alreadyBound
+            ) {
                 return found
             }
 
@@ -442,16 +450,11 @@ public extension VirtualSpaceEngine {
     private func selectWindow(
         rule: WindowMatchRule,
         candidates: [WindowSnapshot],
-        preLaunchWindowIDs: Set<UInt32>?
+        preLaunchWindowIDs: Set<UInt32>?,
+        alreadyBound: Set<UInt32>
     ) -> WindowSnapshot? {
-        let matched = WindowRegistry.sortedCandidates(rule: rule, pool: candidates)
-        if let index = rule.index {
-            let zeroBased = index - 1
-            if zeroBased >= 0, zeroBased < matched.count {
-                return matched[zeroBased]
-            }
-        } else if let first = matched.first {
-            return first
+        if let found = pick(rule: rule, pool: candidates, alreadyBound: alreadyBound) {
+            return found
         }
 
         // Profile launch fallback: lsof may lag right after a profile-window
@@ -474,13 +477,25 @@ public extension VirtualSpaceEngine {
             excludeTitleRegex: rule.excludeTitleRegex,
             index: rule.index
         )
-        let fallbackMatched = WindowRegistry.sortedCandidates(rule: fallbackRule, pool: newWindows)
-        if let index = fallbackRule.index {
+        return pick(rule: fallbackRule, pool: newWindows, alreadyBound: alreadyBound)
+    }
+
+    /// index selection runs against the full sorted pool (stable positions);
+    /// the chosen window is rejected only afterwards when another step
+    /// already bound it. Non-index rules pick the best unbound candidate.
+    private func pick(
+        rule: WindowMatchRule,
+        pool: [WindowSnapshot],
+        alreadyBound: Set<UInt32>
+    ) -> WindowSnapshot? {
+        let matched = WindowRegistry.sortedCandidates(rule: rule, pool: pool)
+        if let index = rule.index {
             let zeroBased = index - 1
-            guard zeroBased >= 0, zeroBased < fallbackMatched.count else { return nil }
-            return fallbackMatched[zeroBased]
+            guard zeroBased >= 0, zeroBased < matched.count else { return nil }
+            let chosen = matched[zeroBased]
+            return alreadyBound.contains(chosen.windowID) ? nil : chosen
         }
-        return fallbackMatched.first
+        return matched.first(where: { !alreadyBound.contains($0.windowID) })
     }
 
     private func setFrameWithRetry(window: WindowSnapshot, frame: ResolvedFrame) -> Bool {

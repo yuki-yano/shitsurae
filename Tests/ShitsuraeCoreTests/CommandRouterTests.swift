@@ -215,7 +215,11 @@ struct CommandServerTests {
         let router = CommandRouter(engine: engine, configManager: configManager, logger: logger)
         // Short socket path: sockaddr_un limit is 104 bytes.
         let socketURL = URL(fileURLWithPath: "/tmp/shitsurae-test-\(UInt32.random(in: 0 ..< 99999)).sock")
-        let server = CommandServer(router: router, logger: logger, socketURL: socketURL)
+        // The test runner is not an allowlisted binary; stub the identity.
+        let auth = PeerAuthService(identityProvider: { _ in
+            PeerIdentity(teamIdentifier: nil, bundleIdentifier: "shitsurae-tests", executablePath: nil)
+        })
+        let server = CommandServer(router: router, logger: logger, socketURL: socketURL, auth: auth)
         #expect(server.start())
         defer { server.stop() }
 

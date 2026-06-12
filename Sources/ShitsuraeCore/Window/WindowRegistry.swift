@@ -13,8 +13,8 @@ import Foundation
 /// 2. `match.index` entries, selected against a stable snapshot of the
 ///    remaining pool — all index entries see the same ordering, so
 ///    index 1 / index 2 stay consistent regardless of resolution order.
-/// 3. Remaining entries, most-specific first, greedily against the shrinking
-///    pool.
+/// 3. Remaining entries via maximum matching (Kuhn's augmenting paths), so
+///    a complete assignment is found whenever one exists.
 ///
 /// The write-side counterpart `lookup` is intentionally stricter
 /// (nil-fail-fast): it returns an entry only on windowID match or a unique
@@ -87,24 +87,59 @@ public enum WindowRegistry {
             assignments[entry.id] = pool.remove(at: poolIndex)
         }
 
-        // Phase 3: remaining entries, most-specific first, greedy.
+        // Phase 3: remaining entries, maximum matching via augmenting paths
+        // (Kuhn's algorithm). Plain greedy can starve a later entry whose
+        // only candidate was taken by an earlier one even though a complete
+        // assignment exists; augmenting paths reassign in that case.
+        // Iteration order (most-specific first) and candidate order
+        // (sortedCandidates) keep the result deterministic and preference-
+        // aware when several maximum matchings exist.
         let ordered = otherEntries.enumerated().sorted { lhs, rhs in
             let lhsScore = specificity(of: lhs.element.rule)
             let rhsScore = specificity(of: rhs.element.rule)
             if lhsScore != rhsScore { return lhsScore > rhsScore }
             return lhs.offset < rhs.offset
         }
+        .map(\.element)
 
-        for (_, entry) in ordered {
-            let candidates = sortedCandidates(rule: entry.rule, pool: pool)
-            guard let chosen = candidates.first,
-                  let poolIndex = pool.firstIndex(where: { $0.windowID == chosen.windowID })
-            else {
-                unresolved.append(entry.id)
-                continue
+        let candidatesByEntry = Dictionary(uniqueKeysWithValues: ordered.map { entry in
+            (entry.id, sortedCandidates(rule: entry.rule, pool: pool))
+        })
+        let entryByID = Dictionary(uniqueKeysWithValues: ordered.map { ($0.id, $0) })
+        var entryIDByWindowID: [UInt32: String] = [:]
+        var windowByEntryID: [String: WindowSnapshot] = [:]
+
+        func augment(_ entry: Entry, visited: inout Set<UInt32>) -> Bool {
+            for candidate in candidatesByEntry[entry.id] ?? [] {
+                guard visited.insert(candidate.windowID).inserted else { continue }
+
+                if let holderID = entryIDByWindowID[candidate.windowID] {
+                    guard let holder = entryByID[holderID],
+                          augment(holder, visited: &visited)
+                    else {
+                        continue
+                    }
+                }
+
+                entryIDByWindowID[candidate.windowID] = entry.id
+                windowByEntryID[entry.id] = candidate
+                return true
             }
+            return false
+        }
 
-            assignments[entry.id] = pool.remove(at: poolIndex)
+        for entry in ordered {
+            var visited = Set<UInt32>()
+            if !augment(entry, visited: &visited) {
+                unresolved.append(entry.id)
+            }
+        }
+
+        for (entryID, window) in windowByEntryID {
+            assignments[entryID] = window
+            if let poolIndex = pool.firstIndex(where: { $0.windowID == window.windowID }) {
+                pool.remove(at: poolIndex)
+            }
         }
 
         return Resolution(

@@ -58,6 +58,7 @@ public extension VirtualSpaceEngine {
 
     /// focus --slot N: targets the active workspace's tracked windows only.
     func focusSlot(_ slot: Int, config: LoadedConfig) throws -> FocusJSON {
+        try ensureAccessibility()
         guard let layoutName = currentState.activeLayoutName else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
@@ -99,6 +100,7 @@ public extension VirtualSpaceEngine {
     /// workspace, switch there first (v1 skipped this and focused an
     /// offscreen window — bug 1-b).
     func focusWindow(selector: WindowTargetSelector, config: LoadedConfig) throws -> FocusJSON {
+        try ensureAccessibility()
         guard let window = resolveTargetWindow(selector: selector) else {
             throw VirtualSpaceEngineError.windowNotTracked
         }
@@ -144,6 +146,7 @@ public extension VirtualSpaceEngine {
         height: LengthValue?,
         config: LoadedConfig
     ) throws -> WindowSetJSON {
+        try ensureAccessibility()
         guard let window = resolveTargetWindow(selector: selector) else {
             throw VirtualSpaceEngineError.windowNotTracked
         }
@@ -195,6 +198,7 @@ public extension VirtualSpaceEngine {
 
     /// Snap the focused (or selected) window to a preset frame.
     func snapWindow(selector: WindowTargetSelector, preset: SnapPreset) throws -> WindowSetJSON {
+        try ensureAccessibility()
         guard let window = resolveTargetWindow(selector: selector) else {
             throw VirtualSpaceEngineError.windowNotTracked
         }
@@ -236,6 +240,7 @@ public extension VirtualSpaceEngine {
         toSpaceID: Int,
         config: LoadedConfig
     ) throws -> WindowWorkspaceJSON {
+        try ensureAccessibility()
         guard let window = resolveTargetWindow(selector: selector) else {
             throw VirtualSpaceEngineError.windowNotTracked
         }

@@ -93,16 +93,27 @@ final class AppModel: ObservableObject {
         observers.removeAll()
 
         // Leave no window stranded offscreen while Shitsurae isn't running,
-        // then discard the runtime state entirely — every session starts
-        // fresh from an apply.
+        // then discard the runtime state — but only when every hidden window
+        // was actually restored. A failed restore keeps the state so the
+        // next session can still find and recover the parked windows.
         let engine = engine
         let config = configManager.configIfLoaded()
+        let logger = logger
         let semaphore = DispatchSemaphore(value: 0)
         Task.detached {
+            var restored = false
             if let config {
-                await engine.restoreAllForShutdown(config: config)
+                restored = await engine.restoreAllForShutdown(config: config)
             }
-            await engine.clearRuntimeState()
+            if restored {
+                await engine.clearRuntimeState()
+            } else {
+                logger.log(
+                    level: "warn",
+                    event: "app.shutdown.restoreIncomplete",
+                    fields: ["keptState": true]
+                )
+            }
             semaphore.signal()
         }
         _ = semaphore.wait(timeout: .now() + 3)

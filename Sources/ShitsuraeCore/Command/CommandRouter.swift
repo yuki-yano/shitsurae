@@ -158,7 +158,10 @@ public final class CommandRouter: Sendable {
                 reconcile: request.reconcile ?? false
             )
             let result = SpaceSwitchJSON(requestID: UUID().uuidString.lowercased(), outcome: outcome)
-            return Self.encodeSuccess(result)
+            // Visibility that did not converge (or unresolved slots) is a
+            // partial success — scripts must be able to detect it.
+            let converged = outcome.converged && outcome.unresolvedSlots.isEmpty
+            return Self.encodeSuccess(result, exitCode: converged ? 0 : ErrorCode.partialSuccess.rawValue)
 
         case "spaceRecover":
             guard request.forceClearPending == true else {

@@ -41,6 +41,10 @@ public struct LiveWindowControl: WindowControl {
         SystemProbe.displays()
     }
 
+    public func accessibilityGranted() -> Bool {
+        SystemProbe.accessibilityGranted()
+    }
+
     // MARK: - Frame
 
     @discardableResult
