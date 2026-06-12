@@ -8,10 +8,8 @@ APP_VERSION="${APP_VERSION:-}"
 APP_BUILD_VERSION="${APP_BUILD_VERSION:-}"
 APP_NAME="Shitsurae"
 BUNDLE_NAME="${BUNDLE_NAME:-Shitsurae}"
-AGENT_NAME="ShitsuraeAgent"
 CLI_NAME="shitsurae-cli"
 BUNDLED_CLI_NAME="shitsurae"
-CORE_BUNDLE_NAME="shitsurae_ShitsuraeCore.bundle"
 ICON_NAME="${ICON_NAME:-Shitsurae}"
 ICON_SOURCE_DIR="$ROOT_DIR/Shitsurae/Assets.xcassets/AppIcon.appiconset"
 MENU_ICON_SOURCE_DIR="$ROOT_DIR/Shitsurae/Assets.xcassets/MenuBarIcon.imageset"
@@ -22,7 +20,6 @@ APP_MACOS_PATH="$APP_CONTENTS_PATH/MacOS"
 APP_RESOURCES_PATH="$APP_CONTENTS_PATH/Resources"
 APP_PLIST_PATH="$APP_CONTENTS_PATH/Info.plist"
 APP_BUNDLE_ID=""
-AGENT_BUNDLE_ID="com.yuki-yano.shitsurae.agent"
 CLI_BUNDLE_ID="com.yuki-yano.shitsurae.cli"
 
 resolve_default_version() {
@@ -75,11 +72,6 @@ if [[ ! -x "$BIN_DIR/$APP_NAME" ]]; then
   exit 1
 fi
 
-if [[ ! -x "$BIN_DIR/$AGENT_NAME" ]]; then
-  echo "error: missing agent binary: $BIN_DIR/$AGENT_NAME" >&2
-  exit 1
-fi
-
 if [[ ! -x "$BIN_DIR/$CLI_NAME" ]]; then
   echo "error: missing CLI binary: $BIN_DIR/$CLI_NAME" >&2
   exit 1
@@ -87,11 +79,6 @@ fi
 
 if [[ ! -f "$ROOT_DIR/Shitsurae/Info.plist" ]]; then
   echo "error: missing app Info.plist: $ROOT_DIR/Shitsurae/Info.plist" >&2
-  exit 1
-fi
-
-if [[ ! -d "$BIN_DIR/$CORE_BUNDLE_NAME" ]]; then
-  echo "error: missing core resource bundle: $BIN_DIR/$CORE_BUNDLE_NAME" >&2
   exit 1
 fi
 
@@ -144,8 +131,6 @@ mkdir -p "$APP_MACOS_PATH" "$APP_RESOURCES_PATH"
 cp "$BIN_DIR/$APP_NAME" "$APP_MACOS_PATH/$APP_NAME"
 cp "$BIN_DIR/$CLI_NAME" "$APP_RESOURCES_PATH/$BUNDLED_CLI_NAME"
 cp "$ROOT_DIR/Shitsurae/Info.plist" "$APP_PLIST_PATH"
-cp "$BIN_DIR/$AGENT_NAME" "$APP_RESOURCES_PATH/$AGENT_NAME"
-cp -R "$BIN_DIR/$CORE_BUNDLE_NAME" "$APP_RESOURCES_PATH/$CORE_BUNDLE_NAME"
 cp "$MENU_ICON_SOURCE_DIR/menu-22.png" "$APP_RESOURCES_PATH/menu-22.png"
 cp "$MENU_ICON_SOURCE_DIR/menu-44.png" "$APP_RESOURCES_PATH/menu-44.png"
 iconutil -c icns "$ICONSET_DIR" -o "$APP_RESOURCES_PATH/${ICON_NAME}.icns"
@@ -183,7 +168,6 @@ sign_binary() {
 }
 
 sign_binary "$APP_MACOS_PATH/$APP_NAME" "$APP_BUNDLE_ID"
-sign_binary "$APP_RESOURCES_PATH/$AGENT_NAME" "$AGENT_BUNDLE_ID"
 sign_binary "$APP_RESOURCES_PATH/$BUNDLED_CLI_NAME" "$CLI_BUNDLE_ID"
 
 # Keep a stable designated requirement across local rebuilds so TCC grants
