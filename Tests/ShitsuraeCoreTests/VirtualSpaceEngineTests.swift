@@ -265,6 +265,24 @@ struct VirtualSpaceEngineTests {
         #expect(!VisibilityPlanner.isHiddenWindowFrame(frame: restored.frame, displays: [TestFixtures.display]))
     }
 
+    @Test func switchSpaceAdoptsUntrackedWindowsWithSinglePersist() async throws {
+        var windows = standardWindows()
+        windows.append(TestFixtures.window(id: 9, bundleID: "com.apple.finder", title: "Downloads", frontIndex: 3))
+
+        let (engine, _, url) = makeEngine(windows: windows)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        let before = await engine.currentState
+        #expect(before.revision == 1)
+
+        _ = try await engine.switchSpace(to: 2, config: config)
+
+        let after = await engine.currentState
+        #expect(after.revision == before.revision + 1)
+        #expect(after.slots.contains { $0.origin == .adopted && $0.windowID == 9 })
+    }
+
     // ピッカー候補から「存在しない/見えない」ウィンドウを除外する
     @Test func switcherCandidatesExcludePhantomWindows() async throws {
         let windows = standardWindows()

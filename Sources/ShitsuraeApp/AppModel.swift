@@ -388,8 +388,6 @@ final class AppModel: ObservableObject {
         let followFocusEnabled = config.config.resolvedFollowFocus
         let engine = engine
         let debounce = followFocusDebounce
-        let lastSwitch = lastFollowFocusSwitchAt
-        let lastChange = lastActiveSpaceChangeAt
 
         Task { [weak self] in
             guard let window = await engine.resolveTargetWindow(selector: WindowTargetSelector()),
@@ -404,24 +402,37 @@ final class AppModel: ObservableObject {
             let targetSpaceID = await engine.spaceID(forWindowID: window.windowID)
             let activeSpaceID = await engine.activeSpaceID()
 
-            var shouldSwitch = followFocusEnabled
-            if let lastSwitch, Date().timeIntervalSince(lastSwitch) < debounce {
-                shouldSwitch = false
+            let shouldSwitch = await MainActor.run { [weak self] in
+                guard let self else { return false }
+                var allowed = followFocusEnabled
+                if let lastSwitch = self.lastFollowFocusSwitchAt,
+                   Date().timeIntervalSince(lastSwitch) < debounce
+                {
+                    allowed = false
+                }
+                if let lastChange = self.lastActiveSpaceChangeAt,
+                   Date().timeIntervalSince(lastChange) < debounce
+                {
+                    allowed = false
+                }
+                guard allowed,
+                      let targetSpaceID,
+                      targetSpaceID != activeSpaceID
+                else {
+                    return false
+                }
+
+                let now = Date()
+                self.lastFollowFocusSwitchAt = now
+                self.lastActiveSpaceChangeAt = now
+                return true
             }
-            if let lastChange, Date().timeIntervalSince(lastChange) < debounce {
-                shouldSwitch = false
-            }
-            guard shouldSwitch,
-                  let targetSpaceID,
-                  targetSpaceID != activeSpaceID
-            else {
+            guard shouldSwitch, let targetSpaceID else {
                 return
             }
 
             _ = try? await engine.switchSpace(to: targetSpaceID, config: config)
             await MainActor.run {
-                self?.lastFollowFocusSwitchAt = Date()
-                self?.lastActiveSpaceChangeAt = Date()
                 self?.refreshStatus()
             }
         }

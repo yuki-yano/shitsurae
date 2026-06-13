@@ -185,6 +185,68 @@ struct ArrangeTests {
         #expect(firstIDs == secondIDs)
     }
 
+    @Test func arrangeFallsBackWhenPreviousLayoutActiveSpaceIsInvalid() async throws {
+        let otherLayout = LayoutDefinition(spaces: [
+            SpaceDefinition(spaceID: 3, windows: [
+                WindowDefinition(
+                    match: WindowMatchRule(bundleID: "com.apple.TextEdit"),
+                    slot: 1,
+                    launch: false,
+                    frame: TestFixtures.frameDef("0%", "0%", "100%", "100%")
+                ),
+            ]),
+            SpaceDefinition(spaceID: 4, windows: [
+                WindowDefinition(
+                    match: WindowMatchRule(bundleID: "com.apple.Notes"),
+                    slot: 1,
+                    launch: false,
+                    frame: TestFixtures.frameDef("0%", "0%", "100%", "100%")
+                ),
+            ]),
+        ])
+        let config = TestFixtures.loadedConfig(layouts: [
+            "work": TestFixtures.twoSpaceLayout(),
+            "other": otherLayout,
+        ])
+        let (engine, _, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        let result = try await engine.arrange(layoutName: "other", spaceID: nil, config: config)
+
+        #expect(result.result == "success")
+        let state = await engine.currentState
+        #expect(state.activeLayoutName == "other")
+        #expect(state.primaryActiveSpaceID == 3)
+    }
+
+    @Test func stateOnlyFallsBackWhenPreviousLayoutActiveSpaceIsInvalid() async throws {
+        let otherLayout = LayoutDefinition(spaces: [
+            SpaceDefinition(spaceID: 3, windows: [
+                WindowDefinition(
+                    match: WindowMatchRule(bundleID: "com.apple.TextEdit"),
+                    slot: 1,
+                    launch: false,
+                    frame: TestFixtures.frameDef("0%", "0%", "100%", "100%")
+                ),
+            ]),
+        ])
+        let config = TestFixtures.loadedConfig(layouts: [
+            "work": TestFixtures.twoSpaceLayout(),
+            "other": otherLayout,
+        ])
+        let (engine, _, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        let result = try await engine.arrangeStateOnly(layoutName: "other", spaceID: nil, config: config)
+
+        #expect(result.result == "success")
+        let state = await engine.currentState
+        #expect(state.activeLayoutName == "other")
+        #expect(state.primaryActiveSpaceID == 3)
+    }
+
     // Codex指摘回帰: index:1 / index:2 が arrange で両方解決される
     @Test func arrangeResolvesMultipleIndexEntriesOfSameApp() async throws {
         let windows = [

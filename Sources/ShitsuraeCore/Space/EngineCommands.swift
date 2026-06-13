@@ -271,7 +271,7 @@ public extension VirtualSpaceEngine {
 
     /// Pulls untracked on-screen windows of the host display into the active
     /// workspace so cycle/switcher can reach them.
-    func adoptUntrackedWindows(config: LoadedConfig) throws -> Int {
+    func adoptUntrackedWindows(config: LoadedConfig, persistChanges: Bool = true) throws -> Int {
         guard let layoutName = currentState.activeLayoutName,
               let activeSpaceID = currentState.primaryActiveSpaceID,
               let layout = config.config.layouts[layoutName]
@@ -327,7 +327,11 @@ public extension VirtualSpaceEngine {
             adoptedCount += 1
         }
 
-        try replaceState(newState)
+        if persistChanges {
+            try replaceState(newState)
+        } else {
+            replaceStateInMemory(newState)
+        }
         return adoptedCount
     }
 

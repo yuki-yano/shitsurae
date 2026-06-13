@@ -130,7 +130,7 @@ public actor VirtualSpaceEngine {
         // them on — adopt them into the *pre-switch* workspace so they hide
         // together with it instead of drifting to wherever the switcher is
         // first opened.
-        _ = try? adoptUntrackedWindows(config: config)
+        _ = try? adoptUntrackedWindows(config: config, persistChanges: false)
 
         let windows = control.listAllWindows()
         let plan = SpaceSwitchPlanner.plan(
@@ -573,6 +573,10 @@ public actor VirtualSpaceEngine {
 
     func replaceState(_ newState: RuntimeState) throws {
         try persist(newState)
+    }
+
+    func replaceStateInMemory(_ newState: RuntimeState) {
+        state = newState
     }
 
     private func persist(_ newState: RuntimeState) throws {

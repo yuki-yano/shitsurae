@@ -40,11 +40,12 @@ public extension VirtualSpaceEngine {
         spaceID: Int?,
         config: LoadedConfig
     ) throws -> ArrangeExecutionJSON {
-        let (layout, _, _) = try arrangeContext(layoutName: layoutName, spaceID: spaceID, config: config)
-        let activeSpaceID = spaceID
-            ?? currentState.primaryActiveSpaceID
-            ?? layout.spaces.map(\.spaceID).min()
-            ?? 1
+        let (layout, hostDisplay, _) = try arrangeContext(layoutName: layoutName, spaceID: spaceID, config: config)
+        let activeSpaceID = resolvedActiveSpaceID(
+            requestedSpaceID: spaceID,
+            layout: layout,
+            hostDisplay: hostDisplay
+        )
 
         try bootstrapState(layoutName: layoutName, activeSpaceID: activeSpaceID, config: config)
 
@@ -221,11 +222,11 @@ public extension VirtualSpaceEngine {
         _ = try? adoptUntrackedWindows(config: config)
 
         // Re-hide everything outside the active workspace.
-        let activeSpaceID = currentState.activeSpaceID(displayID: hostDisplay.id)
-            ?? currentState.primaryActiveSpaceID
-            ?? spaceID
-            ?? layout.spaces.map(\.spaceID).min()
-            ?? 1
+        let activeSpaceID = resolvedActiveSpaceID(
+            requestedSpaceID: spaceID,
+            layout: layout,
+            hostDisplay: hostDisplay
+        )
         let switchOutcome = try switchSpace(to: activeSpaceID, config: config, reconcile: true)
 
         let unresolvedSlots = switchOutcome.unresolvedSlots
@@ -278,6 +279,28 @@ public extension VirtualSpaceEngine {
         }
 
         return (layout, hostDisplay, displays)
+    }
+
+    private func resolvedActiveSpaceID(
+        requestedSpaceID: Int?,
+        layout: LayoutDefinition,
+        hostDisplay: DisplayInfo
+    ) -> Int {
+        let layoutSpaceIDs = Set(layout.spaces.map(\.spaceID))
+        if let requestedSpaceID {
+            return requestedSpaceID
+        }
+        if let current = currentState.activeSpaceID(displayID: hostDisplay.id),
+           layoutSpaceIDs.contains(current)
+        {
+            return current
+        }
+        if let current = currentState.primaryActiveSpaceID,
+           layoutSpaceIDs.contains(current)
+        {
+            return current
+        }
+        return layout.spaces.map(\.spaceID).min() ?? 1
     }
 
     private func restoreHiddenWindowsBeforeArrange(
@@ -386,14 +409,12 @@ public extension VirtualSpaceEngine {
         newState.slots = newState.slots.filter { $0.layoutName != layoutName } + entries + adopted
         newState.activeLayoutName = layoutName
         newState.configGeneration = config.configGeneration
-        if newState.activeSpaceID(displayID: hostDisplay.id) == nil {
-            newState.setActiveSpace(
-                displayID: hostDisplay.id,
-                spaceID: arrangedSpaceID ?? layout.spaces.map(\.spaceID).min() ?? 1
-            )
-        } else if let arrangedSpaceID {
-            newState.setActiveSpace(displayID: hostDisplay.id, spaceID: arrangedSpaceID)
-        }
+        let activeSpaceID = resolvedActiveSpaceID(
+            requestedSpaceID: arrangedSpaceID,
+            layout: layout,
+            hostDisplay: hostDisplay
+        )
+        newState.setActiveSpace(displayID: hostDisplay.id, spaceID: activeSpaceID)
         newState.liveArrangeRecoveryRequired = false
 
         try replaceState(newState)
