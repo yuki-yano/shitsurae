@@ -4,7 +4,6 @@
   "title": "Shitsurae Config",
   "type": "object",
   "additionalProperties": false,
-  "required": ["layouts"],
   "properties": {
     "app": {
       "$ref": "#/$defs/appDefinition"
@@ -14,9 +13,6 @@
     },
     "overlay": {
       "$ref": "#/$defs/overlayDefinition"
-    },
-    "executionPolicy": {
-      "$ref": "#/$defs/executionPolicy"
     },
     "monitors": {
       "$ref": "#/$defs/monitorsDefinition"
@@ -48,37 +44,30 @@
         }
       }
     },
-    "spaceInterpretationMode": {
-      "type": "string",
-      "enum": ["native", "virtual"]
-    },
     "modeDefinition": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "space": {
-          "$ref": "#/$defs/spaceInterpretationMode"
-        },
         "followFocus": {
           "type": "boolean"
         }
       }
     },
-    "spaceMoveMethod": {
-      "type": "string",
-      "enum": ["drag", "displayRelay"]
-    },
-    "windowSource": {
-      "type": "string",
-      "enum": ["window"]
-    },
     "monitorRole": {
       "type": "string",
-      "enum": ["primary", "secondary"]
+      "enum": [
+        "primary",
+        "secondary"
+      ]
     },
     "globalActionType": {
       "type": "string",
-      "enum": ["move", "resize", "moveResize", "snap"]
+      "enum": [
+        "move",
+        "resize",
+        "moveResize",
+        "snap"
+      ]
     },
     "snapPreset": {
       "type": "string",
@@ -122,17 +111,26 @@
       "allOf": [
         {
           "not": {
-            "required": ["equals", "contains"]
+            "required": [
+              "equals",
+              "contains"
+            ]
           }
         },
         {
           "not": {
-            "required": ["equals", "regex"]
+            "required": [
+              "equals",
+              "regex"
+            ]
           }
         },
         {
           "not": {
-            "required": ["contains", "regex"]
+            "required": [
+              "contains",
+              "regex"
+            ]
           }
         }
       ]
@@ -140,7 +138,9 @@
     "windowMatchRule": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["bundleID"],
+      "required": [
+        "bundleID"
+      ],
       "properties": {
         "bundleID": {
           "type": "string",
@@ -191,7 +191,12 @@
     "frameDefinition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["x", "y", "width", "height"],
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
       "properties": {
         "x": {
           "$ref": "#/$defs/lengthValue"
@@ -210,11 +215,12 @@
     "windowDefinition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["match", "slot", "frame"],
+      "required": [
+        "match",
+        "slot",
+        "frame"
+      ],
       "properties": {
-        "source": {
-          "$ref": "#/$defs/windowSource"
-        },
         "match": {
           "$ref": "#/$defs/windowMatchRule"
         },
@@ -234,7 +240,10 @@
     "spaceDefinition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["spaceID", "windows"],
+      "required": [
+        "spaceID",
+        "windows"
+      ],
       "properties": {
         "spaceID": {
           "type": "integer",
@@ -254,7 +263,9 @@
     "initialFocusDefinition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["slot"],
+      "required": [
+        "slot"
+      ],
       "properties": {
         "slot": {
           "type": "integer",
@@ -266,7 +277,9 @@
     "layoutDefinition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["spaces"],
+      "required": [
+        "spaces"
+      ],
       "properties": {
         "initialFocus": {
           "$ref": "#/$defs/initialFocusDefinition"
@@ -305,22 +318,34 @@
       },
       "anyOf": [
         {
-          "required": ["bundleID"]
+          "required": [
+            "bundleID"
+          ]
         },
         {
-          "required": ["titleRegex"]
+          "required": [
+            "titleRegex"
+          ]
         },
         {
-          "required": ["role"]
+          "required": [
+            "role"
+          ]
         },
         {
-          "required": ["subrole"]
+          "required": [
+            "subrole"
+          ]
         },
         {
-          "required": ["minimized"]
+          "required": [
+            "minimized"
+          ]
         },
         {
-          "required": ["hidden"]
+          "required": [
+            "hidden"
+          ]
         }
       ]
     },
@@ -364,21 +389,6 @@
         }
       }
     },
-    "executionPolicy": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "spaceMoveMethod": {
-          "$ref": "#/$defs/spaceMoveMethod"
-        },
-        "spaceMoveMethodInApps": {
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/spaceMoveMethod"
-          }
-        }
-      }
-    },
     "monitorTargetDefinition": {
       "type": "object",
       "additionalProperties": false,
@@ -402,7 +412,13 @@
     },
     "modifier": {
       "type": "string",
-      "enum": ["cmd", "shift", "ctrl", "alt", "fn"]
+      "enum": [
+        "cmd",
+        "shift",
+        "ctrl",
+        "alt",
+        "fn"
+      ]
     },
     "keyName": {
       "type": "string",
@@ -415,7 +431,10 @@
     "hotkeyDefinition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["key", "modifiers"],
+      "required": [
+        "key",
+        "modifiers"
+      ],
       "properties": {
         "key": {
           "$ref": "#/$defs/keyName"
@@ -432,7 +451,11 @@
     "focusBySlotShortcut": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["key", "modifiers", "slot"],
+      "required": [
+        "key",
+        "modifiers",
+        "slot"
+      ],
       "properties": {
         "key": {
           "$ref": "#/$defs/keyName"
@@ -453,7 +476,10 @@
     },
     "cyclePresentationMode": {
       "type": "string",
-      "enum": ["direct", "overlay"]
+      "enum": [
+        "direct",
+        "overlay"
+      ]
     },
     "cycleShortcutDefinition": {
       "type": "object",
@@ -502,20 +528,15 @@
           "items": {
             "$ref": "#/$defs/overlayCommandKeyName"
           }
-        },
-        "sources": {
-          "type": "array",
-          "uniqueItems": true,
-          "items": {
-            "$ref": "#/$defs/windowSource"
-          }
         }
       }
     },
     "globalActionDefinition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type"],
+      "required": [
+        "type"
+      ],
       "properties": {
         "type": {
           "$ref": "#/$defs/globalActionType"
@@ -540,7 +561,11 @@
     "globalActionShortcut": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["key", "modifiers", "action"],
+      "required": [
+        "key",
+        "modifiers",
+        "action"
+      ],
       "properties": {
         "key": {
           "$ref": "#/$defs/keyName"

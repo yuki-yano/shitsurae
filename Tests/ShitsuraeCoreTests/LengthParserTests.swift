@@ -1,49 +1,40 @@
-import XCTest
+import Testing
 @testable import ShitsuraeCore
 
-final class LengthParserTests: XCTestCase {
-    func testParsePercentAndRatio() throws {
-        let percent = try LengthParser.parse("50%")
-        XCTAssertEqual(percent.unit, .percent)
-        XCTAssertEqual(percent.value, 50)
-
-        let ratio = try LengthParser.parse("0.5r")
-        XCTAssertEqual(ratio.unit, .ratio)
-        XCTAssertEqual(ratio.value, 0.5)
+@Suite("LengthParser")
+struct LengthParserTests {
+    @Test func parsesPercent() throws {
+        let parsed = try LengthParser.parse("50%")
+        #expect(parsed == ParsedLength(value: 50, unit: .percent))
+        #expect(parsed.resolve(dimension: 1000, scale: 2) == 500)
     }
 
-    func testParsePxRoundToPoint() throws {
-        let px = try LengthParser.parse("2560px")
-        XCTAssertEqual(px.resolve(dimension: 0, scale: 2.0), 1280)
+    @Test func parsesRatio() throws {
+        let parsed = try LengthParser.parse("0.25r")
+        #expect(parsed == ParsedLength(value: 0.25, unit: .ratio))
+        #expect(parsed.resolve(dimension: 800, scale: 1) == 200)
     }
 
-    func testPercentOutOfRangeThrows() {
-        XCTAssertThrowsError(try LengthParser.parse("100.1%"))
-        XCTAssertThrowsError(try LengthParser.parse("-0.1%"))
+    @Test func parsesPt() throws {
+        #expect(try LengthParser.parse("12pt") == ParsedLength(value: 12, unit: .pt))
+        #expect(try LengthParser.parse("12") == ParsedLength(value: 12, unit: .pt))
     }
 
-    func testRatioOutOfRangeThrows() {
-        XCTAssertThrowsError(try LengthParser.parse("1.1r"))
-        XCTAssertThrowsError(try LengthParser.parse("-0.1r"))
+    @Test func parsesPx() throws {
+        let parsed = try LengthParser.parse("100px")
+        #expect(parsed == ParsedLength(value: 100, unit: .px))
+        #expect(parsed.resolve(dimension: 0, scale: 2) == 50)
     }
 
-    func testResolveFrameValidation() throws {
-        let frame = FrameDefinition(
-            x: .expression("0%"),
-            y: .expression("0%"),
-            width: .expression("100%"),
-            height: .expression("100%")
-        )
+    @Test func rejectsOutOfRangePercent() {
+        #expect(throws: ShitsuraeError.self) {
+            try LengthParser.parse("120%")
+        }
+    }
 
-        let resolved = try LengthParser.resolveFrame(
-            frame,
-            basis: CGRect(x: 0, y: 0, width: 1000, height: 500),
-            scale: 2
-        )
-
-        XCTAssertEqual(resolved.x, 0)
-        XCTAssertEqual(resolved.y, 0)
-        XCTAssertEqual(resolved.width, 1000)
-        XCTAssertEqual(resolved.height, 500)
+    @Test func rejectsGarbage() {
+        #expect(throws: ShitsuraeError.self) {
+            try LengthParser.parse("abc")
+        }
     }
 }

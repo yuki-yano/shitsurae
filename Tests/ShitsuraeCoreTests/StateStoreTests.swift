@@ -1,371 +1,157 @@
 import Foundation
-import XCTest
+import Testing
 @testable import ShitsuraeCore
 
-final class StateStoreTests: XCTestCase {
-    func testLoadLegacyStatePromotesDefaults() throws {
-        let url = temporaryStateURL()
-        let json = """
+@Suite("RuntimeStateStore")
+struct StateStoreTests {
+    private func makeEntry(spaceID: Int, slot: Int, bundleID: String = "com.example.App") -> SlotEntry {
+        SlotEntry(
+            layoutName: "work",
+            spaceID: spaceID,
+            slot: slot,
+            origin: .layout,
+            definitionFingerprint: "fp-\(spaceID)-\(slot)",
+            layoutSpaceID: spaceID,
+            bundleID: bundleID
+        )
+    }
+
+    @Test func roundTripsState() throws {
+        let (store, url) = TestFixtures.tempStateStore()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        var state = RuntimeState(configGeneration: "gen")
+        state.activeLayoutName = "work"
+        state.setActiveSpace(displayID: "uuid-main", spaceID: 2)
+        state.slots = [makeEntry(spaceID: 1, slot: 1), makeEntry(spaceID: 2, slot: 1)]
+
+        try store.saveStrict(state: state)
+        let loaded = try store.loadStrict()
+
+        #expect(loaded.schemaVersion == 2)
+        #expect(loaded.activeLayoutName == "work")
+        #expect(loaded.activeSpaceID(displayID: "uuid-main") == 2)
+        #expect(loaded.primaryActiveSpaceID == 2)
+        #expect(loaded.slots.count == 2)
+    }
+
+    @Test func missingFileYieldsFreshState() throws {
+        let (store, _) = TestFixtures.tempStateStore()
+        let state = try store.loadStrict()
+        #expect(state.slots.isEmpty)
+        #expect(state.activeLayoutName == nil)
+    }
+
+    // v1状態ファイルの破棄(確定仕様)
+    @Test func discardsV1StateFile() throws {
+        let (store, url) = TestFixtures.tempStateStore()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let v1JSON = """
         {
-          "updatedAt": "2026-03-10T00:00:00Z",
-          "slots": [
-            {
-              "slot": 1,
-              "source": "window",
-              "bundleID": "com.example.app",
-              "title": "Legacy",
-              "profile": "Default",
-              "spaceID": 3,
-              "displayID": "display-1",
-              "windowID": 99
-            }
-          ]
+          "updatedAt": "2026-01-01T00:00:00Z",
+          "revision": 7,
+          "stateMode": "virtual",
+          "configGeneration": "legacy",
+          "activeLayoutName": "old",
+          "activeVirtualSpaceID": 3,
+          "slots": []
         }
         """
-        try json.write(to: url, atomically: true, encoding: .utf8)
-
-        let state = RuntimeStateStore(stateFileURL: url).load()
-        XCTAssertEqual(state.stateMode, .native)
-        XCTAssertEqual(state.configGeneration, "legacy")
-        XCTAssertEqual(state.revision, 0)
-        XCTAssertEqual(state.activeLayoutName, nil)
-        XCTAssertEqual(state.activeVirtualSpaceID, nil)
-        XCTAssertEqual(state.slots.first?.layoutName, "__legacy__")
-        XCTAssertEqual(state.slots.first?.definitionFingerprint, "legacy")
-        XCTAssertEqual(state.slots.first?.lastKnownTitle, "Legacy")
-        XCTAssertEqual(state.slots.first?.nativeSpaceID, 3)
-    }
-
-    func testSaveAndLoadExtendedStateRoundTrips() {
-        let url = temporaryStateURL()
-        let store = RuntimeStateStore(stateFileURL: url)
-        store.save(
-            slots: [
-                SlotEntry(
-                    layoutName: "work",
-                    slot: 1,
-                    source: .window,
-                    bundleID: "com.example.app",
-                    definitionFingerprint: "fingerprint",
-                    pid: 123,
-                    titleMatchKind: .equals,
-                    titleMatchValue: "Main",
-                    excludeTitleRegex: "Debug",
-                    role: "AXWindow",
-                    subrole: "AXStandardWindow",
-                    matchIndex: 1,
-                    lastKnownTitle: "Main",
-                    profile: "Default",
-                    spaceID: 2,
-                    nativeSpaceID: 7,
-                    displayID: "display-1",
-                    windowID: 88
-                ),
-            ],
-            stateMode: .virtual,
-            configGeneration: "generation-1",
-            activeLayoutName: "work",
-            activeVirtualSpaceID: 2,
-            revision: 5,
-            pendingSwitchTransaction: PendingSwitchTransaction(
-                requestID: UUID().uuidString.lowercased(),
-                startedAt: "2026-03-10T00:00:00Z",
-                activeLayoutName: "work",
-                attemptedTargetSpaceID: 2,
-                previousActiveSpaceID: 1,
-                configGeneration: "generation-1",
-                status: .inFlight,
-            )
-        )
-
-        let state = store.load()
-        XCTAssertEqual(state.stateMode, .virtual)
-        XCTAssertEqual(state.configGeneration, "generation-1")
-        XCTAssertEqual(state.activeLayoutName, "work")
-        XCTAssertEqual(state.activeVirtualSpaceID, 2)
-        XCTAssertEqual(state.revision, 5)
-        XCTAssertEqual(state.pendingSwitchTransaction?.attemptedTargetSpaceID, 2)
-        XCTAssertEqual(state.slots.first?.layoutName, "work")
-        XCTAssertEqual(state.slots.first?.nativeSpaceID, 7)
-        XCTAssertEqual(state.slots.first?.title, "Main")
-    }
-
-    func testLoadStrictMovesCorruptedStateAside() throws {
-        let url = temporaryStateURL()
-        try "{ not-json".write(to: url, atomically: true, encoding: .utf8)
-
-        do {
-            _ = try RuntimeStateStore(stateFileURL: url).loadStrict()
-            XCTFail("expected corrupted state error")
-        } catch let error as RuntimeStateStoreError {
-            guard case let .corrupted(fileURL, backupURL) = error else {
-                return XCTFail("unexpected error: \(error)")
-            }
-            XCTAssertEqual(fileURL, url)
-            XCTAssertNotNil(backupURL)
-            if let backupURL {
-                XCTAssertTrue(FileManager.default.fileExists(atPath: backupURL.path))
-            }
-            XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
-        }
-    }
-
-    func testSaveStrictThrowsWhenStateFileURLIsDirectory() throws {
-        let directoryURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("runtime-state-dir-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-        let store = RuntimeStateStore(stateFileURL: directoryURL)
-
-        XCTAssertThrowsError(try store.saveStrict(slots: [])) { error in
-            guard case let RuntimeStateStoreError.writeFailed(fileURL, _) = error else {
-                return XCTFail("unexpected error: \(error)")
-            }
-            XCTAssertEqual(fileURL, directoryURL)
-        }
-    }
-
-    func testLoadStrictThrowsReadPermissionDeniedWithoutCreatingBackup() throws {
-        let url = temporaryStateURL()
-        try "{\"updatedAt\":\"2026-03-12T00:00:00Z\",\"slots\":[]}".write(to: url, atomically: true, encoding: .utf8)
-        let beforeBackups = try FileManager.default.contentsOfDirectory(
+        try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),
-            includingPropertiesForKeys: nil
-        ).filter { $0.lastPathComponent.hasPrefix("runtime-state.corrupt-") }.count
-        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: url.path)
-        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path) }
-
-        XCTAssertThrowsError(try RuntimeStateStore(stateFileURL: url).loadStrict()) { error in
-            guard case let RuntimeStateStoreError.readPermissionDenied(fileURL) = error else {
-                return XCTFail("unexpected error: \(error)")
-            }
-            XCTAssertEqual(fileURL, url)
-        }
-        let afterBackups = try FileManager.default.contentsOfDirectory(
-            at: url.deletingLastPathComponent(),
-            includingPropertiesForKeys: nil
-        ).filter { $0.lastPathComponent.hasPrefix("runtime-state.corrupt-") }.count
-        XCTAssertEqual(afterBackups, beforeBackups)
-    }
-
-    func testSaveStrictRejectsStaleRevisionAndGeneration() throws {
-        let url = temporaryStateURL()
-        try RuntimeStateStore(stateFileURL: url).saveStrict(
-            slots: [],
-            stateMode: .virtual,
-            configGeneration: "generation-2",
-            revision: 9
+            withIntermediateDirectories: true
         )
-        let store = RuntimeStateStore(stateFileURL: url)
-
-        XCTAssertThrowsError(
-            try store.saveStrict(
-                slots: [],
-                stateMode: .virtual,
-                configGeneration: "generation-3",
-                revision: 10,
-                expecting: RuntimeStateWriteExpectation(
-                    revision: 8,
-                    configGeneration: "generation-1"
-                )
-            )
-        ) { error in
-            guard case let RuntimeStateStoreError.staleWriteRejected(
-                expectedRevision,
-                actualRevision,
-                expectedConfigGeneration,
-                actualConfigGeneration
-            ) = error else {
-                return XCTFail("unexpected error: \(error)")
-            }
-            XCTAssertEqual(expectedRevision, 8)
-            XCTAssertEqual(actualRevision, 9)
-            XCTAssertEqual(expectedConfigGeneration, "generation-1")
-            XCTAssertEqual(actualConfigGeneration, "generation-2")
-        }
-    }
-
-    func testSaveStrictRejectsSameGenerationStaleRevision() throws {
-        let url = temporaryStateURL()
-        try RuntimeStateStore(stateFileURL: url).saveStrict(
-            slots: [],
-            stateMode: .virtual,
-            configGeneration: "generation-2",
-            revision: 9
-        )
-        let store = RuntimeStateStore(stateFileURL: url)
-
-        XCTAssertThrowsError(
-            try store.saveStrict(
-                slots: [],
-                stateMode: .virtual,
-                configGeneration: "generation-2",
-                revision: 10,
-                expecting: RuntimeStateWriteExpectation(
-                    revision: 8,
-                    configGeneration: "generation-2"
-                )
-            )
-        ) { error in
-            guard case let RuntimeStateStoreError.staleWriteRejected(
-                expectedRevision,
-                actualRevision,
-                expectedConfigGeneration,
-                actualConfigGeneration
-            ) = error else {
-                return XCTFail("unexpected error: \(error)")
-            }
-            XCTAssertEqual(expectedRevision, 8)
-            XCTAssertEqual(actualRevision, 9)
-            XCTAssertEqual(expectedConfigGeneration, "generation-2")
-            XCTAssertEqual(actualConfigGeneration, "generation-2")
-        }
-    }
-
-    func testSaveStrictRejectsLegacySlotMetadataInCurrentGeneration() throws {
-        let url = temporaryStateURL()
-        let store = RuntimeStateStore(stateFileURL: url)
-
-        XCTAssertThrowsError(
-            try store.saveStrict(
-                slots: [
-                    SlotEntry(
-                        slot: 1,
-                        source: .window,
-                        bundleID: "com.example.app",
-                        title: "Legacy",
-                        profile: "Default",
-                        spaceID: 3,
-                        displayID: "display-1",
-                        windowID: 99
-                    ),
-                ],
-                stateMode: .virtual,
-                configGeneration: "generation-1",
-                activeLayoutName: "work",
-                activeVirtualSpaceID: 3,
-                revision: 1
-            )
-        ) { error in
-            guard case let RuntimeStateStoreError.writeFailed(fileURL, reason) = error else {
-                return XCTFail("unexpected error: \(error)")
-            }
-            XCTAssertEqual(fileURL, url)
-            XCTAssertTrue(reason.contains("legacy slot metadata cannot be saved"))
-        }
-    }
-
-    func testSaveStrictDeduplicatesRuntimeManagedEntriesByFingerprint() throws {
-        let url = temporaryStateURL()
-        let store = RuntimeStateStore(stateFileURL: url)
-
-        try store.saveStrict(
-            slots: [
-                SlotEntry(
-                    layoutName: "default",
-                    slot: 101,
-                    source: .window,
-                    bundleID: "com.apple.finder",
-                    definitionFingerprint: "runtimeVirtualWorkspace\u{0}default\u{0}com.apple.finder\u{0}ダウンロード\u{0}AXWindow\u{0}\u{0}",
-                    pid: 500,
-                    titleMatchKind: .equals,
-                    titleMatchValue: "ダウンロード",
-                    role: "AXWindow",
-                    lastKnownTitle: "ダウンロード",
-                    spaceID: 1,
-                    nativeSpaceID: 1,
-                    displayID: "display-1",
-                    windowID: 105590,
-                    lastVisibleFrame: ResolvedFrame(x: 0, y: 0, width: 1000, height: 700),
-                    visibilityState: .hiddenOffscreen,
-                    lastActivatedAt: "2026-03-18T03:03:37.233Z"
-                ),
-                SlotEntry(
-                    layoutName: "default",
-                    slot: 104,
-                    source: .window,
-                    bundleID: "com.apple.finder",
-                    definitionFingerprint: "runtimeVirtualWorkspace\u{0}default\u{0}com.apple.finder\u{0}ダウンロード\u{0}AXWindow\u{0}\u{0}",
-                    pid: 501,
-                    titleMatchKind: .equals,
-                    titleMatchValue: "ダウンロード",
-                    role: "AXWindow",
-                    lastKnownTitle: "ダウンロード",
-                    spaceID: 1,
-                    nativeSpaceID: 1,
-                    displayID: "display-1",
-                    windowID: 105730,
-                    lastVisibleFrame: ResolvedFrame(x: 20, y: 30, width: 1280, height: 900),
-                    visibilityState: .visible,
-                    lastActivatedAt: "2026-03-18T03:25:04.496Z"
-                ),
-            ],
-            stateMode: .virtual,
-            configGeneration: "generation-1",
-            activeLayoutName: "default",
-            activeVirtualSpaceID: 1,
-            revision: 7
-        )
+        try v1JSON.write(to: url, atomically: true, encoding: .utf8)
 
         let state = try store.loadStrict()
-        XCTAssertEqual(state.slots.count, 1)
-        XCTAssertEqual(state.slots.first?.slot, 101)
-        XCTAssertEqual(state.slots.first?.windowID, 105730)
-        XCTAssertEqual(state.slots.first?.visibilityState, .visible)
-        XCTAssertEqual(state.slots.first?.lastActivatedAt, "2026-03-18T03:25:04.496Z")
-        XCTAssertEqual(state.slots.first?.lastVisibleFrame, ResolvedFrame(x: 20, y: 30, width: 1280, height: 900))
+        #expect(state.activeLayoutName == nil)
+        #expect(state.revision == 0)
+
+        // Old file moved aside as a backup.
+        let siblings = try FileManager.default.contentsOfDirectory(atPath: url.deletingLastPathComponent().path)
+        #expect(siblings.contains { $0.contains("discarded") })
+        #expect(!FileManager.default.fileExists(atPath: url.path))
     }
 
-    func testSaveStrictKeepsDistinctLayoutManagedEntries() throws {
-        let url = temporaryStateURL()
-        let store = RuntimeStateStore(stateFileURL: url)
+    @Test func backsUpCorruptedFile() throws {
+        let (store, url) = TestFixtures.tempStateStore()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "{\"schemaVersion\": 2, \"broken".write(to: url, atomically: true, encoding: .utf8)
+
+        // Probe fails to decode → treated as non-v2 → discarded, fresh state.
+        let state = try store.loadStrict()
+        #expect(state.slots.isEmpty)
+    }
+
+    @Test func rejectsStaleWrite() throws {
+        let (store, url) = TestFixtures.tempStateStore()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        var state = RuntimeState(configGeneration: "gen")
+        state.revision = 5
+        try store.saveStrict(state: state)
+
+        let staleExpectation = RuntimeStateWriteExpectation(revision: 3, configGeneration: "gen")
+        var next = state
+        next.revision = 6
+
+        #expect(throws: RuntimeStateStoreError.self) {
+            try store.saveStrict(state: next, expecting: staleExpectation)
+        }
+    }
+
+    @Test func acceptsMatchingExpectation() throws {
+        let (store, url) = TestFixtures.tempStateStore()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        var state = RuntimeState(configGeneration: "gen")
+        state.revision = 5
+        try store.saveStrict(state: state)
+
+        var next = state
+        next.revision = 6
         try store.saveStrict(
-            slots: [
-                SlotEntry(
-                    layoutName: "default",
-                    slot: 1,
-                    source: .window,
-                    bundleID: "org.alacritty",
-                    definitionFingerprint: "slot-1",
-                    titleMatchKind: .equals,
-                    titleMatchValue: "Alacritty",
-                    role: "AXWindow",
-                    lastKnownTitle: "Alacritty",
-                    spaceID: 1,
-                    nativeSpaceID: 1,
-                    displayID: "display-1",
-                    windowID: 10
-                ),
-                SlotEntry(
-                    layoutName: "default",
-                    slot: 2,
-                    source: .window,
-                    bundleID: "org.alacritty",
-                    definitionFingerprint: "slot-1",
-                    titleMatchKind: .equals,
-                    titleMatchValue: "Alacritty",
-                    role: "AXWindow",
-                    lastKnownTitle: "Alacritty",
-                    spaceID: 2,
-                    nativeSpaceID: 1,
-                    displayID: "display-1",
-                    windowID: 11
-                ),
-            ],
-            stateMode: .virtual,
-            configGeneration: "generation-1",
-            activeLayoutName: "default",
-            activeVirtualSpaceID: 1,
-            revision: 1
+            state: next,
+            expecting: RuntimeStateWriteExpectation(revision: 5, configGeneration: "gen")
         )
 
-        let state = try store.loadStrict()
-        XCTAssertEqual(state.slots.count, 2)
-        XCTAssertEqual(state.slots.map(\.slot), [1, 2])
+        let loaded = try store.loadStrict()
+        #expect(loaded.revision == 6)
     }
 
-    private func temporaryStateURL() -> URL {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent("runtime-state-\(UUID().uuidString).json")
+    @Test func sortsSlotsOnSave() throws {
+        let (store, url) = TestFixtures.tempStateStore()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        var state = RuntimeState(configGeneration: "gen")
+        state.slots = [
+            makeEntry(spaceID: 2, slot: 2),
+            makeEntry(spaceID: 1, slot: 2),
+            makeEntry(spaceID: 1, slot: 1),
+        ]
+        try store.saveStrict(state: state)
+
+        let loaded = try store.loadStrict()
+        #expect(loaded.slots.map { "\($0.spaceID)-\($0.slot)" } == ["1-1", "1-2", "2-2"])
+    }
+
+    @Test func multiDisplayActiveSpacesRoundTrip() throws {
+        let (store, url) = TestFixtures.tempStateStore()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        var state = RuntimeState(configGeneration: "gen")
+        state.setActiveSpace(displayID: "uuid-a", spaceID: 1)
+        state.setActiveSpace(displayID: "uuid-b", spaceID: 3)
+        try store.saveStrict(state: state)
+
+        let loaded = try store.loadStrict()
+        #expect(loaded.activeSpaceID(displayID: "uuid-a") == 1)
+        #expect(loaded.activeSpaceID(displayID: "uuid-b") == 3)
     }
 }

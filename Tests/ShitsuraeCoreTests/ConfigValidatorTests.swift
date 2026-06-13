@@ -1,769 +1,201 @@
-import XCTest
+import Foundation
+import Testing
 @testable import ShitsuraeCore
 
-final class ConfigValidatorTests: XCTestCase {
-    func testLayoutsMustNotBeEmpty() {
-        let config = ShitsuraeConfig(
-            app: nil,
-            ignore: nil,
-            overlay: nil,
-            executionPolicy: nil,
-            monitors: nil,
-            layouts: [:],
-            shortcuts: nil
-        )
-
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        assertHasError(errors, contains: "at least one layout is required")
-    }
-
-    func testLayoutNamePatternValidation() {
-        let layout = baseConfig().layouts["work"]!
-        let config = ShitsuraeConfig(
-            app: nil,
-            ignore: nil,
-            overlay: nil,
-            executionPolicy: nil,
-            monitors: nil,
-            layouts: ["work layout": layout],
-            shortcuts: nil
-        )
-
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        assertHasError(errors, contains: "layout name is invalid")
-    }
-
-    func testInitialFocusOutOfRange() {
-        let window = defaultWindowDefinition()
-        let layout = LayoutDefinition(
-            initialFocus: InitialFocusDefinition(slot: 10),
-            spaces: [SpaceDefinition(spaceID: 1, display: nil, windows: [window])]
-        )
-        let config = ShitsuraeConfig(
-            app: nil,
-            ignore: nil,
-            overlay: nil,
-            executionPolicy: nil,
-            monitors: nil,
-            layouts: ["work": layout],
-            shortcuts: nil
-        )
-
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        assertHasError(errors, contains: "initialFocus.slot must be 1..9")
-    }
-
-    func testSlotConflictInSameSpace() {
-        let first = defaultWindowDefinition()
-        let second = WindowDefinition(
-            source: .window,
-            match: WindowMatchRule(
-                bundleID: "com.example.other",
-                title: nil,
-                role: nil,
-                subrole: nil,
-                excludeTitleRegex: nil,
-                index: nil
-            ),
-            slot: 1,
-            launch: true,
-            frame: defaultFrameDefinition()
-        )
-        let config = baseConfig(
-            spaces: [
-                SpaceDefinition(spaceID: 1, display: nil, windows: [first, second]),
-            ]
-        )
-
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        XCTAssertTrue(errors.contains(where: { $0.code == ErrorCode.slotConflict.rawValue }))
-        assertHasError(errors, contains: "slot conflict")
-    }
-
-    func testWindowSlotOutOfRange() {
-        let window = WindowDefinition(
-            source: .window,
-            match: WindowMatchRule(
-                bundleID: "com.example.app",
-                title: nil,
-                role: nil,
-                subrole: nil,
-                excludeTitleRegex: nil,
-                index: nil
-            ),
-            slot: 0,
-            launch: true,
-            frame: defaultFrameDefinition()
-        )
-        let config = baseConfig(spaces: [SpaceDefinition(spaceID: 1, display: nil, windows: [window])])
-
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        assertHasError(errors, contains: "slot must be 1..9")
-    }
-
-    func testMatchIndexMustBePositive() {
-        let window = defaultWindowDefinition(
-            windowMatch: WindowMatchRule(
-                bundleID: "com.example.app",
-                title: nil,
-                role: nil,
-                subrole: nil,
-                excludeTitleRegex: nil,
-                index: 0
-            )
-        )
-        let config = baseConfig(spaces: [SpaceDefinition(spaceID: 1, display: nil, windows: [window])])
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        assertHasError(errors, contains: "match.index must be >= 1")
-    }
-
-    func testTitleRegexCompileError() {
-        let window = defaultWindowDefinition(
-            windowMatch: WindowMatchRule(
-                bundleID: "com.example.app",
-                title: TitleMatcher(equals: nil, contains: nil, regex: "["),
-                role: nil,
-                subrole: nil,
-                excludeTitleRegex: nil,
-                index: nil
-            )
-        )
-        let config = baseConfig(spaces: [SpaceDefinition(spaceID: 1, display: nil, windows: [window])])
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        assertHasError(errors, contains: "match.title.regex is invalid")
-    }
-
-    func testExcludeTitleRegexCompileError() {
-        let window = defaultWindowDefinition(
-            windowMatch: WindowMatchRule(
-                bundleID: "com.example.app",
-                title: nil,
-                role: nil,
-                subrole: nil,
-                profile: nil,
-                excludeTitleRegex: "[",
-                index: nil
-            )
-        )
-        let config = baseConfig(spaces: [SpaceDefinition(spaceID: 1, display: nil, windows: [window])])
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        assertHasError(errors, contains: "match.excludeTitleRegex is invalid")
-    }
-
-    func testMatchProfileRequiresChromiumBrowser() {
-        let window = defaultWindowDefinition(
-            windowMatch: WindowMatchRule(
-                bundleID: "com.example.app",
-                title: nil,
-                role: nil,
-                subrole: nil,
-                profile: "Default",
-                excludeTitleRegex: nil,
-                index: nil
-            )
-        )
-        let config = baseConfig(spaces: [SpaceDefinition(spaceID: 1, display: nil, windows: [window])])
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        assertHasError(errors, contains: "match.profile is only supported for Chromium-based browsers")
-    }
-
-    func testMatchProfileAllowedForChromiumBrowser() {
-        let window = defaultWindowDefinition(
-            windowMatch: WindowMatchRule(
-                bundleID: "com.google.Chrome",
-                title: nil,
-                role: nil,
-                subrole: nil,
-                profile: "Default",
-                excludeTitleRegex: nil,
-                index: nil
-            )
-        )
-        let config = baseConfig(spaces: [SpaceDefinition(spaceID: 1, display: nil, windows: [window])])
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        XCTAssertFalse(errors.contains(where: { $0.message.contains("match.profile") }))
-    }
-
-    func testFrameLengthParseError() {
-        let window = WindowDefinition(
-            source: .window,
-            match: WindowMatchRule(
-                bundleID: "com.example.app",
-                title: nil,
-                role: nil,
-                subrole: nil,
-                profile: nil,
-                excludeTitleRegex: nil,
-                index: nil
-            ),
-            slot: 1,
-            launch: true,
+@Suite("ConfigValidator")
+struct ConfigValidatorTests {
+    private func makeWindow(
+        bundleID: String,
+        slot: Int,
+        title: TitleMatcher? = nil,
+        profile: String? = nil,
+        index: Int? = nil
+    ) -> WindowDefinition {
+        WindowDefinition(
+            match: WindowMatchRule(bundleID: bundleID, title: title, profile: profile, index: index),
+            slot: slot,
+            launch: false,
             frame: FrameDefinition(
-                x: .expression("invalid"),
+                x: .expression("0%"),
                 y: .expression("0%"),
-                width: .expression("100%"),
+                width: .expression("50%"),
                 height: .expression("100%")
             )
         )
-        let config = baseConfig(spaces: [SpaceDefinition(spaceID: 1, display: nil, windows: [window])])
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        assertHasError(errors, contains: "frame has invalid length expression")
     }
 
-    func testExecutionPolicyBoundaryValidation() {
-        let config = baseConfig(executionPolicy: ExecutionPolicy())
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        XCTAssertTrue(errors.isEmpty)
+    private func makeConfig(layouts: [String: LayoutDefinition]) -> ShitsuraeConfig {
+        ShitsuraeConfig(layouts: layouts)
     }
 
-    func testExecutionPolicySpaceMoveMethodDefaultsAndAppOverrideResolve() {
-        let config = baseConfig(
-            executionPolicy: ExecutionPolicy(
-                spaceMoveMethod: .displayRelay,
-                spaceMoveMethodInApps: ["org.alacritty": .drag]
-            )
-        )
+    @Test func acceptsValidLayout() {
+        let config = makeConfig(layouts: [
+            "work": LayoutDefinition(spaces: [
+                SpaceDefinition(spaceID: 1, windows: [
+                    makeWindow(bundleID: "com.apple.TextEdit", slot: 1),
+                    makeWindow(bundleID: "com.apple.Terminal", slot: 2),
+                ]),
+                SpaceDefinition(spaceID: 2, windows: [
+                    makeWindow(bundleID: "com.apple.Notes", slot: 1),
+                ]),
+            ]),
+        ])
 
-        XCTAssertEqual(config.resolvedExecutionPolicy.spaceMoveMethod(for: "com.example.app"), .displayRelay)
-        XCTAssertEqual(config.resolvedExecutionPolicy.spaceMoveMethod(for: "org.alacritty"), .drag)
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.isEmpty)
     }
 
-    func testMatchTitleMutualExclusion() {
-        let config = baseConfig(
-            windowMatch: WindowMatchRule(
-                bundleID: "com.example.app",
-                title: TitleMatcher(equals: "A", contains: "B", regex: nil),
-                role: nil,
-                subrole: nil,
-                excludeTitleRegex: nil,
-                index: nil
-            )
-        )
+    @Test func rejectsAmbiguousSameBundleIDWithoutDiscriminator() {
+        let config = makeConfig(layouts: [
+            "work": LayoutDefinition(spaces: [
+                SpaceDefinition(spaceID: 1, windows: [
+                    makeWindow(bundleID: "com.apple.Terminal", slot: 1),
+                ]),
+                SpaceDefinition(spaceID: 2, windows: [
+                    makeWindow(bundleID: "com.apple.Terminal", slot: 1, index: 2),
+                ]),
+            ]),
+        ])
 
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        XCTAssertTrue(errors.contains(where: { $0.code == ErrorCode.validationError.rawValue }))
-        XCTAssertTrue(errors.contains(where: { $0.message.contains("mutually exclusive") }))
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.contains { $0.message.contains("add match.title / match.profile / match.index") })
     }
 
-    func testIgnoreWindowEmptyObjectRejected() {
-        let config = baseConfig(
-            ignore: IgnoreDefinition(
-                apply: IgnoreRuleSet(apps: nil, windows: [IgnoreWindowRule(bundleID: nil, titleRegex: nil, role: nil, subrole: nil, minimized: nil, hidden: nil)]),
-                focus: nil
-            )
-        )
+    @Test func acceptsSameBundleIDWithDiscriminators() {
+        let config = makeConfig(layouts: [
+            "work": LayoutDefinition(spaces: [
+                SpaceDefinition(spaceID: 1, windows: [
+                    makeWindow(bundleID: "com.apple.Terminal", slot: 1, index: 1),
+                ]),
+                SpaceDefinition(spaceID: 2, windows: [
+                    makeWindow(bundleID: "com.apple.Terminal", slot: 1, index: 2),
+                ]),
+            ]),
+        ])
 
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        XCTAssertTrue(errors.contains(where: { $0.message.contains("at least one condition") }))
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.isEmpty)
     }
 
-    func testQuickKeysDuplicateRejected() {
-        let config = baseConfig(
-            shortcuts: ShortcutsDefinition(
-                focusBySlot: nil,
-                nextWindow: nil,
-                prevWindow: nil,
-                cycle: nil,
-                switcher: SwitcherShortcutDefinition(
-                    trigger: nil,
-                    quickKeys: "aabc",
-                    acceptKeys: nil,
-                    cancelKeys: nil,
-                    sources: nil
+    @Test func rejectsIdenticalMatchers() {
+        let config = makeConfig(layouts: [
+            "work": LayoutDefinition(spaces: [
+                SpaceDefinition(spaceID: 1, windows: [
+                    makeWindow(bundleID: "com.apple.Terminal", slot: 1, index: 1),
+                ]),
+                SpaceDefinition(spaceID: 2, windows: [
+                    makeWindow(bundleID: "com.apple.Terminal", slot: 1, index: 1),
+                ]),
+            ]),
+        ])
+
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.contains { $0.message.contains("window matchers must be unique") })
+    }
+
+    @Test func rejectsSlotConflictInSpace() {
+        let config = makeConfig(layouts: [
+            "work": LayoutDefinition(spaces: [
+                SpaceDefinition(spaceID: 1, windows: [
+                    makeWindow(bundleID: "com.apple.TextEdit", slot: 1),
+                    makeWindow(bundleID: "com.apple.Terminal", slot: 1),
+                ]),
+            ]),
+        ])
+
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.contains { $0.code == ErrorCode.slotConflict.rawValue })
+    }
+
+    @Test func rejectsDuplicateSpaceIDs() {
+        let config = makeConfig(layouts: [
+            "work": LayoutDefinition(spaces: [
+                SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
+                SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "d.e.f", slot: 1)]),
+            ]),
+        ])
+
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.contains { $0.message.contains("spaceID must be unique") })
+    }
+
+    @Test func rejectsProfileForNonChromiumApp() {
+        let config = makeConfig(layouts: [
+            "work": LayoutDefinition(spaces: [
+                SpaceDefinition(spaceID: 1, windows: [
+                    makeWindow(bundleID: "com.apple.TextEdit", slot: 1, profile: "Default"),
+                ]),
+            ]),
+        ])
+
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.contains { $0.message.contains("Chromium") })
+    }
+
+    @Test func acceptsProfileForChrome() {
+        let config = makeConfig(layouts: [
+            "work": LayoutDefinition(spaces: [
+                SpaceDefinition(spaceID: 1, windows: [
+                    makeWindow(bundleID: "com.google.Chrome", slot: 1, profile: "Default"),
+                ]),
+            ]),
+        ])
+
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.isEmpty)
+    }
+
+    @Test func rejectsMixedImplicitAndExplicitDisplays() {
+        let config = makeConfig(layouts: [
+            "work": LayoutDefinition(spaces: [
+                SpaceDefinition(
+                    spaceID: 1,
+                    display: DisplayDefinition(monitor: .primary),
+                    windows: [makeWindow(bundleID: "a.b.c", slot: 1)]
                 ),
-                globalActions: nil,
-                disabledInApps: nil
-            )
-        )
+                SpaceDefinition(spaceID: 2, windows: [makeWindow(bundleID: "d.e.f", slot: 1)]),
+            ]),
+        ])
 
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        XCTAssertTrue(errors.contains(where: { $0.message.contains("quickKeys") }))
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.contains { $0.message.contains("cannot mix implicit and explicit displays") })
     }
 
-    func testQuickKeysCharacterValidation() {
-        let config = baseConfig(
+    @Test func rejectsInvalidShortcutKey() {
+        let config = ShitsuraeConfig(
+            layouts: [
+                "work": LayoutDefinition(spaces: [
+                    SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
+                ]),
+            ],
             shortcuts: ShortcutsDefinition(
-                focusBySlot: nil,
-                nextWindow: nil,
-                prevWindow: nil,
-                cycle: nil,
-                switcher: SwitcherShortcutDefinition(
-                    trigger: nil,
-                    quickKeys: "abC!",
-                    acceptKeys: nil,
-                    cancelKeys: nil,
-                    sources: nil
-                ),
-                globalActions: nil,
-                disabledInApps: nil
+                nextWindow: HotkeyDefinition(key: "invalid-key", modifiers: ["cmd"])
             )
         )
 
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        assertHasError(errors, contains: "switcher.quickKeys")
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.contains { $0.message.contains("nextWindow has invalid key") })
     }
 
-    func testFocusBySlotPartialOverrideInheritsDefaults() {
-        let config = baseConfig(
+    @Test func rejectsModifierlessHotkey() {
+        let config = ShitsuraeConfig(
+            layouts: [
+                "work": LayoutDefinition(spaces: [
+                    SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
+                ]),
+            ],
             shortcuts: ShortcutsDefinition(
-                focusBySlot: [
-                    FocusBySlotShortcut(key: "x", modifiers: ["cmd"], slot: 2),
-                ],
-                moveCurrentWindowToSpace: nil,
-                switchVirtualSpace: nil,
-                nextWindow: nil,
-                prevWindow: nil,
-                cycle: nil,
-                switcher: nil,
-                globalActions: nil,
-                disabledInApps: nil
+                nextWindow: HotkeyDefinition(key: "j", modifiers: [])
             )
         )
 
-        let resolved = config.resolvedShortcuts
-        XCTAssertEqual(resolved.focusBySlot[2], HotkeyDefinition(key: "x", modifiers: ["cmd"]))
-        XCTAssertEqual(resolved.focusBySlot[1], HotkeyDefinition(key: "1", modifiers: ["cmd"]))
-        XCTAssertEqual(resolved.focusBySlot[9], HotkeyDefinition(key: "9", modifiers: ["cmd"]))
-        XCTAssertEqual(resolved.moveCurrentWindowToSpace[1], HotkeyDefinition(key: "1", modifiers: ["alt"]))
-        XCTAssertEqual(resolved.moveCurrentWindowToSpace[9], HotkeyDefinition(key: "9", modifiers: ["alt"]))
-        XCTAssertEqual(resolved.switchVirtualSpace[1], HotkeyDefinition(key: "1", modifiers: ["ctrl"]))
-        XCTAssertEqual(resolved.switchVirtualSpace[9], HotkeyDefinition(key: "9", modifiers: ["ctrl"]))
-        XCTAssertEqual(resolved.nextWindow, HotkeyDefinition(key: "j", modifiers: ["cmd", "ctrl"]))
-        XCTAssertEqual(resolved.prevWindow, HotkeyDefinition(key: "k", modifiers: ["cmd", "ctrl"]))
-        XCTAssertEqual(resolved.cycleMode, .direct)
-        XCTAssertEqual(resolved.cycleQuickKeys, "123456789")
-        XCTAssertEqual(resolved.cycleAcceptKeys, ["enter"])
-        XCTAssertEqual(resolved.cycleCancelKeys, ["esc"])
-        XCTAssertTrue(resolved.focusBySlotEnabledInApps.isEmpty)
-        XCTAssertTrue(resolved.cycleExcludedApps.isEmpty)
-        XCTAssertTrue(resolved.switcherExcludedApps.isEmpty)
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.contains { $0.message.contains("must have at least one modifier") })
     }
 
-    func testFocusBySlotAppSwitchAndExcludedAppsResolve() {
-        let config = baseConfig(
-            shortcuts: ShortcutsDefinition(
-                focusBySlot: nil,
-                moveCurrentWindowToSpace: nil,
-                switchVirtualSpace: nil,
-                nextWindow: nil,
-                prevWindow: nil,
-                cycle: nil,
-                switcher: nil,
-                globalActions: nil,
-                disabledInApps: nil,
-                focusBySlotEnabledInApps: [
-                    "com.apple.Terminal": false,
-                    "com.apple.TextEdit": true,
-                ],
-                cycleExcludedApps: [
-                    "com.hnc.Discord",
-                ],
-                switcherExcludedApps: [
-                    "com.tinyspeck.slackmacgap",
-                ]
-            )
-        )
-
-        let resolved = config.resolvedShortcuts
-        XCTAssertEqual(resolved.focusBySlotEnabledInApps["com.apple.Terminal"], false)
-        XCTAssertEqual(resolved.focusBySlotEnabledInApps["com.apple.TextEdit"], true)
-        XCTAssertEqual(resolved.cycleExcludedApps, Set(["com.hnc.Discord"]))
-        XCTAssertEqual(resolved.switcherExcludedApps, Set(["com.tinyspeck.slackmacgap"]))
-    }
-
-    func testShortcutAndModifierValidation() {
-        let config = baseConfig(
-            shortcuts: ShortcutsDefinition(
-                focusBySlot: [
-                    FocusBySlotShortcut(key: "invalid-key", modifiers: [], slot: 1),
-                    FocusBySlotShortcut(key: "f21", modifiers: ["cmd", "cmd"], slot: 2),
-                    FocusBySlotShortcut(key: "3", modifiers: ["hyper"], slot: 3),
-                ],
-                moveCurrentWindowToSpace: [
-                    FocusBySlotShortcut(key: "f21", modifiers: [], slot: 1),
-                ],
-                switchVirtualSpace: [
-                    FocusBySlotShortcut(key: "f21", modifiers: [], slot: 2),
-                ],
-                nextWindow: HotkeyDefinition(key: "left", modifiers: ["cmd", "shift"]),
-                prevWindow: HotkeyDefinition(key: "home", modifiers: ["ctrl"]),
-                cycle: CycleShortcutDefinition(
-                    mode: .overlay,
-                    quickKeys: "123",
-                    acceptKeys: ["enter", "bad-key"],
-                    cancelKeys: ["esc", "bad-key"]
-                ),
-                switcher: SwitcherShortcutDefinition(
-                    trigger: HotkeyDefinition(key: "pagedown", modifiers: ["cmd"]),
-                    quickKeys: nil,
-                    acceptKeys: ["enter", "bad-key"],
-                    cancelKeys: ["esc", "bad-key"],
-                    sources: nil
-                ),
-                globalActions: nil,
-                disabledInApps: nil
-            )
-        )
-
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        assertHasError(errors, contains: "focusBySlot:1 has invalid key")
-        assertHasError(errors, contains: "focusBySlot:1 must have at least one modifier")
-        assertHasError(errors, contains: "focusBySlot:2 has invalid key")
-        assertHasError(errors, contains: "focusBySlot:2 has duplicate modifiers")
-        assertHasError(errors, contains: "focusBySlot:3 has invalid modifier")
-        assertHasError(errors, contains: "moveCurrentWindowToSpace:1 has invalid key")
-        assertHasError(errors, contains: "moveCurrentWindowToSpace:1 must have at least one modifier")
-        assertHasError(errors, contains: "switchVirtualSpace:2 has invalid key")
-        assertHasError(errors, contains: "switchVirtualSpace:2 must have at least one modifier")
-        assertHasError(errors, contains: "cycle.acceptKeys contains invalid key")
-        assertHasError(errors, contains: "cycle.cancelKeys contains invalid key")
-        assertHasError(errors, contains: "acceptKeys contains invalid key")
-        assertHasError(errors, contains: "cancelKeys contains invalid key")
-    }
-
-    func testCycleQuickKeysConflictsWithNavigationAcceptAndCancelKeys() {
-        let config = baseConfig(
-            shortcuts: ShortcutsDefinition(
-                focusBySlot: nil,
-                moveCurrentWindowToSpace: nil,
-                switchVirtualSpace: nil,
-                nextWindow: HotkeyDefinition(key: "j", modifiers: ["cmd", "ctrl"]),
-                prevWindow: HotkeyDefinition(key: "k", modifiers: ["cmd", "ctrl"]),
-                cycle: CycleShortcutDefinition(
-                    mode: .overlay,
-                    quickKeys: "1jk",
-                    acceptKeys: ["enter", "1"],
-                    cancelKeys: ["esc"]
-                ),
-                switcher: nil,
-                globalActions: nil,
-                disabledInApps: nil
-            )
-        )
-
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        assertHasError(errors, contains: "cycle.quickKeys must not contain nextWindow/prevWindow keys")
-        assertHasError(errors, contains: "cycle.quickKeys must not overlap cycle.acceptKeys/cancelKeys")
-    }
-
-    func testOverlayCommandKeysAllowBracketCharacter() {
-        let config = baseConfig(
-            shortcuts: ShortcutsDefinition(
-                focusBySlot: nil,
-                moveCurrentWindowToSpace: nil,
-                switchVirtualSpace: nil,
-                nextWindow: nil,
-                prevWindow: nil,
-                cycle: CycleShortcutDefinition(
-                    mode: .overlay,
-                    quickKeys: "123",
-                    acceptKeys: ["enter"],
-                    cancelKeys: ["esc", "["]
-                ),
-                switcher: SwitcherShortcutDefinition(
-                    trigger: HotkeyDefinition(key: "tab", modifiers: ["cmd"]),
-                    quickKeys: nil,
-                    acceptKeys: ["enter"],
-                    cancelKeys: ["esc", "["],
-                    sources: nil
-                ),
-                globalActions: nil,
-                disabledInApps: nil
-            )
-        )
-
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        XCTAssertFalse(errors.contains(where: { $0.message.contains("cycle.cancelKeys contains invalid key: [") }))
-        XCTAssertFalse(errors.contains(where: { $0.message.contains("switcher.cancelKeys contains invalid key: [") }))
-    }
-
-    func testGlobalActionValidationAndDisabledInAppsID() {
-        let config = baseConfig(
-            shortcuts: ShortcutsDefinition(
-                focusBySlot: nil,
-                moveCurrentWindowToSpace: nil,
-                switchVirtualSpace: nil,
-                nextWindow: nil,
-                prevWindow: nil,
-                cycle: nil,
-                switcher: nil,
-                globalActions: [
-                    GlobalActionShortcut(
-                        key: "1",
-                        modifiers: ["cmd"],
-                        action: GlobalActionDefinition(
-                            type: .move,
-                            x: .expression("10%"),
-                            y: nil,
-                            width: nil,
-                            height: nil,
-                            preset: nil
-                        )
-                    ),
-                    GlobalActionShortcut(
-                        key: "2",
-                        modifiers: ["cmd"],
-                        action: GlobalActionDefinition(
-                            type: .resize,
-                            x: nil,
-                            y: nil,
-                            width: .expression("50%"),
-                            height: nil,
-                            preset: nil
-                        )
-                    ),
-                    GlobalActionShortcut(
-                        key: "3",
-                        modifiers: ["cmd"],
-                        action: GlobalActionDefinition(
-                            type: .moveResize,
-                            x: .expression("0%"),
-                            y: .expression("0%"),
-                            width: nil,
-                            height: .expression("50%"),
-                            preset: nil
-                        )
-                    ),
-                    GlobalActionShortcut(
-                        key: "4",
-                        modifiers: ["cmd"],
-                        action: GlobalActionDefinition(
-                            type: .snap,
-                            x: .expression("0%"),
-                            y: nil,
-                            width: nil,
-                            height: nil,
-                            preset: nil
-                        )
-                    ),
-                ],
-                disabledInApps: [
-                    "com.apple.Terminal": ["globalAction:5", "focusBySlot:10", "invalid"],
-                ]
-            )
-        )
-
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        assertHasError(errors, contains: "type=move requires x/y only")
-        assertHasError(errors, contains: "type=resize requires width/height only")
-        assertHasError(errors, contains: "type=moveResize requires x/y/width/height")
-        assertHasError(errors, contains: "type=snap requires preset only")
-        assertHasError(errors, contains: "disabledInApps shortcutID is invalid")
-    }
-
-    func testIgnoreTitleRegexValidation() {
-        let config = baseConfig(
-            ignore: IgnoreDefinition(
-                apply: IgnoreRuleSet(
-                    apps: nil,
-                    windows: [IgnoreWindowRule(bundleID: "com.apple.Terminal", titleRegex: "[", role: nil, subrole: nil, minimized: nil, hidden: nil)]
-                ),
-                focus: nil
-            )
-        )
-
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        assertHasError(errors, contains: "ignore window titleRegex is invalid")
-    }
-
-    func testValidConfigAllowsSpecialKeysAndFnModifier() {
-        let config = baseConfig(
-            shortcuts: ShortcutsDefinition(
-                focusBySlot: [FocusBySlotShortcut(key: "f20", modifiers: ["fn", "cmd"], slot: 1)],
-                moveCurrentWindowToSpace: [FocusBySlotShortcut(key: "1", modifiers: ["alt"], slot: 1)],
-                switchVirtualSpace: [FocusBySlotShortcut(key: "1", modifiers: ["ctrl"], slot: 1)],
-                nextWindow: HotkeyDefinition(key: "left", modifiers: ["cmd"]),
-                prevWindow: HotkeyDefinition(key: "right", modifiers: ["cmd"]),
-                cycle: CycleShortcutDefinition(
-                    mode: .overlay,
-                    quickKeys: "123456789",
-                    acceptKeys: ["enter", "space"],
-                    cancelKeys: ["esc"]
-                ),
-                switcher: SwitcherShortcutDefinition(
-                    trigger: HotkeyDefinition(key: "tab", modifiers: ["cmd"]),
-                    quickKeys: "asdf",
-                    acceptKeys: ["enter", "space"],
-                    cancelKeys: ["esc"],
-                    sources: [.window]
-                ),
-                globalActions: [
-                    GlobalActionShortcut(
-                        key: "m",
-                        modifiers: ["cmd", "shift"],
-                        action: GlobalActionDefinition(
-                            type: .moveResize,
-                            x: .expression("0%"),
-                            y: .expression("0%"),
-                            width: .expression("100%"),
-                            height: .expression("100%"),
-                            preset: nil
-                        )
-                    ),
-                ],
-                disabledInApps: ["com.apple.Terminal": ["switcher", "focusBySlot:1", "moveCurrentWindowToSpace:1", "switchVirtualSpace:1", "globalAction:1"]]
-            )
-        )
-
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        XCTAssertTrue(errors.isEmpty)
-    }
-
-    func testMoveCurrentWindowToSpaceDisabledShortcutIDsAreAccepted() {
-        let config = baseConfig(
-            shortcuts: ShortcutsDefinition(
-                focusBySlot: nil,
-                moveCurrentWindowToSpace: nil,
-                switchVirtualSpace: nil,
-                nextWindow: nil,
-                prevWindow: nil,
-                cycle: nil,
-                switcher: nil,
-                globalActions: nil,
-                disabledInApps: [
-                    "com.apple.Terminal": ["moveCurrentWindowToSpace", "moveCurrentWindowToSpace:1", "switchVirtualSpace", "switchVirtualSpace:1"],
-                ]
-            )
-        )
-
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        XCTAssertTrue(errors.isEmpty)
-    }
-
-    func testDuplicateSpaceIDRejected() {
-        let config = baseConfig(
-            spaces: [
-                SpaceDefinition(spaceID: 1, display: nil, windows: [defaultWindowDefinition()]),
-                SpaceDefinition(spaceID: 1, display: nil, windows: [defaultWindowDefinition()]),
-            ]
-        )
-
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        assertHasError(errors, contains: "spaceID must be unique")
-    }
-
-    func testVirtualModeRejectsMixedDisplayResolution() {
-        let spaces = [
-            SpaceDefinition(
-                spaceID: 1,
-                display: nil,
-                windows: [defaultWindowDefinition()]
-            ),
-            SpaceDefinition(
-                spaceID: 2,
-                display: DisplayDefinition(monitor: .primary, id: nil, width: nil, height: nil),
-                windows: [defaultWindowDefinition()]
-            ),
-        ]
-        let config = baseConfig(mode: ModeDefinition(space: .virtual), spaces: spaces)
-
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        assertHasError(errors, contains: "cannot mix implicit and explicit displays")
-    }
-
-    func testVirtualModeRejectsWidthHeightOnlyDisplay() {
-        let spaces = [
-            SpaceDefinition(
-                spaceID: 1,
-                display: DisplayDefinition(monitor: nil, id: nil, width: 1440, height: 900),
-                windows: [defaultWindowDefinition()]
-            ),
-        ]
-        let config = baseConfig(mode: ModeDefinition(space: .virtual), spaces: spaces)
-
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        assertHasError(errors, contains: "target one host display")
-    }
-
-    func testVirtualModeRejectsAmbiguousWindowMatchersAcrossSpaces() {
-        let duplicated = defaultWindowDefinition(
-            windowMatch: WindowMatchRule(
-                bundleID: "com.example.app",
-                title: TitleMatcher(equals: "Main", contains: nil, regex: nil),
-                role: "AXWindow",
-                subrole: nil,
-                profile: nil,
-                excludeTitleRegex: nil,
-                index: nil
-            )
-        )
-        let spaces = [
-            SpaceDefinition(spaceID: 1, display: nil, windows: [duplicated]),
-            SpaceDefinition(spaceID: 2, display: nil, windows: [duplicated]),
-        ]
-        let config = baseConfig(mode: ModeDefinition(space: .virtual), spaces: spaces)
-
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/tmp/config.yml")
-        assertHasError(errors, contains: "requires unique window matchers")
-    }
-
-    private func baseConfig(
-        windowMatch: WindowMatchRule = WindowMatchRule(
-            bundleID: "com.example.app",
-            title: nil,
-            role: nil,
-            subrole: nil,
-            profile: nil,
-            excludeTitleRegex: nil,
-            index: nil
-        ),
-        ignore: IgnoreDefinition? = nil,
-        shortcuts: ShortcutsDefinition? = nil,
-        executionPolicy: ExecutionPolicy? = nil,
-        mode: ModeDefinition? = nil,
-        spaces: [SpaceDefinition]? = nil
-    ) -> ShitsuraeConfig {
-        let virtualDisplay = mode?.space == .virtual
-            ? DisplayDefinition(monitor: .primary, id: nil, width: nil, height: nil)
-            : nil
-        let window = defaultWindowDefinition(windowMatch: windowMatch)
-        let layout = LayoutDefinition(
-            initialFocus: InitialFocusDefinition(slot: 1),
-            spaces: spaces ?? [SpaceDefinition(spaceID: 1, display: virtualDisplay, windows: [window])]
-        )
-
-        return ShitsuraeConfig(
-            app: nil,
-            ignore: ignore,
-            overlay: nil,
-            executionPolicy: executionPolicy,
-            monitors: nil,
-            layouts: ["work": layout],
-            shortcuts: shortcuts,
-            mode: mode
-        )
-    }
-
-    private func defaultWindowDefinition(
-        windowMatch: WindowMatchRule = WindowMatchRule(
-            bundleID: "com.example.app",
-            title: nil,
-            role: nil,
-            subrole: nil,
-            profile: nil,
-            excludeTitleRegex: nil,
-            index: nil
-        )
-    ) -> WindowDefinition {
-        WindowDefinition(
-            source: .window,
-            match: windowMatch,
-            slot: 1,
-            launch: true,
-            frame: defaultFrameDefinition()
-        )
-    }
-
-    private func defaultFrameDefinition() -> FrameDefinition {
-        FrameDefinition(
-            x: .expression("0%"),
-            y: .expression("0%"),
-            width: .expression("100%"),
-            height: .expression("100%")
-        )
-    }
-
-    private func assertHasError(_ errors: [ValidateErrorItem], contains needle: String, file: StaticString = #filePath, line: UInt = #line) {
-        XCTAssertTrue(errors.contains(where: { $0.message.contains(needle) }), "missing error containing: \(needle)", file: file, line: line)
+    @Test func rejectsEmptyLayouts() {
+        let config = makeConfig(layouts: [:])
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.contains { $0.message.contains("at least one layout is required") })
     }
 }

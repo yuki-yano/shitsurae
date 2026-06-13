@@ -9,8 +9,7 @@ let package = Package(
     products: [
         .library(name: "ShitsuraeCore", targets: ["ShitsuraeCore"]),
         .executable(name: "shitsurae-cli", targets: ["ShitsuraeCLI"]),
-        .executable(name: "Shitsurae", targets: ["Shitsurae"]),
-        .executable(name: "ShitsuraeAgent", targets: ["ShitsuraeAgent"])
+        .executable(name: "Shitsurae", targets: ["Shitsurae"])
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
@@ -21,9 +20,6 @@ let package = Package(
             name: "ShitsuraeCore",
             dependencies: [
                 .product(name: "Yams", package: "Yams")
-            ],
-            resources: [
-                .process("Resources")
             ]
         ),
         .executableTarget(
@@ -37,11 +33,7 @@ let package = Package(
         .executableTarget(
             name: "Shitsurae",
             dependencies: ["ShitsuraeCore"],
-            path: "Sources/ShitsuraeMain"
-        ),
-        .executableTarget(
-            name: "ShitsuraeAgent",
-            dependencies: ["ShitsuraeCore"]
+            path: "Sources/ShitsuraeApp"
         ),
         .testTarget(
             name: "ShitsuraeCoreTests",
