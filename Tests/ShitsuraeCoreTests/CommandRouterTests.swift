@@ -235,6 +235,32 @@ struct CommandServerTests {
         #expect(layouts.first?["name"] as? String == "solo")
     }
 
+    @Test func secondServerDoesNotStealLiveSocket() async throws {
+        let control = MockWindowControl(
+            windows: [TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit")],
+            displays: [TestFixtures.display]
+        )
+        let (store, stateURL) = TestFixtures.tempStateStore()
+        defer { try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent()) }
+        let logger = TestFixtures.nullLogger()
+        let engine = VirtualSpaceEngine(store: store, control: control, logger: logger, retryDelaysMS: [1])
+        let configManager = ConfigManager(directoryURL: FileManager.default.temporaryDirectory, logger: logger)
+        let router = CommandRouter(engine: engine, configManager: configManager, logger: logger)
+        let socketURL = URL(fileURLWithPath: "/tmp/shitsurae-test-\(UInt32.random(in: 0 ..< 99999)).sock")
+        let auth = PeerAuthService(identityProvider: { _ in
+            PeerIdentity(teamIdentifier: nil, bundleIdentifier: "shitsurae-tests", executablePath: nil)
+        })
+        let first = CommandServer(router: router, logger: logger, socketURL: socketURL, auth: auth)
+        #expect(first.start())
+        defer { first.stop() }
+
+        let second = CommandServer(router: router, logger: logger, socketURL: socketURL, auth: auth)
+        #expect(!second.start())
+        second.stop()
+
+        #expect(CommandServer.canConnect(socketURL: socketURL))
+    }
+
     @Test func clientFailsFastWhenServerAbsent() {
         let socketURL = URL(fileURLWithPath: "/tmp/shitsurae-absent-\(UInt32.random(in: 0 ..< 99999)).sock")
         #expect(throws: CommandClientError.self) {

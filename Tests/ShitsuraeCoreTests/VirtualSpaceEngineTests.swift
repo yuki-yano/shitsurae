@@ -30,6 +30,23 @@ struct VirtualSpaceEngineTests {
         ]
     }
 
+    private func helperUIAdoptedEntry() -> SlotEntry {
+        SlotEntry(
+            layoutName: "work",
+            spaceID: 1,
+            slot: 0,
+            origin: .adopted,
+            definitionFingerprint: "adopted\u{0}com.apple.TextInputUI.xpc.CursorUIViewService\u{0}9",
+            bundleID: "com.apple.TextInputUI.xpc.CursorUIViewService",
+            pid: 90,
+            windowID: 9,
+            lastKnownTitle: "",
+            displayID: TestFixtures.display.id,
+            lastVisibleFrame: ResolvedFrame(x: 20, y: 20, width: 64, height: 64),
+            visibilityState: .visible
+        )
+    }
+
     @Test func bootstrapCreatesEntriesAndActiveSpace() async throws {
         let (engine, _, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -295,6 +312,121 @@ struct VirtualSpaceEngineTests {
         let after = await engine.currentState
         #expect(after.revision == before.revision + 1)
         #expect(after.slots.contains { $0.origin == .adopted && $0.windowID == 9 })
+    }
+
+    @Test func focusedUntrackedWindowIsAdoptedIntoCurrentActiveSpace() async throws {
+        var windows = standardWindows()
+        windows.append(TestFixtures.window(id: 9, bundleID: "com.apple.finder", title: "Downloads", frontIndex: 0))
+
+        let (engine, control, url) = makeEngine(windows: windows)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        let adopted = try await engine.adoptWindowIntoActiveWorkspace(control.window(9)!, config: config)
+
+        #expect(adopted)
+        let state = await engine.currentState
+        let finderEntry = state.slots.first { $0.bundleID == "com.apple.finder" && $0.windowID == 9 }
+        #expect(finderEntry?.origin == .adopted)
+        #expect(finderEntry?.spaceID == 1)
+    }
+
+    @Test func helperUIWindowIsNotAdoptedIntoWorkspace() async throws {
+        var windows = standardWindows()
+        windows.append(
+            TestFixtures.window(
+                id: 9,
+                bundleID: "com.apple.TextInputUI.xpc.CursorUIViewService",
+                title: "",
+                frame: ResolvedFrame(x: 20, y: 20, width: 64, height: 64),
+                frontIndex: 0
+            )
+        )
+
+        let (engine, control, url) = makeEngine(windows: windows)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        let adopted = try await engine.adoptWindowIntoActiveWorkspace(control.window(9)!, config: config)
+
+        #expect(!adopted)
+        let state = await engine.currentState
+        #expect(!state.slots.contains { $0.windowID == 9 })
+    }
+
+    @Test func helperUIWindowIsNotBulkAdoptedIntoWorkspace() async throws {
+        var windows = standardWindows()
+        windows.append(
+            TestFixtures.window(
+                id: 9,
+                bundleID: "com.apple.TextInputUI.xpc.CursorUIViewService",
+                title: "",
+                frame: ResolvedFrame(x: 20, y: 20, width: 64, height: 64),
+                frontIndex: 0
+            )
+        )
+
+        let (engine, _, url) = makeEngine(windows: windows)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        _ = try await engine.switcherCandidates(includeAllSpaces: false, config: config)
+
+        let state = await engine.currentState
+        #expect(!state.slots.contains { $0.windowID == 9 })
+    }
+
+    @Test func existingHelperUIAdoptedWindowIsPrunedFromSwitcherState() async throws {
+        var windows = standardWindows()
+        windows.append(
+            TestFixtures.window(
+                id: 9,
+                bundleID: "com.apple.TextInputUI.xpc.CursorUIViewService",
+                title: "",
+                frame: ResolvedFrame(x: 20, y: 20, width: 64, height: 64),
+                frontIndex: 0
+            )
+        )
+
+        let (engine, _, url) = makeEngine(windows: windows)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        var state = await engine.currentState
+        state.slots.append(helperUIAdoptedEntry())
+        try await engine.replaceState(state)
+
+        _ = try await engine.switcherCandidates(includeAllSpaces: false, config: config)
+
+        state = await engine.currentState
+        #expect(!state.slots.contains { $0.windowID == 9 })
+    }
+
+    @Test func existingHelperUIAdoptedWindowIsPrunedBeforeSwitch() async throws {
+        var windows = standardWindows()
+        windows.append(
+            TestFixtures.window(
+                id: 9,
+                bundleID: "com.apple.TextInputUI.xpc.CursorUIViewService",
+                title: "",
+                frame: ResolvedFrame(x: 20, y: 20, width: 64, height: 64),
+                frontIndex: 0
+            )
+        )
+
+        let (engine, control, url) = makeEngine(windows: windows)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        var state = await engine.currentState
+        state.slots.append(helperUIAdoptedEntry())
+        try await engine.replaceState(state)
+
+        _ = try await engine.switchSpace(to: 2, config: config)
+
+        state = await engine.currentState
+        #expect(!state.slots.contains { $0.windowID == 9 })
+        #expect(!control.focusedWindowIDs.contains(9))
     }
 
     // ピッカー候補から「存在しない/見えない」ウィンドウを除外する

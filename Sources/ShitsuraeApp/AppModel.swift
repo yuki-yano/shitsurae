@@ -12,6 +12,7 @@ final class AppModel: ObservableObject {
     let configManager: ConfigManager
     let engine: VirtualSpaceEngine
     let router: CommandRouter
+    private let windowEventMonitor = AXWindowEventMonitor()
     private var server: CommandServer?
     private(set) var hotkeyManager: HotkeyManager?
 
@@ -44,7 +45,7 @@ final class AppModel: ObservableObject {
     private var lastInteractiveActivationAt: Date?
     private var lastFollowFocusSwitchAt: Date?
     private var lastActiveSpaceChangeAt: Date?
-    private let followFocusDebounce: TimeInterval = 0.5
+    private var followFocusPolicy = FollowFocusPolicy()
     private let interactiveActivationGrace: TimeInterval = 0.18
 
     private var observers: [NSObjectProtocol] = []
@@ -70,7 +71,12 @@ final class AppModel: ObservableObject {
         }
 
         let server = CommandServer(router: router, logger: logger)
-        server.start()
+        guard server.start() else {
+            logger.error(event: "app.serverStartFailed", fields: ["reason": "another instance is already serving"])
+            configManager.stop()
+            NSApp.terminate(nil)
+            return
+        }
         self.server = server
 
         let hotkeyManager = HotkeyManager(model: self)
@@ -78,12 +84,18 @@ final class AppModel: ObservableObject {
         self.hotkeyManager = hotkeyManager
 
         installNotificationObservers()
+        windowEventMonitor.start { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.handleWindowEvent(event)
+            }
+        }
         handleConfigChange()
         refreshStatus()
     }
 
     func shutdown() {
         hotkeyManager?.stop()
+        windowEventMonitor.stop()
         server?.stop()
         configManager.stop()
         for observer in observers {
@@ -332,11 +344,13 @@ final class AppModel: ObservableObject {
                 queue: .main
             ) { [weak self] notification in
                 // Extract the Sendable bits before hopping to the actor.
-                let bundleID = (notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?
-                    .bundleIdentifier
-                guard let bundleID else { return }
+                guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                      let bundleID = app.bundleIdentifier
+                else {
+                    return
+                }
                 Task { @MainActor [weak self] in
-                    self?.handleAppActivated(bundleID: bundleID)
+                    self?.handleAppActivated(application: app, bundleID: bundleID)
                 }
             }
         )
@@ -354,6 +368,13 @@ final class AppModel: ObservableObject {
                     }
                     // Stale pids must re-resolve their Chromium profile.
                     WindowEnumerator.sharedProfileCache.invalidate(bundleID: bundleID)
+                    Task { @MainActor [weak self] in
+                        if name == NSWorkspace.didLaunchApplicationNotification {
+                            self?.windowEventMonitor.register(application: app)
+                        } else {
+                            self?.windowEventMonitor.unregister(pid: app.processIdentifier)
+                        }
+                    }
                 }
             )
         }
@@ -371,13 +392,29 @@ final class AppModel: ObservableObject {
         )
     }
 
-    private func handleAppActivated(bundleID: String) {
+    private func handleAppActivated(application: NSRunningApplication, bundleID: String) {
         guard !bundleID.hasPrefix("com.yuki-yano.shitsurae"),
               bundleID != Bundle.main.bundleIdentifier
         else {
             return
         }
 
+        windowEventMonitor.register(application: application)
+    }
+
+    private func handleWindowEvent(_ event: AXWindowEventMonitor.Event) {
+        switch event {
+        case let .windowCreated(_, _, windowID):
+            guard let windowID else { return }
+            followFocusPolicy.recordWindowCreated(windowID: windowID, now: Date())
+
+        case let .focusedWindowChanged(bundleID, _, windowID):
+            guard let windowID else { return }
+            handleFocusedWindowChanged(bundleID: bundleID, windowID: windowID)
+        }
+    }
+
+    private func handleFocusedWindowChanged(bundleID: String, windowID: UInt32) {
         if let lastInteractive = lastInteractiveActivationAt,
            Date().timeIntervalSince(lastInteractive) < interactiveActivationGrace
         {
@@ -387,12 +424,14 @@ final class AppModel: ObservableObject {
         guard let config = configManager.configIfLoaded() else { return }
         let followFocusEnabled = config.config.resolvedFollowFocus
         let engine = engine
-        let debounce = followFocusDebounce
 
         Task { [weak self] in
-            guard let window = await engine.resolveTargetWindow(selector: WindowTargetSelector()),
+            guard let window = await engine.resolveTargetWindow(selector: WindowTargetSelector(windowID: windowID)),
                   window.bundleID == bundleID
             else {
+                return
+            }
+            guard WindowEligibility.isManageableForVirtualWorkspace(window) else {
                 return
             }
 
@@ -402,38 +441,38 @@ final class AppModel: ObservableObject {
             let targetSpaceID = await engine.spaceID(forWindowID: window.windowID)
             let activeSpaceID = await engine.activeSpaceID()
 
-            let shouldSwitch = await MainActor.run { [weak self] in
-                guard let self else { return false }
-                var allowed = followFocusEnabled
-                if let lastSwitch = self.lastFollowFocusSwitchAt,
-                   Date().timeIntervalSince(lastSwitch) < debounce
-                {
-                    allowed = false
-                }
-                if let lastChange = self.lastActiveSpaceChangeAt,
-                   Date().timeIntervalSince(lastChange) < debounce
-                {
-                    allowed = false
-                }
-                guard allowed,
-                      let targetSpaceID,
-                      targetSpaceID != activeSpaceID
-                else {
-                    return false
-                }
-
-                let now = Date()
-                self.lastFollowFocusSwitchAt = now
-                self.lastActiveSpaceChangeAt = now
-                return true
+            let decision = await MainActor.run { [weak self] in
+                guard let self else { return FollowFocusPolicy.Decision.markActivated }
+                return self.followFocusPolicy.decisionForFocusedWindow(
+                    windowID: window.windowID,
+                    targetSpaceID: targetSpaceID,
+                    activeSpaceID: activeSpaceID,
+                    followFocusEnabled: followFocusEnabled,
+                    lastFollowFocusSwitchAt: self.lastFollowFocusSwitchAt,
+                    lastActiveSpaceChangeAt: self.lastActiveSpaceChangeAt,
+                    now: Date()
+                )
             }
-            guard shouldSwitch, let targetSpaceID else {
+
+            switch decision {
+            case .adoptIntoActiveWorkspace:
+                _ = try? await engine.adoptWindowIntoActiveWorkspace(window, config: config)
+                await engine.markActivated(window: window)
                 return
-            }
 
-            _ = try? await engine.switchSpace(to: targetSpaceID, config: config)
-            await MainActor.run {
-                self?.refreshStatus()
+            case .markActivated:
+                return
+
+            case let .switchSpace(targetSpaceID):
+                await MainActor.run {
+                    let now = Date()
+                    self?.lastFollowFocusSwitchAt = now
+                    self?.lastActiveSpaceChangeAt = now
+                }
+                _ = try? await engine.switchSpace(to: targetSpaceID, config: config)
+                await MainActor.run {
+                    self?.refreshStatus()
+                }
             }
         }
     }

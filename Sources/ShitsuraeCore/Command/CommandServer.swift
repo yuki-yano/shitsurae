@@ -24,6 +24,7 @@ public final class CommandServer: @unchecked Sendable {
     private var listenFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
     private let queue = DispatchQueue(label: "shitsurae.command-server")
+    private var ownsSocket = false
 
     public init(
         router: CommandRouter,
@@ -49,6 +50,14 @@ public final class CommandServer: @unchecked Sendable {
             at: socketURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
+
+        if FileManager.default.fileExists(atPath: socketURL.path),
+           Self.canConnect(socketURL: socketURL)
+        {
+            logger.error(event: "server.alreadyRunning", fields: ["path": socketURL.path])
+            return false
+        }
+
         unlink(socketURL.path)
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -88,11 +97,13 @@ public final class CommandServer: @unchecked Sendable {
 
         guard listen(fd, 16) == 0 else {
             close(fd)
+            unlink(socketURL.path)
             logger.error(event: "server.listenFailed", fields: ["errno": errno])
             return false
         }
 
         listenFD = fd
+        ownsSocket = true
 
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
         source.setEventHandler { [weak self] in
@@ -109,10 +120,42 @@ public final class CommandServer: @unchecked Sendable {
     }
 
     public func stop() {
+        let shouldUnlink = ownsSocket
         acceptSource?.cancel()
         acceptSource = nil
         listenFD = -1
-        unlink(socketURL.path)
+        ownsSocket = false
+        if shouldUnlink {
+            unlink(socketURL.path)
+        }
+    }
+
+    static func canConnect(socketURL: URL) -> Bool {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            return false
+        }
+        defer { close(fd) }
+
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let path = socketURL.path
+        let maxLength = MemoryLayout.size(ofValue: address.sun_path) - 1
+        guard path.utf8.count <= maxLength else {
+            return false
+        }
+        withUnsafeMutableBytes(of: &address.sun_path) { buffer in
+            path.utf8CString.withUnsafeBytes { source in
+                buffer.copyMemory(from: UnsafeRawBufferPointer(rebasing: source.prefix(maxLength)))
+            }
+        }
+
+        let connectResult = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                connect(fd, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        return connectResult == 0
     }
 
     private func acceptConnection() {

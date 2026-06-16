@@ -288,11 +288,13 @@ public extension VirtualSpaceEngine {
             return 0
         }
 
+        let allWindows = control.listAllWindows()
+        let ineligibleAdoptedIDs = ineligibleAdoptedEntryIDs(layoutName: layoutName, windows: allWindows)
         let layoutSlots = currentState.slots(layoutName: layoutName)
         let windows = control.listWindows().filter { window in
             window.displayID == hostDisplay.id
                 && !window.minimized
-                && !window.bundleID.hasPrefix("com.yuki-yano.shitsurae")
+                && WindowEligibility.isManageableForVirtualWorkspace(window)
                 && !PolicyEngine.matchesIgnoreRule(window: window, rules: config.config.ignore?.focus)
         }
 
@@ -301,11 +303,12 @@ public extension VirtualSpaceEngine {
             windows: windows
         )
 
-        guard !resolution.unassignedWindows.isEmpty else {
+        guard !resolution.unassignedWindows.isEmpty || !ineligibleAdoptedIDs.isEmpty else {
             return 0
         }
 
         var newState = currentState
+        newState.slots.removeAll { ineligibleAdoptedIDs.contains($0.id) }
         var adoptedCount = 0
         for window in resolution.unassignedWindows {
             let entry = SlotEntry(
@@ -333,6 +336,24 @@ public extension VirtualSpaceEngine {
             replaceStateInMemory(newState)
         }
         return adoptedCount
+    }
+
+    /// Adopts one exact focused window into the currently active workspace.
+    /// AX focus events use this path so a newly-created window is bound to the
+    /// workspace where it appeared, instead of waiting for the next bulk adopt.
+    func adoptWindowIntoActiveWorkspace(_ window: WindowSnapshot, config: LoadedConfig) throws -> Bool {
+        if trackedEntry(for: window) != nil {
+            return false
+        }
+        if !WindowEligibility.isManageableForVirtualWorkspace(window) {
+            return false
+        }
+        if PolicyEngine.matchesIgnoreRule(window: window, rules: config.config.ignore?.focus) {
+            return false
+        }
+
+        try adoptWindow(window, config: config)
+        return true
     }
 
     private func adoptWindow(_ window: WindowSnapshot, config: LoadedConfig) throws {

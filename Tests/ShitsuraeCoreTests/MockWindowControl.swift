@@ -192,6 +192,8 @@ enum TestFixtures {
         bundleID: String,
         title: String = "win",
         frame: ResolvedFrame = ResolvedFrame(x: 10, y: 10, width: 700, height: 400),
+        role: String = "AXWindow",
+        subrole: String? = nil,
         minimized: Bool = false,
         frontIndex: Int = 0
     ) -> WindowSnapshot {
@@ -200,6 +202,8 @@ enum TestFixtures {
             bundleID: bundleID,
             pid: Int(id) * 10,
             title: title,
+            role: role,
+            subrole: subrole,
             minimized: minimized,
             hidden: false,
             frame: frame,

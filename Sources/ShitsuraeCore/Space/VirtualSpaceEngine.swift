@@ -133,6 +133,7 @@ public actor VirtualSpaceEngine {
         _ = try? adoptUntrackedWindows(config: config, persistChanges: false)
 
         let windows = control.listAllWindows()
+        pruneIneligibleAdoptedEntriesInMemory(layoutName: layoutName, windows: windows)
         let plan = SpaceSwitchPlanner.plan(
             slots: state.slots,
             layoutName: layoutName,
@@ -577,6 +578,36 @@ public actor VirtualSpaceEngine {
 
     func replaceStateInMemory(_ newState: RuntimeState) {
         state = newState
+    }
+
+    func ineligibleAdoptedEntryIDs(layoutName: String, windows: [WindowSnapshot]) -> Set<String> {
+        let adoptedEntries = state.slots(layoutName: layoutName).filter { $0.origin == .adopted }
+        guard !adoptedEntries.isEmpty else {
+            return []
+        }
+
+        let resolution = WindowRegistry.resolve(
+            entries: adoptedEntries.map(\.registryEntry),
+            windows: windows
+        )
+
+        return Set(adoptedEntries.compactMap { entry in
+            guard let window = resolution.assignments[entry.id] else {
+                return nil
+            }
+            return WindowEligibility.isManageableForVirtualWorkspace(window) ? nil : entry.id
+        })
+    }
+
+    func pruneIneligibleAdoptedEntriesInMemory(layoutName: String, windows: [WindowSnapshot]) {
+        let ineligibleIDs = ineligibleAdoptedEntryIDs(layoutName: layoutName, windows: windows)
+        guard !ineligibleIDs.isEmpty else {
+            return
+        }
+
+        var newState = state
+        newState.slots.removeAll { ineligibleIDs.contains($0.id) }
+        replaceStateInMemory(newState)
     }
 
     private func persist(_ newState: RuntimeState) throws {
