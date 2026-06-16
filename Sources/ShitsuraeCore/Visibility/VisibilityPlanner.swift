@@ -123,6 +123,13 @@ public enum VisibilityPlanner {
         hostDisplay: DisplayInfo,
         displays: [DisplayInfo]
     ) -> ResolvedFrame? {
+        if let frame = entry.lastVisibleFrame,
+           isWithinVisibleArea(frame: frame, hostDisplay: hostDisplay, displays: displays),
+           !isHiddenWindowFrame(frame: frame, displays: displays)
+        {
+            return frame
+        }
+
         if let layoutFrame = resolvedLayoutFrame(
             entry: entry,
             layout: layout,
@@ -130,16 +137,6 @@ public enum VisibilityPlanner {
             displays: displays
         ) {
             return layoutFrame
-        }
-
-        // No layout frame applies (adopted entry, or moved off its layout
-        // space): restore the last visible frame, then the current frame,
-        // then clamp into the host display.
-        if let frame = entry.lastVisibleFrame,
-           isWithinVisibleArea(frame: frame, hostDisplay: hostDisplay, displays: displays),
-           !isHiddenWindowFrame(frame: frame, displays: displays)
-        {
-            return frame
         }
 
         if isWithinVisibleArea(frame: window.frame, hostDisplay: hostDisplay, displays: displays),

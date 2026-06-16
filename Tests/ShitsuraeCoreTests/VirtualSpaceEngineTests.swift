@@ -85,8 +85,22 @@ struct VirtualSpaceEngineTests {
 
         let textEdit = control.window(1)!
         #expect(!VisibilityPlanner.isHiddenWindowFrame(frame: textEdit.frame, displays: [TestFixtures.display]))
-        // Layout frame applied: 50% width of 1440x875 visible area.
-        #expect(abs(textEdit.frame.width - 720) <= 2)
+        #expect(textEdit.frame == TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit").frame)
+    }
+
+    @Test func switchBackPreservesManualResize() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        let resizedFrame = ResolvedFrame(x: 40, y: 50, width: 900, height: 500)
+        #expect(control.setWindowFrame(windowID: 1, bundleID: "com.apple.TextEdit", frame: resizedFrame))
+
+        _ = try await engine.switchSpace(to: 2, config: config)
+        _ = try await engine.switchSpace(to: 1, config: config)
+
+        let textEdit = control.window(1)!
+        #expect(textEdit.frame == resizedFrame)
     }
 
     // バグ1 回帰: 同一アプリ複数ウィンドウでもスペース遷移する
