@@ -385,16 +385,55 @@ final class HotkeyManager {
             }
         }
 
-        // Tab / Shift+Tab and the trigger key advance the selection.
-        if key == "tab" || isTriggerRepeat(event: event) {
-            let backward = modifiers.contains("shift")
-            session.advance(forward: !backward)
+        // Tab / Shift+Tab and trigger keys advance the selection.
+        if let advanceForward = overlayAdvanceForward(event: event, key: key, modifiers: modifiers, session: session) {
+            session.advance(forward: advanceForward)
             self.session = session
             overlay?.update(session: session)
             return true
         }
 
         return true // swallow everything else while the overlay is up
+    }
+
+    private func overlayAdvanceForward(
+        event: CGEvent,
+        key: String,
+        modifiers: Set<String>,
+        session: OverlaySession
+    ) -> Bool? {
+        switch session.kind {
+        case .switcher:
+            guard key == "tab" || isTriggerRepeat(event: event) else {
+                return nil
+            }
+            return !modifiers.contains("shift")
+        case .cycle:
+            let eventKeyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
+            if let advanceForward = Self.cycleOverlayAdvanceForward(forKeyCode: eventKeyCode, shortcuts: shortcuts) {
+                return advanceForward
+            }
+            guard key == "tab" else {
+                return nil
+            }
+            return !modifiers.contains("shift")
+        }
+    }
+
+    nonisolated static func cycleOverlayAdvanceForward(
+        forKeyCode eventKeyCode: Int,
+        shortcuts: ResolvedShortcuts?
+    ) -> Bool? {
+        guard let shortcuts else {
+            return nil
+        }
+        if keyCode(for: shortcuts.nextWindow.key) == eventKeyCode {
+            return true
+        }
+        if keyCode(for: shortcuts.prevWindow.key) == eventKeyCode {
+            return false
+        }
+        return nil
     }
 
     private func isTriggerRepeat(event: CGEvent) -> Bool {
