@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION_FILE="${VERSION_FILE:-$ROOT_DIR/VERSION}"
+CLI_VERSION_FILE="$ROOT_DIR/Sources/ShitsuraeCLI/GeneratedVersion.swift"
 BUMP_KIND="${1:-}"
 
 usage() {
@@ -52,5 +53,10 @@ esac
 
 NEXT_VERSION="${major}.${minor}.${patch}"
 printf '%s\n' "$NEXT_VERSION" > "$VERSION_FILE"
+cat > "$CLI_VERSION_FILE" <<EOF
+enum ShitsuraeCLIVersion {
+    static let current = "$NEXT_VERSION"
+}
+EOF
 
 echo "Bumped version: $CURRENT_VERSION -> $NEXT_VERSION"

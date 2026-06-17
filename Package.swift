@@ -42,6 +42,10 @@ let package = Package(
         .testTarget(
             name: "ShitsuraeAppTests",
             dependencies: ["Shitsurae"]
+        ),
+        .testTarget(
+            name: "ShitsuraeCLITests",
+            dependencies: ["ShitsuraeCLI"]
         )
     ]
 )

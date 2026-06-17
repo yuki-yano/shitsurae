@@ -116,6 +116,7 @@ struct ShitsuraeCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "shitsurae",
         abstract: "Virtual desktop window manager for macOS",
+        version: ShitsuraeCLIVersion.current,
         subcommands: [
             Arrange.self,
             Layouts.self,
@@ -460,6 +461,11 @@ struct Switcher: ParsableCommand {
             executeRemote(request, json: jsonFlag.json)
         }
     }
+}
+
+if CommandLine.arguments.dropFirst() == ["-v"] {
+    print(ShitsuraeCLIVersion.current)
+    exit(0)
 }
 
 ShitsuraeCommand.main()
