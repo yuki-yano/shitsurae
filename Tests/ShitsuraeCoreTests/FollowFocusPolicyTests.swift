@@ -92,4 +92,16 @@ struct FollowFocusPolicyTests {
 
         #expect(decision == .switchSpace(2))
     }
+
+    @Test func shortcutPolicyIgnoresFrontmostWindowFromInactiveWorkspace() {
+        let disabled = PolicyEngine.isShortcutDisabled(
+            frontmostBundleID: "org.alacritty",
+            shortcutID: "focusBySlot:1",
+            disabledInApps: [:],
+            focusBySlotEnabledInApps: ["org.alacritty": false],
+            frontmostBelongsToActiveWorkspace: false
+        )
+
+        #expect(disabled == false)
+    }
 }

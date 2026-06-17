@@ -47,8 +47,13 @@ public enum PolicyEngine {
         frontmostBundleID: String?,
         shortcutID: String,
         disabledInApps: [String: [String]],
-        focusBySlotEnabledInApps: [String: Bool] = [:]
+        focusBySlotEnabledInApps: [String: Bool] = [:],
+        frontmostBelongsToActiveWorkspace: Bool = true
     ) -> Bool {
+        guard frontmostBelongsToActiveWorkspace else {
+            return false
+        }
+
         guard let frontmostBundleID else {
             return false
         }

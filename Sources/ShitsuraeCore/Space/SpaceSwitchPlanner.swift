@@ -18,6 +18,8 @@ public struct SpaceSwitchPlan: Equatable, Sendable {
     public let shows: [VisibilityPlan]
     /// Hide plans for windows of other workspaces on the host display.
     public let hides: [VisibilityPlan]
+    /// Windows to try focusing after switching, in MRU fallback order.
+    public let focusCandidates: [BoundWindow]
     /// The window to focus after switching (MRU within the target workspace).
     public let focusTarget: BoundWindow?
     /// Layout entries that could not be bound to any live window.
@@ -117,12 +119,15 @@ public enum SpaceSwitchPlanner {
             .filter { $0.origin == .adopted }
             .map(\.id)
 
+        let focusCandidates = preferredFocusCandidates(from: targets)
+
         return SpaceSwitchPlan(
             layoutName: layoutName,
             targetSpaceID: targetSpaceID,
             shows: shows,
             hides: hides,
-            focusTarget: preferredFocusTarget(from: targets),
+            focusCandidates: focusCandidates,
+            focusTarget: focusCandidates.first,
             unresolvedSlots: unresolvedSlots,
             staleAdoptedEntryIDs: staleAdoptedEntryIDs,
             unassignedWindows: resolution.unassignedWindows
@@ -132,14 +137,19 @@ public enum SpaceSwitchPlanner {
     /// MRU focus selection: most recently activated entry wins; ties resolve
     /// to the lowest slot / frontmost window.
     public static func preferredFocusTarget(from targets: [BoundWindow]) -> BoundWindow? {
-        targets.max { lhs, rhs in
+        preferredFocusCandidates(from: targets).first
+    }
+
+    /// MRU focus selection with deterministic fallback order.
+    public static func preferredFocusCandidates(from targets: [BoundWindow]) -> [BoundWindow] {
+        targets.sorted { lhs, rhs in
             switch compareActivationRecency(lhs.entry.lastActivatedAt, rhs.entry.lastActivatedAt) {
-            case .orderedAscending:
-                return true
             case .orderedDescending:
+                return true
+            case .orderedAscending:
                 return false
             case .orderedSame:
-                return switchOrdering(lhs: rhs, rhs: lhs)
+                return switchOrdering(lhs: lhs, rhs: rhs)
             }
         }
     }

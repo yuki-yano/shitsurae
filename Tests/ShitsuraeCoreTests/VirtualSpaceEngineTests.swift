@@ -89,6 +89,63 @@ struct VirtualSpaceEngineTests {
         #expect(state.pendingVisibilityConvergence == nil)
     }
 
+    @Test func switchSpaceDoesNotTreatBundleActivationAsConfirmedFocus() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        control.failFocusWindowIDs = [3]
+
+        let outcome = try await engine.switchSpace(to: 2, config: config)
+
+        #expect(outcome.focusedWindowID == nil)
+        #expect(!control.activatedBundles.isEmpty)
+        #expect(control.activatedBundles.allSatisfy { $0 == "com.apple.Notes" })
+        #expect(!control.focusedWindowIDs.contains(3))
+    }
+
+    @Test func switchSpaceFallsBackToAnotherTargetWindowWhenPreferredFocusFails() async throws {
+        let windows = [
+            TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", frontIndex: 0),
+            TestFixtures.window(id: 3, bundleID: "com.apple.Notes", frontIndex: 1),
+            TestFixtures.window(id: 4, bundleID: "com.apple.Safari", frontIndex: 2),
+        ]
+        let layout = LayoutDefinition(spaces: [
+            SpaceDefinition(spaceID: 1, windows: [
+                WindowDefinition(
+                    match: WindowMatchRule(bundleID: "com.apple.TextEdit"),
+                    slot: 1,
+                    frame: TestFixtures.frameDef("0%", "0%", "100%", "100%")
+                ),
+            ]),
+            SpaceDefinition(spaceID: 2, windows: [
+                WindowDefinition(
+                    match: WindowMatchRule(bundleID: "com.apple.Notes"),
+                    slot: 1,
+                    frame: TestFixtures.frameDef("0%", "0%", "50%", "100%")
+                ),
+                WindowDefinition(
+                    match: WindowMatchRule(bundleID: "com.apple.Safari"),
+                    slot: 2,
+                    frame: TestFixtures.frameDef("50%", "0%", "50%", "100%")
+                ),
+            ]),
+        ])
+        let config = TestFixtures.loadedConfig(layouts: ["work": layout])
+        let (engine, control, url) = makeEngine(windows: windows)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        await engine.markActivated(window: control.window(3)!)
+        control.failFocusWindowIDs = [3]
+
+        let outcome = try await engine.switchSpace(to: 2, config: config)
+
+        #expect(outcome.focusedWindowID == 4)
+        #expect(control.focusedWindowIDs.last == 4)
+        #expect(control.activatedBundles == ["com.apple.Notes"])
+    }
+
     @Test func switchBackRestoresOriginalWindows() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

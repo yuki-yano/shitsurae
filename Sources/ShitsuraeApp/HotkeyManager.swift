@@ -146,7 +146,8 @@ final class HotkeyManager {
                 frontmostBundleID: frontmostBundleID,
                 shortcutID: shortcutID,
                 disabledInApps: shortcuts.disabledInApps,
-                focusBySlotEnabledInApps: shortcuts.focusBySlotEnabledInApps
+                focusBySlotEnabledInApps: shortcuts.focusBySlotEnabledInApps,
+                frontmostBelongsToActiveWorkspace: model?.frontmostBelongsToActiveWorkspaceForShortcutPolicy() ?? true
             )
         }
 

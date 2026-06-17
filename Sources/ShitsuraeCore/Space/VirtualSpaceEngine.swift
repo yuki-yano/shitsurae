@@ -44,6 +44,7 @@ public actor VirtualSpaceEngine {
     let retryDelaysMS: [Int]
     let arrangeWaitTimeoutMS: Int
     private var state: RuntimeState
+    private static let focusVerificationDelaysMS = [20, 40, 80]
 
     public init(
         store: RuntimeStateStore,
@@ -153,7 +154,7 @@ public actor VirtualSpaceEngine {
         // Focus the MRU window of the target workspace right away — the
         // convergence retries below can take a few hundred ms and the user
         // must not wait for them to get keyboard focus.
-        var focusedWindowID = focusTarget(plan.focusTarget)
+        var focusedWindowID = focusTarget(from: plan.focusCandidates)
 
         let convergence = VisibilityApplier.converge(
             changes: applied,
@@ -164,8 +165,8 @@ public actor VirtualSpaceEngine {
 
         // The early focus can fail while the window is still settling;
         // retry once after convergence.
-        if focusedWindowID == nil, plan.focusTarget != nil {
-            focusedWindowID = focusTarget(plan.focusTarget)
+        if focusedWindowID == nil, !plan.focusCandidates.isEmpty {
+            focusedWindowID = focusTarget(from: plan.focusCandidates)
         }
 
         // Persist: merge effective entries back by id, update active space,
@@ -244,16 +245,36 @@ public actor VirtualSpaceEngine {
         }
     }
 
-    private func focusTarget(_ target: BoundWindow?) -> UInt32? {
-        guard let target else { return nil }
+    private func focusTarget(from candidates: [BoundWindow]) -> UInt32? {
+        for target in candidates {
+            if focusOneTarget(target) {
+                return target.window.windowID
+            }
+        }
+        return nil
+    }
 
-        let result = control.focusWindow(
+    private func focusOneTarget(_ target: BoundWindow) -> Bool {
+        let firstResult = control.focusWindow(
             windowID: target.window.windowID,
             bundleID: target.window.bundleID
         )
-        if result.isSuccess || control.activateBundle(bundleID: target.window.bundleID) {
-            return target.window.windowID
+        if firstResult.isSuccess, waitForFocusedWindow(windowID: target.window.windowID) {
+            return true
         }
+
+        let activated = control.activateBundle(bundleID: target.window.bundleID)
+        if activated {
+            let retryResult = control.focusWindow(
+                windowID: target.window.windowID,
+                bundleID: target.window.bundleID
+            )
+            if retryResult.isSuccess, waitForFocusedWindow(windowID: target.window.windowID) {
+                return true
+            }
+        }
+
+        let actual = control.focusedWindow()
 
         logger.log(
             level: "warn",
@@ -261,9 +282,28 @@ public actor VirtualSpaceEngine {
             fields: [
                 "windowID": Int(target.window.windowID),
                 "bundleID": target.window.bundleID,
+                "result": String(describing: firstResult),
+                "activated": activated,
+                "actualWindowID": actual.map { Int($0.windowID) } ?? -1,
+                "actualBundleID": actual?.bundleID ?? "",
             ]
         )
-        return nil
+        return false
+    }
+
+    private func waitForFocusedWindow(windowID: UInt32) -> Bool {
+        if control.focusedWindow()?.windowID == windowID {
+            return true
+        }
+
+        for delayMS in Self.focusVerificationDelaysMS {
+            control.sleep(milliseconds: delayMS)
+            if control.focusedWindow()?.windowID == windowID {
+                return true
+            }
+        }
+
+        return false
     }
 
     // MARK: - Workspace move

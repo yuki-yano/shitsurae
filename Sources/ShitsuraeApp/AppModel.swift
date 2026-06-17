@@ -45,6 +45,7 @@ final class AppModel: ObservableObject {
     private var lastInteractiveActivationAt: Date?
     private var lastFollowFocusSwitchAt: Date?
     private var lastActiveSpaceChangeAt: Date?
+    private var frontmostWindowBelongsToActiveWorkspace = true
     private var followFocusPolicy = FollowFocusPolicy()
     private let interactiveActivationGrace: TimeInterval = 0.18
 
@@ -197,10 +198,11 @@ final class AppModel: ObservableObject {
         // follow-focus.
         markInteractiveActivation()
         runEngineAction("switch to space \(spaceID)") { [weak self] engine, config in
-            _ = try await engine.switchSpace(to: spaceID, config: config)
+            let outcome = try await engine.switchSpace(to: spaceID, config: config)
             await MainActor.run {
                 self?.markInteractiveActivation()
                 self?.lastActiveSpaceChangeAt = Date()
+                self?.frontmostWindowBelongsToActiveWorkspace = outcome.focusedWindowID != nil || !outcome.didChangeSpace
             }
         }
     }
@@ -219,18 +221,27 @@ final class AppModel: ObservableObject {
         markInteractiveActivation()
         runEngineAction("focus slot \(slot)") { [weak self] engine, config in
             _ = try await engine.focusSlot(slot, config: config)
-            await MainActor.run { self?.markInteractiveActivation() }
+            await MainActor.run {
+                self?.markInteractiveActivation()
+                self?.frontmostWindowBelongsToActiveWorkspace = true
+            }
         }
     }
 
     func focusWindow(windowID: UInt32) {
         markInteractiveActivation()
         runEngineAction("focus window \(windowID)") { [weak self] engine, config in
-            _ = try await engine.focusWindow(
+            let result = try await engine.focusWindow(
                 selector: WindowTargetSelector(windowID: windowID),
                 config: config
             )
-            await MainActor.run { self?.markInteractiveActivation() }
+            await MainActor.run {
+                self?.markInteractiveActivation()
+                if result.didSwitchSpace {
+                    self?.lastActiveSpaceChangeAt = Date()
+                }
+                self?.frontmostWindowBelongsToActiveWorkspace = true
+            }
         }
     }
 
@@ -285,7 +296,10 @@ final class AppModel: ObservableObject {
                 selector: WindowTargetSelector(windowID: windowID),
                 config: config
             )
-            await MainActor.run { self?.markInteractiveActivation() }
+            await MainActor.run {
+                self?.markInteractiveActivation()
+                self?.frontmostWindowBelongsToActiveWorkspace = true
+            }
         }
     }
 
@@ -297,6 +311,10 @@ final class AppModel: ObservableObject {
 
     func markInteractiveActivation() {
         lastInteractiveActivationAt = Date()
+    }
+
+    func frontmostBelongsToActiveWorkspaceForShortcutPolicy() -> Bool {
+        frontmostWindowBelongsToActiveWorkspace
     }
 
     private func runEngineAction(
@@ -443,6 +461,7 @@ final class AppModel: ObservableObject {
 
             let decision = await MainActor.run { [weak self] in
                 guard let self else { return FollowFocusPolicy.Decision.markActivated }
+                self.frontmostWindowBelongsToActiveWorkspace = targetSpaceID == nil || targetSpaceID == activeSpaceID
                 return self.followFocusPolicy.decisionForFocusedWindow(
                     windowID: window.windowID,
                     targetSpaceID: targetSpaceID,
@@ -458,6 +477,9 @@ final class AppModel: ObservableObject {
             case .adoptIntoActiveWorkspace:
                 _ = try? await engine.adoptWindowIntoActiveWorkspace(window, config: config)
                 await engine.markActivated(window: window)
+                await MainActor.run {
+                    self?.frontmostWindowBelongsToActiveWorkspace = true
+                }
                 return
 
             case .markActivated:
@@ -469,8 +491,9 @@ final class AppModel: ObservableObject {
                     self?.lastFollowFocusSwitchAt = now
                     self?.lastActiveSpaceChangeAt = now
                 }
-                _ = try? await engine.switchSpace(to: targetSpaceID, config: config)
+                let outcome = try? await engine.switchSpace(to: targetSpaceID, config: config)
                 await MainActor.run {
+                    self?.frontmostWindowBelongsToActiveWorkspace = outcome?.focusedWindowID != nil
                     self?.refreshStatus()
                 }
             }
