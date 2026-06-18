@@ -418,6 +418,9 @@ final class AppModel: ObservableObject {
         }
 
         windowEventMonitor.register(application: application)
+        if let windowID = windowEventMonitor.focusedWindowID(application: application) {
+            handleFocusedWindowChanged(bundleID: bundleID, windowID: windowID)
+        }
     }
 
     private func handleWindowEvent(_ event: AXWindowEventMonitor.Event) {

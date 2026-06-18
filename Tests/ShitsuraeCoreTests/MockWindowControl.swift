@@ -14,6 +14,12 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     var failPositionWindowIDs: Set<UInt32> = []
     var failUnminimizeWindowIDs: Set<UInt32> = []
     var failFocusWindowIDs: Set<UInt32> = []
+    var failFocusAttemptsRemainingByWindowID: [UInt32: Int] = [:]
+    /// When set, every setWindowPosition *attempt* (whether or not the write
+    /// succeeds) re-points key focus to this window — models the real macOS
+    /// race where windows settling during convergence steal focus *after* the
+    /// engine's early focus call.
+    var stealFocusOnPositionAttempt: UInt32?
     private(set) var focusedWindowIDs: [UInt32] = []
     private(set) var activatedBundles: [String] = []
     private(set) var launchedRequests: [ApplicationLaunchRequest] = []
@@ -85,6 +91,9 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     func setWindowPosition(windowID: UInt32, bundleID: String, position: CGPoint) -> Bool {
         lock.lock()
         defer { lock.unlock() }
+        if let thief = stealFocusOnPositionAttempt {
+            focusedWindowIDs.append(thief)
+        }
         guard !failPositionWindowIDs.contains(windowID), let window = windowsByID[windowID] else {
             return false
         }
@@ -110,6 +119,10 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     func focusWindow(windowID: UInt32, bundleID: String) -> WindowInteractionResult {
         lock.lock()
         defer { lock.unlock() }
+        if let remaining = failFocusAttemptsRemainingByWindowID[windowID], remaining > 0 {
+            failFocusAttemptsRemainingByWindowID[windowID] = remaining - 1
+            return .failed
+        }
         guard !failFocusWindowIDs.contains(windowID), windowsByID[windowID] != nil else {
             return .failed
         }

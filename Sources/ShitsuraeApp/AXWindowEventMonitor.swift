@@ -97,6 +97,13 @@ final class AXWindowEventMonitor {
         observers[pid] = ObserverRecord(observer: observer, appElement: appElement, context: context)
     }
 
+    func focusedWindowID(application: NSRunningApplication) -> UInt32? {
+        guard AXIsProcessTrusted() else {
+            return nil
+        }
+        return Self.windowID(from: AXUIElementCreateApplication(application.processIdentifier))
+    }
+
     func unregister(pid: pid_t) {
         guard let record = observers.removeValue(forKey: pid) else {
             return

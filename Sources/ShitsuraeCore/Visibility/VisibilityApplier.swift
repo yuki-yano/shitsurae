@@ -144,18 +144,55 @@ public enum VisibilityApplier {
             pending = changes.filter { !matchesDesiredState(change: $0, windows: latestWindows) }
         }
 
-        let unresolvedWindowIDs = Set(pending.map(\.window.windowID))
+        let desiredUnresolvedWindowIDs = Set(pending.map(\.window.windowID))
         let resolved = changes.map { change in
             var copy = change
-            copy.effectiveEntry = unresolvedWindowIDs.contains(change.window.windowID)
+            copy.effectiveEntry = desiredUnresolvedWindowIDs.contains(change.window.windowID)
                 ? change.originalEntry
                 : change.desiredEntry
             return copy
         }
+        let effectivePending = resolved.filter {
+            !matchesEffectiveState(change: $0, windows: latestWindows)
+        }
+
+        // [diagnostic] convergence-failure investigation — remove after root
+        // cause confirmed. One summary line per switch (not per window) so the
+        // permanently-unconverged windows don't flood the log. Each entry is
+        // "bundleID#windowID:desired:expected:actual:flags" (flags: m=minimized,
+        // f=fullscreen), letting us tell "can't be moved" (size-constrained /
+        // special windows) from a real placement bug.
+        if !effectivePending.isEmpty {
+            let entries = effectivePending.map { change -> String in
+                let actual = latestWindows.first(where: { $0.windowID == change.window.windowID })
+                let desired = String(describing: change.desiredEntry.visibilityState)
+                let expected: String
+                switch change.desiredEntry.visibilityState {
+                case .visible:
+                    expected = change.desiredEntry.lastVisibleFrame
+                        .map { "\(Int($0.x)),\(Int($0.y)),\(Int($0.width)),\(Int($0.height))" } ?? "?"
+                case .hiddenOffscreen:
+                    expected = change.desiredEntry.lastHiddenFrame
+                        .map { "\(Int($0.x)),\(Int($0.y))" } ?? "?"
+                }
+                let actualFrame = actual
+                    .map { "\(Int($0.frame.x)),\(Int($0.frame.y)),\(Int($0.frame.width)),\(Int($0.frame.height))" } ?? "gone"
+                let flags = "\(actual?.minimized == true ? "m" : "")\(actual?.isFullscreen == true ? "f" : "")"
+                return "\(change.window.bundleID)#\(change.window.windowID):\(desired):\(expected):\(actualFrame):\(flags)"
+            }
+            logger.log(
+                level: "warn",
+                event: "visibility.converge.unresolved",
+                fields: [
+                    "count": effectivePending.count,
+                    "windows": entries.joined(separator: ";"),
+                ]
+            )
+        }
 
         return ConvergenceOutcome(
             changes: resolved,
-            hasPending: !pending.isEmpty,
+            hasPending: !effectivePending.isEmpty,
             retryCount: retryCount,
             verifyCount: verifyCount
         )
@@ -169,12 +206,35 @@ public enum VisibilityApplier {
             return false
         }
 
-        switch change.desiredEntry.visibilityState {
+        return matchesVisibilityState(entry: change.desiredEntry, actual: actual)
+    }
+
+    static func matchesEffectiveState(
+        change: AppliedVisibilityChange,
+        windows: [WindowSnapshot]
+    ) -> Bool {
+        guard let actual = windows.first(where: { $0.windowID == change.window.windowID }) else {
+            return false
+        }
+
+        return matchesVisibilityState(
+            entry: change.effectiveEntry,
+            actual: actual,
+            fallbackVisibleFrame: change.window.frame
+        )
+    }
+
+    private static func matchesVisibilityState(
+        entry: SlotEntry,
+        actual: WindowSnapshot,
+        fallbackVisibleFrame: ResolvedFrame? = nil
+    ) -> Bool {
+        switch entry.visibilityState {
         case .visible:
             guard !actual.minimized else {
                 return false
             }
-            if let expectedFrame = change.desiredEntry.lastVisibleFrame {
+            if let expectedFrame = entry.lastVisibleFrame ?? fallbackVisibleFrame {
                 return frameMatches(actual.frame, expectedFrame)
             }
             return true
@@ -182,7 +242,7 @@ public enum VisibilityApplier {
             if actual.minimized || actual.isFullscreen {
                 return true
             }
-            guard let expectedFrame = change.desiredEntry.lastHiddenFrame else {
+            guard let expectedFrame = entry.lastHiddenFrame else {
                 return false
             }
             return positionMatches(actual.frame, expectedFrame)

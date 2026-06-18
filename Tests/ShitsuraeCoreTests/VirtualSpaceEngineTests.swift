@@ -146,6 +146,96 @@ struct VirtualSpaceEngineTests {
         #expect(control.activatedBundles == ["com.apple.Notes"])
     }
 
+    @Test func switchSpaceReFocusesIntendedWindowWhenStolenDuringConvergence() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        // win1 (TextEdit) is the MRU window we expect to restore on return to space 1.
+        await engine.markActivated(window: control.window(1)!)
+        _ = try await engine.switchSpace(to: 2, config: config)
+
+        // Reproduce the race: while returning to space 1, hiding the space-2
+        // window (win3) keeps failing so convergence retries its position
+        // mutation, and each such mutation steals key focus to a *sibling* of
+        // the target workspace (win2). The early focus on win1 thus gets
+        // clobbered after it already succeeded.
+        control.failPositionWindowIDs = [3]
+        control.stealFocusOnPositionAttempt = 2
+
+        let outcome = try await engine.switchSpace(to: 1, config: config)
+
+        // The engine must notice focus drifted off the window it just focused
+        // and re-assert the intended MRU window after convergence settles —
+        // folding the user's manual "press the shortcut again" into one switch.
+        #expect(outcome.focusedWindowID == 1)
+        #expect(control.focusedWindowIDs.last == 1)
+    }
+
+    @Test func switchSpaceKeepsUserChosenWindowWhenFocusLeavesTargetWorkspace() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        await engine.markActivated(window: control.window(1)!)
+        _ = try await engine.switchSpace(to: 2, config: config)
+
+        // During the return to space 1, focus drifts to win3 — a window that is
+        // NOT a candidate of the target workspace (models the user deliberately
+        // focusing another app while the switch is still settling). Only an OS
+        // steal *within* the target workspace should trigger re-focus, so the
+        // engine must leave the user's out-of-workspace choice alone.
+        control.failPositionWindowIDs = [3]
+        control.stealFocusOnPositionAttempt = 3
+
+        _ = try await engine.switchSpace(to: 1, config: config)
+
+        #expect(control.focusedWindowIDs.last == 3)
+    }
+
+    @Test func switchSpaceDoesNotReFocusWhenEarlyFocusFailedAndUserLeavesTargetWorkspace() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        await engine.markActivated(window: control.window(1)!)
+        _ = try await engine.switchSpace(to: 2, config: config)
+
+        // Make the early focus pass fail for both space-1 candidates. They
+        // would succeed on the post-convergence retry, so this catches the nil
+        // branch specifically: if focus has moved outside the target workspace,
+        // the engine must not take it back.
+        control.failFocusAttemptsRemainingByWindowID = [1: 2, 2: 2]
+        control.failPositionWindowIDs = [3]
+        control.stealFocusOnPositionAttempt = 3
+
+        let outcome = try await engine.switchSpace(to: 1, config: config)
+
+        #expect(outcome.focusedWindowID == nil)
+        #expect(control.focusedWindowIDs.last == 3)
+    }
+
+    @Test func switchSpaceRollsBackUnmovableWindowsWithoutLeavingRecoveryPending() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+
+        // Simulate special windows that refuse offscreen parking. The switch
+        // should keep their persisted state truthful (rolled back to visible)
+        // without poisoning pendingVisibilityConvergence forever.
+        control.failPositionWindowIDs = [1, 2]
+
+        let outcome = try await engine.switchSpace(to: 2, config: config)
+
+        #expect(outcome.converged)
+        let state = await engine.currentState
+        #expect(state.pendingVisibilityConvergence == nil)
+        #expect(!state.recoveryRequired)
+        #expect(state.slots.first { $0.bundleID == "com.apple.TextEdit" }?.visibilityState == .visible)
+        #expect(state.slots.first { $0.bundleID == "com.apple.Terminal" }?.visibilityState == .visible)
+    }
+
     @Test func switchBackRestoresOriginalWindows() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

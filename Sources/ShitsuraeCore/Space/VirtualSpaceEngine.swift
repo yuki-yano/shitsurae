@@ -163,10 +163,26 @@ public actor VirtualSpaceEngine {
             retryDelaysMS: retryDelaysMS
         )
 
-        // The early focus can fail while the window is still settling;
-        // retry once after convergence.
-        if focusedWindowID == nil, !plan.focusCandidates.isEmpty {
-            focusedWindowID = focusTarget(from: plan.focusCandidates)
+        // The early focus can fail while the window is still settling, or it
+        // can succeed and then be clobbered: convergence (and the OS settling
+        // the shown/hidden windows) can steal key focus to a *sibling* window
+        // of the target workspace *after* we focused the intended one. Re-assert
+        // focus once the layout has settled — but only for that case (a steal
+        // within the workspace, or focus vanishing entirely), never when the
+        // user deliberately moved focus outside the workspace mid-switch. This
+        // folds the user's manual "press the shortcut again" into a single
+        // switch.
+        if !plan.focusCandidates.isEmpty {
+            let liveFocus = control.focusedWindow()?.windowID
+            let driftedWithinWorkspace = liveFocus
+                .map { id in plan.focusCandidates.contains { $0.window.windowID == id } }
+                ?? true
+            let shouldReFocus = focusedWindowID
+                .map { earlyFocus in liveFocus != earlyFocus && driftedWithinWorkspace }
+                ?? driftedWithinWorkspace
+            if shouldReFocus {
+                focusedWindowID = focusTarget(from: plan.focusCandidates)
+            }
         }
 
         // Persist: merge effective entries back by id, update active space,
@@ -211,6 +227,13 @@ public actor VirtualSpaceEngine {
 
         try persist(newState)
 
+        // [diagnostic] focus-recovery investigation — remove after root cause confirmed.
+        // Records what we *wanted* to focus (intendedTop = MRU #1 of the target
+        // workspace), what focusTarget *claimed* succeeded (focused), and what the
+        // system *actually* reports as focused at the end of the switch
+        // (actualFocused). Divergence pinpoints (A) stolen-after-success vs
+        // (B) never-landed.
+        let diagnosticActualFocused = control.focusedWindow()
         logger.log(
             event: "space.switch",
             fields: [
@@ -221,6 +244,11 @@ public actor VirtualSpaceEngine {
                 "hidden": plan.hides.count,
                 "unresolved": plan.unresolvedSlots.count,
                 "converged": !convergence.hasPending,
+                "intendedTop": plan.focusCandidates.first.map { Int($0.window.windowID) } ?? -1,
+                "intendedTopBundle": plan.focusCandidates.first?.window.bundleID ?? "",
+                "focused": focusedWindowID.map { Int($0) } ?? -1,
+                "actualFocused": diagnosticActualFocused.map { Int($0.windowID) } ?? -1,
+                "actualFocusedBundle": diagnosticActualFocused?.bundleID ?? "",
             ]
         )
 

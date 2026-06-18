@@ -263,7 +263,7 @@ struct VisibilityApplierTests {
             retryDelaysMS: [1, 1]
         )
 
-        #expect(outcome.hasPending)
+        #expect(!outcome.hasPending)
         #expect(outcome.changes.first?.effectiveEntry.visibilityState == .visible)
         #expect(outcome.retryCount == 2)
     }
