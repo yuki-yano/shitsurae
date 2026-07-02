@@ -173,13 +173,13 @@ public actor VirtualSpaceEngine {
         // folds the user's manual "press the shortcut again" into a single
         // switch.
         if !plan.focusCandidates.isEmpty {
+            let intendedTopWindowID = plan.focusCandidates[0].window.windowID
             let liveFocus = control.focusedWindow()?.windowID
             let driftedWithinWorkspace = liveFocus
                 .map { id in plan.focusCandidates.contains { $0.window.windowID == id } }
                 ?? true
-            let shouldReFocus = focusedWindowID
-                .map { earlyFocus in liveFocus != earlyFocus && driftedWithinWorkspace }
-                ?? driftedWithinWorkspace
+            let shouldReFocus = (liveFocus.map { $0 != intendedTopWindowID } ?? true)
+                && driftedWithinWorkspace
             if shouldReFocus {
                 focusedWindowID = focusTarget(from: plan.focusCandidates)
             }
