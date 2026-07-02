@@ -36,7 +36,7 @@ struct WindowEnumeratorTests {
         ]
     }
 
-    @Test func buildsSnapshotsWithMinimizedFromResolver() {
+    @Test func buildsSnapshotsWithMinimizedAndSubroleFromResolver() {
         let raw = [
             rawWindow(id: 1, pid: 100),
             rawWindow(id: 2, pid: 100),
@@ -46,15 +46,20 @@ struct WindowEnumeratorTests {
             rawWindowInfo: raw,
             displays: [display],
             appResolver: { _ in (bundleID: "com.example.App", isHidden: false) },
-            minimizedResolver: { pids in
+            windowAXInfoResolver: { pids in
                 #expect(pids == [100])
-                return [2]
+                return WindowEnumerator.WindowAXInfo(
+                    minimized: [2],
+                    subroles: [1: "AXStandardWindow", 2: "AXDialog"]
+                )
             }
         )
 
         #expect(snapshots.count == 2)
         #expect(snapshots.first { $0.windowID == 1 }?.minimized == false)
         #expect(snapshots.first { $0.windowID == 2 }?.minimized == true)
+        #expect(snapshots.first { $0.windowID == 1 }?.subrole == "AXStandardWindow")
+        #expect(snapshots.first { $0.windowID == 2 }?.subrole == "AXDialog")
     }
 
     @Test func skipsNonZeroLayersAndZeroSizeWindows() {

@@ -278,6 +278,71 @@ struct VirtualSpaceEngineTests {
         #expect(state.slots.first { $0.bundleID == "com.apple.Terminal" }?.visibilityState == .visible)
     }
 
+    @Test func switchSpaceQuarantinesPersistentlyUnconvergedWindow() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+
+        // Establish real visible+hidden frames for window 1 via one clean
+        // hide, then let the "app" pin it to a foreign frame that matches
+        // neither. Now window 1 (TextEdit, space 1) behaves like Chrome's
+        // remote-debug popup: planned on every switch (show on →1, hide on →2)
+        // and unconvergeable, because rollback lands on a stored frame the
+        // pinned window is not at.
+        _ = try await engine.switchSpace(to: 2, config: config)
+        control.pinnedFrameWindowIDs = [1: ResolvedFrame(x: 500, y: 500, width: 320, height: 252)]
+
+        // Each switch that plans window 1 stays unconverged until quarantine.
+        let first = try await engine.switchSpace(to: 1, config: config)
+        #expect(!first.converged)
+        let second = try await engine.switchSpace(to: 2, config: config)
+        #expect(!second.converged)
+        // Third failure crosses the threshold and quarantines window 1.
+        let third = try await engine.switchSpace(to: 1, config: config)
+        #expect(!third.converged)
+
+        // From now on window 1 is excluded from planning, so switches converge
+        // again and recovery state stops being pinned — the whole point.
+        let recovered = try await engine.switchSpace(to: 2, config: config)
+        #expect(recovered.converged)
+        let state = await engine.currentState
+        #expect(state.pendingVisibilityConvergence == nil)
+        #expect(!state.recoveryRequired)
+
+        let afterAgain = try await engine.switchSpace(to: 1, config: config)
+        #expect(afterAgain.converged)
+    }
+
+    @Test func closingQuarantinedWindowClearsBookkeepingSoASharedIDStartsFresh() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        _ = try await engine.switchSpace(to: 2, config: config)
+        control.pinnedFrameWindowIDs = [1: ResolvedFrame(x: 500, y: 500, width: 320, height: 252)]
+
+        // Drive window 1 into quarantine (three unconverged switches that plan it).
+        _ = try await engine.switchSpace(to: 1, config: config)
+        _ = try await engine.switchSpace(to: 2, config: config)
+        _ = try await engine.switchSpace(to: 1, config: config)
+        #expect(try await engine.switchSpace(to: 2, config: config).converged)
+
+        // The window closes: quarantine + failure-count bookkeeping keyed on its
+        // windowID must be dropped so a window reusing that ID is not treated as
+        // still-quarantined.
+        control.removeWindow(1)
+        control.pinnedFrameWindowIDs = [:]
+        _ = try await engine.switchSpace(to: 1, config: config)
+        control.addWindow(TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", frontIndex: 0))
+
+        // A now-movable window under the same ID is managed again immediately:
+        // switching away parks it offscreen instead of leaving it quarantined.
+        let outcome = try await engine.switchSpace(to: 2, config: config)
+        #expect(outcome.converged)
+        #expect(VisibilityPlanner.isHiddenWindowFrame(frame: control.window(1)!.frame, displays: [TestFixtures.display]))
+    }
+
     @Test func switchBackRestoresOriginalWindows() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

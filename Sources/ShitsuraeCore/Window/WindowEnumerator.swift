@@ -68,8 +68,20 @@ public enum WindowEnumerator {
                     resolver: SystemProbe.browserProfileDirectory(bundleID:pid:)
                 )
             },
-            minimizedResolver: minimizedWindowIDs(pids:)
+            windowAXInfoResolver: windowAXInfo(pids:)
         )
+    }
+
+    /// Per-window AX attributes not available from CGWindowList: the minimized
+    /// flag and the window subrole (used to keep dialogs/popups unmanaged).
+    struct WindowAXInfo {
+        let minimized: Set<UInt32>
+        let subroles: [UInt32: String]
+
+        init(minimized: Set<UInt32> = [], subroles: [UInt32: String] = [:]) {
+            self.minimized = minimized
+            self.subroles = subroles
+        }
     }
 
     /// Pure assembly — injectable resolvers keep this unit-testable.
@@ -78,7 +90,7 @@ public enum WindowEnumerator {
         displays: [DisplayInfo],
         appResolver: (Int) -> (bundleID: String, isHidden: Bool)?,
         profileResolver: (String, Int) -> String? = { _, _ in nil },
-        minimizedResolver: (Set<Int>) -> Set<UInt32> = { _ in [] }
+        windowAXInfoResolver: (Set<Int>) -> WindowAXInfo = { _ in WindowAXInfo() }
     ) -> [WindowSnapshot] {
         struct PendingWindow {
             let windowID: UInt32
@@ -147,7 +159,7 @@ public enum WindowEnumerator {
             )
         }
 
-        let minimizedIDs = minimizedResolver(Set(pending.map(\.pid)))
+        let axInfo = windowAXInfoResolver(Set(pending.map(\.pid)))
 
         return pending
             .map { window in
@@ -156,7 +168,8 @@ public enum WindowEnumerator {
                     bundleID: window.bundleID,
                     pid: window.pid,
                     title: window.title,
-                    minimized: minimizedIDs.contains(window.windowID),
+                    subrole: axInfo.subroles[window.windowID],
+                    minimized: axInfo.minimized.contains(window.windowID),
                     hidden: window.isHidden,
                     frame: ResolvedFrame(
                         x: window.rect.origin.x,
@@ -176,13 +189,16 @@ public enum WindowEnumerator {
             }
     }
 
-    /// One AX query per pid: window IDs whose kAXMinimizedAttribute is true.
-    static func minimizedWindowIDs(pids: Set<Int>) -> Set<UInt32> {
+    /// One AX query per pid, reading both the minimized flag and the subrole
+    /// for every window (neither is available from CGWindowList). Folding both
+    /// into a single pass avoids a second per-process AX round trip.
+    static func windowAXInfo(pids: Set<Int>) -> WindowAXInfo {
         guard AXIsProcessTrusted() else {
-            return []
+            return WindowAXInfo()
         }
 
         var minimized = Set<UInt32>()
+        var subroles: [UInt32: String] = [:]
 
         for pid in pids {
             let appElement = AXUIElementCreateApplication(pid_t(pid))
@@ -195,22 +211,29 @@ public enum WindowEnumerator {
             }
 
             for element in windowElements {
-                var minimizedRef: CFTypeRef?
-                guard AXUIElementCopyAttributeValue(element, kAXMinimizedAttribute as CFString, &minimizedRef) == .success,
-                      let isMinimized = minimizedRef as? Bool,
-                      isMinimized
-                else {
+                var windowID: CGWindowID = 0
+                guard AXUIElementGetWindowID(element, &windowID) == .success else {
                     continue
                 }
+                let id = UInt32(windowID)
 
-                var windowID: CGWindowID = 0
-                if AXUIElementGetWindowID(element, &windowID) == .success {
-                    minimized.insert(UInt32(windowID))
+                var minimizedRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(element, kAXMinimizedAttribute as CFString, &minimizedRef) == .success,
+                   (minimizedRef as? Bool) == true
+                {
+                    minimized.insert(id)
+                }
+
+                var subroleRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleRef) == .success,
+                   let subrole = subroleRef as? String
+                {
+                    subroles[id] = subrole
                 }
             }
         }
 
-        return minimized
+        return WindowAXInfo(minimized: minimized, subroles: subroles)
     }
 
     static func resolveFocusedWindow(

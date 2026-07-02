@@ -16,6 +16,25 @@ public struct ConvergenceOutcome: Equatable, Sendable {
     public let hasPending: Bool
     public let retryCount: Int
     public let verifyCount: Int
+    /// Window IDs that never reached their effective state within the retry
+    /// budget. Callers use this to quarantine windows an app refuses to move
+    /// (e.g. Chrome remote-debug popups) so one stuck window can't keep every
+    /// space switch unconverged.
+    public let unconvergedWindowIDs: [UInt32]
+
+    public init(
+        changes: [AppliedVisibilityChange],
+        hasPending: Bool,
+        retryCount: Int,
+        verifyCount: Int,
+        unconvergedWindowIDs: [UInt32] = []
+    ) {
+        self.changes = changes
+        self.hasPending = hasPending
+        self.retryCount = retryCount
+        self.verifyCount = verifyCount
+        self.unconvergedWindowIDs = unconvergedWindowIDs
+    }
 }
 
 /// Applies visibility plans through WindowControl and verifies convergence.
@@ -194,7 +213,8 @@ public enum VisibilityApplier {
             changes: resolved,
             hasPending: !effectivePending.isEmpty,
             retryCount: retryCount,
-            verifyCount: verifyCount
+            verifyCount: verifyCount,
+            unconvergedWindowIDs: effectivePending.map(\.window.windowID)
         )
     }
 

@@ -46,6 +46,15 @@ public actor VirtualSpaceEngine {
     private var state: RuntimeState
     private static let focusVerificationDelaysMS = [20, 40, 80]
 
+    /// Windows an app refuses to move (Chrome remote-debug popups, dialogs).
+    /// Tracked in memory only — a per-window count of consecutive switches
+    /// that left the window unconverged; once it reaches the threshold the
+    /// window is quarantined and excluded from switch planning so it stops
+    /// pinning convergence and dragging every switch through the retry budget.
+    private var convergenceFailureCounts: [UInt32: Int] = [:]
+    private var quarantinedWindowIDs: Set<UInt32> = []
+    private static let quarantineThreshold = 3
+
     public init(
         store: RuntimeStateStore,
         control: WindowControl,
@@ -135,6 +144,11 @@ public actor VirtualSpaceEngine {
 
         let windows = control.listAllWindows()
         pruneIneligibleAdoptedEntriesInMemory(layoutName: layoutName, windows: windows)
+        // Drop quarantine bookkeeping for windows that no longer exist so a
+        // freshly opened window (new windowID) always gets a clean slate.
+        let liveWindowIDs = Set(windows.map(\.windowID))
+        convergenceFailureCounts = convergenceFailureCounts.filter { liveWindowIDs.contains($0.key) }
+        quarantinedWindowIDs = quarantinedWindowIDs.intersection(liveWindowIDs)
         let plan = SpaceSwitchPlanner.plan(
             slots: state.slots,
             layoutName: layoutName,
@@ -142,7 +156,8 @@ public actor VirtualSpaceEngine {
             targetSpaceID: targetSpaceID,
             windows: windows,
             hostDisplay: hostDisplay,
-            displays: displays
+            displays: displays,
+            quarantinedWindowIDs: quarantinedWindowIDs
         )
 
         let applied = VisibilityApplier.apply(
@@ -162,6 +177,7 @@ public actor VirtualSpaceEngine {
             logger: logger,
             retryDelaysMS: retryDelaysMS
         )
+        updateQuarantine(plannedChanges: applied, convergence: convergence)
 
         // The early focus can fail while the window is still settling, or it
         // can succeed and then be clobbered: convergence (and the OS settling
@@ -676,6 +692,37 @@ public actor VirtualSpaceEngine {
         var newState = state
         newState.slots.removeAll { ineligibleIDs.contains($0.id) }
         replaceStateInMemory(newState)
+    }
+
+    /// Counts consecutive unconverged switches per window and quarantines a
+    /// window once it crosses the threshold. A window that converges resets its
+    /// count; quarantined windows are excluded from planning so they never
+    /// reappear here until they are closed (pruned by windowID in switchSpace).
+    private func updateQuarantine(
+        plannedChanges: [AppliedVisibilityChange],
+        convergence: ConvergenceOutcome
+    ) {
+        let unconverged = Set(convergence.unconvergedWindowIDs)
+        for change in plannedChanges {
+            let windowID = change.window.windowID
+            guard unconverged.contains(windowID) else {
+                convergenceFailureCounts[windowID] = 0
+                continue
+            }
+            let count = (convergenceFailureCounts[windowID] ?? 0) + 1
+            convergenceFailureCounts[windowID] = count
+            if count >= Self.quarantineThreshold, quarantinedWindowIDs.insert(windowID).inserted {
+                logger.log(
+                    level: "warn",
+                    event: "visibility.quarantine",
+                    fields: [
+                        "windowID": Int(windowID),
+                        "bundleID": change.window.bundleID,
+                        "failures": count,
+                    ]
+                )
+            }
+        }
     }
 
     private func persist(_ newState: RuntimeState) throws {

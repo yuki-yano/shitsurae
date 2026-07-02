@@ -12,6 +12,12 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
 
     var failFrameWindowIDs: Set<UInt32> = []
     var failPositionWindowIDs: Set<UInt32> = []
+    /// Models an app (e.g. Chrome's remote-debug popup) that refuses geometry
+    /// writes and keeps the window pinned at its own frame: every set attempt
+    /// forces the window back to this frame and reports failure, so the window
+    /// can never match the desired *or* the rolled-back state — it stays
+    /// unconverged forever.
+    var pinnedFrameWindowIDs: [UInt32: ResolvedFrame] = [:]
     var failUnminimizeWindowIDs: Set<UInt32> = []
     var failFocusWindowIDs: Set<UInt32> = []
     var failFocusAttemptsRemainingByWindowID: [UInt32: Int] = [:]
@@ -49,6 +55,13 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         windowsByID.removeValue(forKey: id)
     }
 
+    /// Simulates a window appearing (app launch / new window).
+    func addWindow(_ window: WindowSnapshot) {
+        lock.lock()
+        defer { lock.unlock() }
+        windowsByID[window.windowID] = window
+    }
+
     /// When set, restricts what onScreenWindowIDs() reports (simulates
     /// windows on other native Spaces / invisible helper windows).
     var onScreenWindowIDsOverride: Set<UInt32>?
@@ -81,6 +94,10 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     func setWindowFrame(windowID: UInt32, bundleID: String, frame: ResolvedFrame) -> Bool {
         lock.lock()
         defer { lock.unlock() }
+        if let pinned = pinnedFrameWindowIDs[windowID], let window = windowsByID[windowID] {
+            windowsByID[windowID] = window.withFrame(pinned)
+            return false
+        }
         guard !failFrameWindowIDs.contains(windowID), let window = windowsByID[windowID] else {
             return false
         }
@@ -93,6 +110,10 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         defer { lock.unlock() }
         if let thief = stealFocusOnPositionAttempt {
             focusedWindowIDs.append(thief)
+        }
+        if let pinned = pinnedFrameWindowIDs[windowID], let window = windowsByID[windowID] {
+            windowsByID[windowID] = window.withFrame(pinned)
+            return false
         }
         guard !failPositionWindowIDs.contains(windowID), let window = windowsByID[windowID] else {
             return false
