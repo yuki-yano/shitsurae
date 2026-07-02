@@ -8,11 +8,327 @@ import ShitsuraeCore
 /// event-tap dual registration and its dedup timestamps). Accessibility
 /// permission is a hard requirement of the app, so the tap is always
 /// available when the app works at all.
+enum HotkeyFastPathAction: Equatable, Sendable {
+    case switchSpace(Int)
+
+    static func match(
+        eventKeyCode: Int,
+        modifiers: Set<String>,
+        shortcuts: ResolvedShortcuts,
+        frontmostBundleID: String?,
+        frontmostBelongsToActiveWorkspace: Bool
+    ) -> HotkeyFastPathAction? {
+        for (slot, hotkey) in shortcuts.switchVirtualSpace {
+            guard keyCode(for: hotkey.key) == eventKeyCode,
+                  Set(hotkey.modifiers.map { $0.lowercased() }) == modifiers
+            else {
+                continue
+            }
+
+            let shortcutID = "switchVirtualSpace:\(slot)"
+            guard !PolicyEngine.isShortcutDisabled(
+                frontmostBundleID: frontmostBundleID,
+                shortcutID: shortcutID,
+                disabledInApps: shortcuts.disabledInApps,
+                focusBySlotEnabledInApps: shortcuts.focusBySlotEnabledInApps,
+                frontmostBelongsToActiveWorkspace: frontmostBelongsToActiveWorkspace
+            ) else {
+                return nil
+            }
+
+            return .switchSpace(slot)
+        }
+
+        return nil
+    }
+}
+
+enum HotkeyFastPathExecutionResult: Sendable {
+    case success(SpaceSwitchOutcome)
+    case failure(String)
+}
+
+private struct HotkeyEventSnapshot: Sendable {
+    let typeRawValue: UInt32
+    let keyCode: Int
+    let modifiers: Set<String>
+    let key: String
+
+    var type: CGEventType? {
+        CGEventType(rawValue: typeRawValue)
+    }
+
+    init(type: CGEventType, event: CGEvent) {
+        typeRawValue = type.rawValue
+        keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
+        modifiers = eventModifierSet(flags: event.flags)
+        key = normalizedKey(from: event)
+    }
+}
+
+private struct HotkeyFastPathSnapshot: Sendable {
+    var shortcuts: ResolvedShortcuts?
+    var frontmostBundleID: String?
+    var frontmostBelongsToActiveWorkspace: Bool
+    var overlaySessionActive: Bool
+}
+
+private final class HotkeyFastPathState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var snapshot = HotkeyFastPathSnapshot(
+        shortcuts: nil,
+        frontmostBundleID: nil,
+        frontmostBelongsToActiveWorkspace: true,
+        overlaySessionActive: false
+    )
+
+    func updateShortcuts(_ shortcuts: ResolvedShortcuts?) {
+        lock.lock()
+        snapshot.shortcuts = shortcuts
+        lock.unlock()
+    }
+
+    func updatePolicy(frontmostBundleID: String?, frontmostBelongsToActiveWorkspace: Bool) {
+        lock.lock()
+        snapshot.frontmostBundleID = frontmostBundleID
+        snapshot.frontmostBelongsToActiveWorkspace = frontmostBelongsToActiveWorkspace
+        lock.unlock()
+    }
+
+    func updateOverlaySessionActive(_ active: Bool) {
+        lock.lock()
+        snapshot.overlaySessionActive = active
+        lock.unlock()
+    }
+
+    func action(event: HotkeyEventSnapshot) -> HotkeyFastPathAction? {
+        guard event.type == .keyDown else {
+            return nil
+        }
+
+        lock.lock()
+        let current = snapshot
+        lock.unlock()
+
+        guard !current.overlaySessionActive,
+              let shortcuts = current.shortcuts
+        else {
+            return nil
+        }
+
+        return HotkeyFastPathAction.match(
+            eventKeyCode: event.keyCode,
+            modifiers: event.modifiers,
+            shortcuts: shortcuts,
+            frontmostBundleID: current.frontmostBundleID,
+            frontmostBelongsToActiveWorkspace: current.frontmostBelongsToActiveWorkspace
+        )
+    }
+}
+
+private final class HotkeyFastPathExecutor: @unchecked Sendable {
+    private let engine: VirtualSpaceEngine
+    private let configManager: ConfigManager
+    private let logger: ShitsuraeLogger
+    private let onStart: @Sendable (String) -> Void
+    private let onFinish: @Sendable (String, HotkeyFastPathExecutionResult) -> Void
+
+    init(
+        engine: VirtualSpaceEngine,
+        configManager: ConfigManager,
+        logger: ShitsuraeLogger,
+        onStart: @escaping @Sendable (String) -> Void,
+        onFinish: @escaping @Sendable (String, HotkeyFastPathExecutionResult) -> Void
+    ) {
+        self.engine = engine
+        self.configManager = configManager
+        self.logger = logger
+        self.onStart = onStart
+        self.onFinish = onFinish
+    }
+
+    func execute(_ action: HotkeyFastPathAction) {
+        switch action {
+        case let .switchSpace(spaceID):
+            switchSpace(to: spaceID)
+        }
+    }
+
+    private func switchSpace(to spaceID: Int) {
+        let label = "switch to space \(spaceID)"
+        guard let config = configManager.configIfLoaded() else {
+            onFinish(label, .failure("config not loaded"))
+            return
+        }
+
+        let engine = engine
+        let logger = logger
+        onStart(label)
+        Task.detached(priority: .high) {
+            let activity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .latencyCritical],
+                reason: "Shitsurae \(label)"
+            )
+            defer {
+                ProcessInfo.processInfo.endActivity(activity)
+            }
+
+            do {
+                let outcome = try await engine.switchSpace(to: spaceID, config: config)
+                self.onFinish(label, .success(outcome))
+            } catch {
+                let message = (error as? VirtualSpaceEngineError).map {
+                    CommandRouter.mapEngineError($0).message
+                } ?? String(describing: error)
+                logger.log(level: "warn", event: "app.action.failed", fields: ["label": label, "error": message])
+                self.onFinish(label, .failure(message))
+            }
+        }
+    }
+}
+
+private final class HotkeyEventTapController: @unchecked Sendable {
+    private let lock = NSLock()
+    private let fastPathState: HotkeyFastPathState
+    private let fastPathExecutor: HotkeyFastPathExecutor
+    private let fallback: (HotkeyEventSnapshot) -> Bool
+    private var thread: Thread?
+    private var runLoop: CFRunLoop?
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+
+    init(
+        fastPathState: HotkeyFastPathState,
+        fastPathExecutor: HotkeyFastPathExecutor,
+        fallback: @escaping (HotkeyEventSnapshot) -> Bool
+    ) {
+        self.fastPathState = fastPathState
+        self.fastPathExecutor = fastPathExecutor
+        self.fallback = fallback
+    }
+
+    var isRunning: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return eventTap != nil
+    }
+
+    func start() -> Bool {
+        let semaphore = DispatchSemaphore(value: 0)
+        let thread = Thread { [weak self] in
+            self?.run(semaphore: semaphore)
+        }
+        thread.name = "Shitsurae Hotkey Event Tap"
+        thread.qualityOfService = .userInteractive
+
+        lock.lock()
+        self.thread = thread
+        lock.unlock()
+
+        thread.start()
+        return semaphore.wait(timeout: .now() + 1) == .success && isRunning
+    }
+
+    func stop() {
+        lock.lock()
+        let loop = runLoop
+        lock.unlock()
+
+        guard let loop else {
+            return
+        }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        CFRunLoopPerformBlock(loop, CFRunLoopMode.commonModes.rawValue) {
+            self.lock.lock()
+            let tap = self.eventTap
+            let source = self.runLoopSource
+            self.eventTap = nil
+            self.runLoopSource = nil
+            self.runLoop = nil
+            self.lock.unlock()
+
+            if let tap {
+                CGEvent.tapEnable(tap: tap, enable: false)
+            }
+            if let source {
+                CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
+            }
+            CFRunLoopStop(CFRunLoopGetCurrent())
+            semaphore.signal()
+        }
+        CFRunLoopWakeUp(loop)
+        _ = semaphore.wait(timeout: .now() + 1)
+    }
+
+    private func run(semaphore: DispatchSemaphore) {
+        lock.lock()
+        runLoop = CFRunLoopGetCurrent()
+        lock.unlock()
+
+        let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.flagsChanged.rawValue)
+        let callback: CGEventTapCallBack = { _, type, event, refcon in
+            guard let refcon else {
+                return Unmanaged.passUnretained(event)
+            }
+            let controller = Unmanaged<HotkeyEventTapController>.fromOpaque(refcon).takeUnretainedValue()
+            let swallow = controller.handle(type: type, event: event)
+            return swallow ? nil : Unmanaged.passUnretained(event)
+        }
+
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: callback,
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) else {
+            semaphore.signal()
+            return
+        }
+
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        lock.lock()
+        eventTap = tap
+        runLoopSource = source
+        lock.unlock()
+
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        semaphore.signal()
+        CFRunLoopRun()
+    }
+
+    private func handle(type: CGEventType, event: CGEvent) -> Bool {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            lock.lock()
+            let tap = eventTap
+            lock.unlock()
+            if let tap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            return false
+        }
+
+        let snapshot = HotkeyEventSnapshot(type: type, event: event)
+        if let action = fastPathState.action(event: snapshot) {
+            fastPathExecutor.execute(action)
+            return true
+        }
+
+        return DispatchQueue.main.sync {
+            fallback(snapshot)
+        }
+    }
+}
+
 @MainActor
 final class HotkeyManager {
     private weak var model: AppModel?
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
+    private let fastPathState = HotkeyFastPathState()
+    private let fastPathExecutor: HotkeyFastPathExecutor
+    private var eventTapController: HotkeyEventTapController?
     private var shortcuts: ResolvedShortcuts?
     private var overlay: SwitcherOverlayController?
     private var session: OverlaySession?
@@ -41,59 +357,55 @@ final class HotkeyManager {
 
     init(model: AppModel) {
         self.model = model
+        fastPathExecutor = HotkeyFastPathExecutor(
+            engine: model.engine,
+            configManager: model.configManager,
+            logger: model.logger,
+            onStart: { [weak model] label in
+                Task { @MainActor [weak model] in
+                    model?.handleFastPathActionStarted(label)
+                }
+            },
+            onFinish: { [weak model] label, result in
+                Task { @MainActor [weak model] in
+                    model?.handleFastPathSwitchFinished(label: label, result: result)
+                }
+            }
+        )
     }
 
     func start() {
-        let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.flagsChanged.rawValue)
-
-        // The tap source is added to the main run loop, so the callback runs
-        // on the main thread; assumeIsolated bridges into the actor. The
-        // closure returns Bool (Sendable) because CGEvent isn't.
-        let callback: CGEventTapCallBack = { _, type, event, refcon in
-            guard let refcon else {
-                return Unmanaged.passUnretained(event)
+        let controller = HotkeyEventTapController(
+            fastPathState: fastPathState,
+            fastPathExecutor: fastPathExecutor
+        ) { [weak self] event in
+            MainActor.assumeIsolated {
+                self?.handle(event) ?? false
             }
-            let manager = Unmanaged<HotkeyManager>.fromOpaque(refcon).takeUnretainedValue()
-            let swallow = MainActor.assumeIsolated {
-                manager.handle(type: type, event: event)
-            }
-            return swallow ? nil : Unmanaged.passUnretained(event)
         }
 
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: mask,
-            callback: callback,
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ) else {
+        guard controller.start() else {
             model?.logger.error(event: "hotkey.tapCreateFailed")
             return
         }
 
-        eventTap = tap
-        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        runLoopSource = source
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
+        eventTapController = controller
+        updateFastPathPolicy(
+            frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+            frontmostBelongsToActiveWorkspace: model?.frontmostBelongsToActiveWorkspaceForShortcutPolicy() ?? true
+        )
     }
 
     func stop() {
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-        }
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
-        }
-        eventTap = nil
-        runLoopSource = nil
+        eventTapController?.stop()
+        eventTapController = nil
         restoreNativeSwitcherHotKeys()
         overlay?.hide()
     }
 
     func reload(shortcuts: ResolvedShortcuts?) {
         self.shortcuts = shortcuts
+        fastPathState.updateShortcuts(shortcuts)
 
         // Own Cmd+Tab only when our switcher can actually run: the trigger
         // is Cmd+Tab AND the event tap exists. Without the tap (e.g. missing
@@ -103,7 +415,7 @@ final class HotkeyManager {
             $0.switcherTrigger.key.lowercased() == "tab"
                 && Set($0.switcherTrigger.modifiers.map { $0.lowercased() }) == ["cmd"]
         } ?? false
-        let shouldOwnCommandTab = triggerIsCommandTab && eventTap != nil
+        let shouldOwnCommandTab = triggerIsCommandTab && eventTapController?.isRunning == true
 
         if shouldOwnCommandTab, !commandTabDisabled {
             SymbolicHotKeyController.setEnabled(false, hotKeys: SymbolicHotKeyController.commandTabGroup)
@@ -120,22 +432,26 @@ final class HotkeyManager {
         }
     }
 
+    func updateFastPathPolicy(frontmostBundleID: String?, frontmostBelongsToActiveWorkspace: Bool) {
+        fastPathState.updatePolicy(
+            frontmostBundleID: frontmostBundleID,
+            frontmostBelongsToActiveWorkspace: frontmostBelongsToActiveWorkspace
+        )
+    }
+
     // MARK: - Event handling
 
     /// Returns true when the event was consumed.
-    private func handle(type: CGEventType, event: CGEvent) -> Bool {
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let tap = eventTap {
-                CGEvent.tapEnable(tap: tap, enable: true)
-            }
+    private func handle(_ event: HotkeyEventSnapshot) -> Bool {
+        if event.type == .tapDisabledByTimeout || event.type == .tapDisabledByUserInput {
             return false
         }
 
         if session != nil {
-            return handleOverlayEvent(type: type, event: event)
+            return handleOverlayEvent(event)
         }
 
-        guard type == .keyDown, let shortcuts else {
+        guard event.type == .keyDown, let shortcuts else {
             return false
         }
 
@@ -236,6 +552,7 @@ final class HotkeyManager {
             cancelKeys: shortcuts.cancelKeys,
             holdModifiers: holdModifiers
         )
+        fastPathState.updateOverlaySessionActive(true)
 
         Task { @MainActor in
             // v1 behavior: the switcher targets the active workspace only.
@@ -303,6 +620,7 @@ final class HotkeyManager {
             cancelKeys: shortcuts.cycleCancelKeys,
             holdModifiers: holdModifiers
         )
+        fastPathState.updateOverlaySessionActive(true)
 
         Task { @MainActor in
             let candidates = (try? await engine.cycleCandidates(
@@ -342,13 +660,13 @@ final class HotkeyManager {
         }
     }
 
-    private func handleOverlayEvent(type: CGEventType, event: CGEvent) -> Bool {
+    private func handleOverlayEvent(_ event: HotkeyEventSnapshot) -> Bool {
         guard var session else {
             return false
         }
 
-        if type == .flagsChanged {
-            let held = eventModifierSet(flags: event.flags)
+        if event.type == .flagsChanged {
+            let held = event.modifiers
             if session.holdModifiers.isDisjoint(with: held) == false {
                 return true // some trigger modifiers still held
             }
@@ -357,12 +675,12 @@ final class HotkeyManager {
             return true
         }
 
-        guard type == .keyDown else {
+        guard event.type == .keyDown else {
             return false
         }
 
-        let key = normalizedKey(from: event)
-        let modifiers = eventModifierSet(flags: event.flags)
+        let key = event.key
+        let modifiers = event.modifiers
 
         if session.cancelKeys.contains(key) {
             cancelSession()
@@ -398,7 +716,7 @@ final class HotkeyManager {
     }
 
     private func overlayAdvanceForward(
-        event: CGEvent,
+        event: HotkeyEventSnapshot,
         key: String,
         modifiers: Set<String>,
         session: OverlaySession
@@ -410,8 +728,7 @@ final class HotkeyManager {
             }
             return !modifiers.contains("shift")
         case .cycle:
-            let eventKeyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
-            if let advanceForward = Self.cycleOverlayAdvanceForward(forKeyCode: eventKeyCode, shortcuts: shortcuts) {
+            if let advanceForward = Self.cycleOverlayAdvanceForward(forKeyCode: event.keyCode, shortcuts: shortcuts) {
                 return advanceForward
             }
             guard key == "tab" else {
@@ -437,16 +754,16 @@ final class HotkeyManager {
         return nil
     }
 
-    private func isTriggerRepeat(event: CGEvent) -> Bool {
+    private func isTriggerRepeat(event: HotkeyEventSnapshot) -> Bool {
         guard let shortcuts, let session else { return false }
         switch session.kind {
         case .switcher:
             let trigger = shortcuts.switcherTrigger
-            return keyCode(for: trigger.key) == Int(event.getIntegerValueField(.keyboardEventKeycode))
+            return keyCode(for: trigger.key) == event.keyCode
         case .cycle:
             let next = shortcuts.nextWindow
             let prev = shortcuts.prevWindow
-            let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
+            let code = event.keyCode
             return keyCode(for: next.key) == code || keyCode(for: prev.key) == code
         }
     }
@@ -467,6 +784,7 @@ final class HotkeyManager {
     private func acceptSession() {
         guard let session else { return }
         self.session = nil
+        fastPathState.updateOverlaySessionActive(false)
         overlay?.hide()
 
         // Candidates still loading: remember the release; the loader
@@ -486,6 +804,7 @@ final class HotkeyManager {
 
     private func cancelSession() {
         session = nil
+        fastPathState.updateOverlaySessionActive(false)
         pendingQuickAccept = nil
         overlay?.hide()
     }
@@ -502,18 +821,17 @@ extension HotkeyManager.OverlaySession {
 
 // MARK: - Event helpers (ported from v1)
 
-func eventMatchesHotkey(event: CGEvent, key: String, modifiers: [String]) -> Bool {
+private func eventMatchesHotkey(event: HotkeyEventSnapshot, key: String, modifiers: [String]) -> Bool {
     guard let expectedKeyCode = keyCode(for: key) else {
         return false
     }
 
-    let actualKeyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
-    guard actualKeyCode == expectedKeyCode else {
+    guard event.keyCode == expectedKeyCode else {
         return false
     }
 
     let expected = Set(modifiers.map { $0.lowercased() })
-    return eventModifierSet(flags: event.flags) == expected
+    return event.modifiers == expected
 }
 
 func eventModifierSet(flags: CGEventFlags) -> Set<String> {

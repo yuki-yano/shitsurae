@@ -6,6 +6,29 @@ import ShitsuraeCore
 
 /// Application root object: owns the engine actor, config manager, command
 /// server and hotkey manager, and bridges OS notifications into engine calls.
+enum EngineActionUrgency: Sendable {
+    case normal
+    case interactive
+
+    var taskPriority: TaskPriority? {
+        switch self {
+        case .normal:
+            nil
+        case .interactive:
+            .high
+        }
+    }
+
+    var activityOptions: ProcessInfo.ActivityOptions? {
+        switch self {
+        case .normal:
+            nil
+        case .interactive:
+            [.userInitiated, .latencyCritical]
+        }
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     let logger = ShitsuraeLogger()
@@ -45,7 +68,11 @@ final class AppModel: ObservableObject {
     private var lastInteractiveActivationAt: Date?
     private var lastFollowFocusSwitchAt: Date?
     private var lastActiveSpaceChangeAt: Date?
-    private var frontmostWindowBelongsToActiveWorkspace = true
+    private var frontmostWindowBelongsToActiveWorkspace = true {
+        didSet {
+            syncHotkeyFastPathPolicy()
+        }
+    }
     private var followFocusPolicy = FollowFocusPolicy()
     private let interactiveActivationGrace: TimeInterval = 0.18
 
@@ -197,7 +224,7 @@ final class AppModel: ObservableObject {
         // mid-switch and the OS activation notification must not re-trigger
         // follow-focus.
         markInteractiveActivation()
-        runEngineAction("switch to space \(spaceID)") { [weak self] engine, config in
+        runEngineAction("switch to space \(spaceID)", urgency: .interactive) { [weak self] engine, config in
             let outcome = try await engine.switchSpace(to: spaceID, config: config)
             await MainActor.run {
                 self?.markInteractiveActivation()
@@ -208,7 +235,7 @@ final class AppModel: ObservableObject {
     }
 
     func moveCurrentWindowToSpace(_ spaceID: Int) {
-        runEngineAction("move window to space \(spaceID)") { engine, config in
+        runEngineAction("move window to space \(spaceID)", urgency: .interactive) { engine, config in
             _ = try await engine.windowWorkspace(
                 selector: WindowTargetSelector(),
                 toSpaceID: spaceID,
@@ -219,7 +246,7 @@ final class AppModel: ObservableObject {
 
     func focusSlot(_ slot: Int) {
         markInteractiveActivation()
-        runEngineAction("focus slot \(slot)") { [weak self] engine, config in
+        runEngineAction("focus slot \(slot)", urgency: .interactive) { [weak self] engine, config in
             _ = try await engine.focusSlot(slot, config: config)
             await MainActor.run {
                 self?.markInteractiveActivation()
@@ -230,7 +257,7 @@ final class AppModel: ObservableObject {
 
     func focusWindow(windowID: UInt32) {
         markInteractiveActivation()
-        runEngineAction("focus window \(windowID)") { [weak self] engine, config in
+        runEngineAction("focus window \(windowID)", urgency: .interactive) { [weak self] engine, config in
             let result = try await engine.focusWindow(
                 selector: WindowTargetSelector(windowID: windowID),
                 config: config
@@ -246,7 +273,7 @@ final class AppModel: ObservableObject {
     }
 
     func snapFocusedWindow(_ preset: SnapPreset) {
-        runEngineAction("snap \(preset.rawValue)") { engine, _ in
+        runEngineAction("snap \(preset.rawValue)", urgency: .interactive) { engine, _ in
             _ = try await engine.snapWindow(selector: WindowTargetSelector(), preset: preset)
         }
     }
@@ -258,7 +285,7 @@ final class AppModel: ObservableObject {
                 snapFocusedWindow(preset)
             }
         case .move, .resize, .moveResize:
-            runEngineAction("globalAction \(action.type.rawValue)") { engine, config in
+            runEngineAction("globalAction \(action.type.rawValue)", urgency: .interactive) { engine, config in
                 _ = try await engine.setWindowFrame(
                     selector: WindowTargetSelector(),
                     x: action.x,
@@ -272,7 +299,7 @@ final class AppModel: ObservableObject {
     }
 
     func cycleWindow(forward: Bool) {
-        runEngineAction("cycle") { [weak self] engine, config in
+        runEngineAction("cycle", urgency: .interactive) { [weak self] engine, config in
             let shortcuts = config.config.resolvedShortcuts
             let candidates = try await engine.cycleCandidates(
                 config: config,
@@ -317,8 +344,38 @@ final class AppModel: ObservableObject {
         frontmostWindowBelongsToActiveWorkspace
     }
 
+    func handleFastPathActionStarted(_ label: String) {
+        markInteractiveActivation()
+        actionStatus = .running(label)
+    }
+
+    func handleFastPathSwitchFinished(label: String, result: HotkeyFastPathExecutionResult) {
+        switch result {
+        case let .success(outcome):
+            markInteractiveActivation()
+            lastActionMessage = "\(label): ok"
+            actionStatus = .success(label)
+            lastActiveSpaceChangeAt = Date()
+            frontmostWindowBelongsToActiveWorkspace = outcome.focusedWindowID != nil || !outcome.didChangeSpace
+            refreshStatus()
+
+        case let .failure(message):
+            lastActionMessage = "\(label): \(message)"
+            actionStatus = .failed(label, message)
+            refreshStatus()
+        }
+    }
+
+    private func syncHotkeyFastPathPolicy(frontmostBundleID: String? = nil) {
+        hotkeyManager?.updateFastPathPolicy(
+            frontmostBundleID: frontmostBundleID ?? NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+            frontmostBelongsToActiveWorkspace: frontmostWindowBelongsToActiveWorkspace
+        )
+    }
+
     private func runEngineAction(
         _ label: String,
+        urgency: EngineActionUrgency = .normal,
         _ body: @escaping @Sendable (VirtualSpaceEngine, LoadedConfig) async throws -> Void
     ) {
         guard let config = configManager.configIfLoaded() else {
@@ -327,8 +384,21 @@ final class AppModel: ObservableObject {
             return
         }
         let engine = engine
+        let activityOptions = urgency.activityOptions
         actionStatus = .running(label)
-        Task {
+        Task(priority: urgency.taskPriority) {
+            let activity = activityOptions.map {
+                ProcessInfo.processInfo.beginActivity(
+                    options: $0,
+                    reason: "Shitsurae \(label)"
+                )
+            }
+            defer {
+                if let activity {
+                    ProcessInfo.processInfo.endActivity(activity)
+                }
+            }
+
             do {
                 try await body(engine, config)
                 await MainActor.run {
@@ -411,6 +481,8 @@ final class AppModel: ObservableObject {
     }
 
     private func handleAppActivated(application: NSRunningApplication, bundleID: String) {
+        syncHotkeyFastPathPolicy(frontmostBundleID: bundleID)
+
         guard !bundleID.hasPrefix("com.yuki-yano.shitsurae"),
               bundleID != Bundle.main.bundleIdentifier
         else {
