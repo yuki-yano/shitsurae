@@ -111,12 +111,12 @@ struct ArrangeView: View {
                 } else {
                     statusCard
 
-                    // Pickers and action buttons live on separate rows: a
-                    // single row overflowed horizontally on narrow windows
-                    // and silently clipped the Apply button. Pickers hug
-                    // their content (.fixedSize) so captions stay aligned
-                    // with them.
-                    HStack(alignment: .top, spacing: 20) {
+                    // Pickers hug their content (.fixedSize) so captions stay
+                    // aligned with them. The apply button sits trailing on the
+                    // same row; layoutPriority keeps it intact on narrow
+                    // windows (the Spacer collapses first, the button never
+                    // gets clipped).
+                    HStack(alignment: .bottom, spacing: 20) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Layout").font(.caption).foregroundStyle(.secondary)
                             Picker("Layout", selection: $selectedLayout) {
@@ -140,9 +140,12 @@ struct ArrangeView: View {
                             .labelsHidden()
                             .fixedSize()
                         }
-                    }
 
-                    actionButtons
+                        Spacer(minLength: 16)
+
+                        actionButtons
+                            .layoutPriority(1)
+                    }
 
                     if case let .failed(label, message) = model.actionStatus {
                         Label("\(label): \(message)", systemImage: "xmark.circle.fill")
@@ -254,7 +257,7 @@ struct ArrangeView: View {
     ) -> some View {
         let button = Button(action: perform) {
             HStack(spacing: 6) {
-                statusIcon(action: action, defaultSystemImage: systemImage)
+                statusIcon(action: action, defaultSystemImage: systemImage, onProminent: prominent)
                 Text(title)
             }
         }
@@ -268,14 +271,18 @@ struct ArrangeView: View {
     }
 
     @ViewBuilder
-    private func statusIcon(action: String, defaultSystemImage: String) -> some View {
+    private func statusIcon(action: String, defaultSystemImage: String, onProminent: Bool = false) -> some View {
+        // Status colors sit on the tinted prominent background, where the
+        // usual green/red would vanish — use white there instead.
         switch model.actionStatus {
         case let .running(label) where label.hasPrefix(action):
             ProgressView().controlSize(.small)
         case let .success(label) where label.hasPrefix(action):
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(onProminent ? Color.white : Color.green)
         case let .failed(label, _) where label.hasPrefix(action):
-            Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
+            Image(systemName: "xmark.circle.fill")
+                .foregroundStyle(onProminent ? Color.white : Color.red)
         default:
             Image(systemName: defaultSystemImage)
         }
