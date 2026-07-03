@@ -49,8 +49,11 @@ public actor VirtualSpaceEngine {
     /// Windows an app refuses to move (Chrome remote-debug popups, dialogs).
     /// Tracked in memory only — a per-window count of consecutive switches
     /// that left the window unconverged; once it reaches the threshold the
-    /// window is quarantined and excluded from switch planning so it stops
-    /// pinning convergence and dragging every switch through the retry budget.
+    /// window is quarantined so it stops pinning convergence and dragging
+    /// every switch through the retry budget. Quarantined windows still get
+    /// one best-effort attempt per switch; the first accepted write releases
+    /// the quarantine, so a window stuck only transiently (e.g. Chrome under
+    /// remote-debug automation) is managed again without an app restart.
     private var convergenceFailureCounts: [UInt32: Int] = [:]
     private var quarantinedWindowIDs: Set<UInt32> = []
     private static let quarantineThreshold = 3
@@ -179,6 +182,18 @@ public actor VirtualSpaceEngine {
         )
         updateQuarantine(plannedChanges: applied, convergence: convergence)
 
+        // Quarantined windows: one attempt, no retries, no convergence
+        // accounting — and after the early focus so a slow AX call can't delay
+        // keyboard focus. An accepted write means the app honors geometry
+        // again (e.g. Chrome's remote-debug session ended): release the
+        // quarantine so the window is fully managed from the next switch.
+        let bestEffortApplied = VisibilityApplier.apply(
+            plans: plan.bestEffort,
+            control: control,
+            logger: logger
+        )
+        releaseQuarantine(bestEffortChanges: bestEffortApplied)
+
         // The early focus can fail while the window is still settling, or it
         // can succeed and then be clobbered: convergence (and the OS settling
         // the shown/hidden windows) can steal key focus to a *sibling* window
@@ -202,10 +217,13 @@ public actor VirtualSpaceEngine {
         }
 
         // Persist: merge effective entries back by id, update active space,
-        // record pending convergence when not fully converged.
+        // record pending convergence when not fully converged. Best-effort
+        // changes carry the desired entry on an accepted write and the
+        // original on a refused one, so merging them can never make the
+        // persisted state lie about a window the app kept pinned.
         var newState = state
         var slotsByID = Dictionary(uniqueKeysWithValues: newState.slots.map { ($0.id, $0) })
-        for change in convergence.changes {
+        for change in convergence.changes + bestEffortApplied {
             slotsByID[change.effectiveEntry.id] = change.effectiveEntry
         }
         if let focusedWindowID,
@@ -386,6 +404,12 @@ public actor VirtualSpaceEngine {
         let fromSpaceID = entry.spaceID
         entry = entry.bound(to: window)
         entry.spaceID = toSpaceID
+
+        // An explicit user move is a fresh chance: drop quarantine bookkeeping
+        // so the window is planned again with full convergence from the next
+        // switch (it re-quarantines if the app still refuses to move it).
+        quarantinedWindowIDs.remove(window.windowID)
+        convergenceFailureCounts[window.windowID] = 0
 
         let displays = control.displays()
         let hostDisplay = DisplayResolver.hostDisplay(layout: layout, config: config.config, displays: displays)
@@ -696,8 +720,10 @@ public actor VirtualSpaceEngine {
 
     /// Counts consecutive unconverged switches per window and quarantines a
     /// window once it crosses the threshold. A window that converges resets its
-    /// count; quarantined windows are excluded from planning so they never
-    /// reappear here until they are closed (pruned by windowID in switchSpace).
+    /// count; quarantined windows leave the converged plan and only reappear
+    /// here after a best-effort attempt succeeds (releaseQuarantine), an
+    /// explicit workspace move clears them, or they close (pruned by windowID
+    /// in switchSpace).
     private func updateQuarantine(
         plannedChanges: [AppliedVisibilityChange],
         convergence: ConvergenceOutcome
@@ -722,6 +748,24 @@ public actor VirtualSpaceEngine {
                     ]
                 )
             }
+        }
+    }
+
+    /// Releases the quarantine for windows whose best-effort attempt was
+    /// accepted (effective == desired): the app honors geometry writes again,
+    /// so the window goes back to normal planning from the next switch.
+    private func releaseQuarantine(bestEffortChanges: [AppliedVisibilityChange]) {
+        for change in bestEffortChanges where change.effectiveEntry == change.desiredEntry {
+            let windowID = change.window.windowID
+            guard quarantinedWindowIDs.remove(windowID) != nil else { continue }
+            convergenceFailureCounts[windowID] = 0
+            logger.log(
+                event: "visibility.quarantine.released",
+                fields: [
+                    "windowID": Int(windowID),
+                    "bundleID": change.window.bundleID,
+                ]
+            )
         }
     }
 

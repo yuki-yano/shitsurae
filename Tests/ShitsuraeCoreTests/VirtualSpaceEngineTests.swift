@@ -343,6 +343,61 @@ struct VirtualSpaceEngineTests {
         #expect(VisibilityPlanner.isHiddenWindowFrame(frame: control.window(1)!.frame, displays: [TestFixtures.display]))
     }
 
+    @Test func quarantineReleasesOnceAppAcceptsMovesAgain() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        _ = try await engine.switchSpace(to: 2, config: config)
+        control.pinnedFrameWindowIDs = [1: ResolvedFrame(x: 500, y: 500, width: 320, height: 252)]
+
+        // Drive window 1 into quarantine (three unconverged switches that plan it).
+        _ = try await engine.switchSpace(to: 1, config: config)
+        _ = try await engine.switchSpace(to: 2, config: config)
+        _ = try await engine.switchSpace(to: 1, config: config)
+
+        // The app starts honoring geometry writes again (e.g. Chrome's
+        // remote-debug session ended) while the window stays open. The next
+        // switch's best-effort attempt must land AND release the quarantine —
+        // the window cannot stay stuck on every space until Chrome restarts.
+        control.pinnedFrameWindowIDs = [:]
+        let release = try await engine.switchSpace(to: 2, config: config)
+        #expect(release.converged)
+        #expect(VisibilityPlanner.isHiddenWindowFrame(frame: control.window(1)!.frame, displays: [TestFixtures.display]))
+
+        // Fully managed again afterwards: switching back shows it normally.
+        let back = try await engine.switchSpace(to: 1, config: config)
+        #expect(back.converged)
+        #expect(!VisibilityPlanner.isHiddenWindowFrame(frame: control.window(1)!.frame, displays: [TestFixtures.display]))
+    }
+
+    @Test func movingQuarantinedWindowToWorkspaceClearsQuarantine() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        _ = try await engine.switchSpace(to: 2, config: config)
+        control.pinnedFrameWindowIDs = [1: ResolvedFrame(x: 500, y: 500, width: 320, height: 252)]
+
+        // Drive window 1 into quarantine (three unconverged switches that plan it).
+        _ = try await engine.switchSpace(to: 1, config: config)
+        _ = try await engine.switchSpace(to: 2, config: config)
+        _ = try await engine.switchSpace(to: 1, config: config)
+
+        // An explicit user move is a fresh chance: quarantine bookkeeping is
+        // dropped, so the very next switch plans the window again with full
+        // convergence (unconverged here because the app still refuses).
+        _ = try await engine.moveWindowToWorkspace(window: control.window(1)!, toSpaceID: 2, config: config)
+        let replanned = try await engine.switchSpace(to: 2, config: config)
+        #expect(!replanned.converged)
+
+        // Once the app accepts writes again the window is managed normally.
+        control.pinnedFrameWindowIDs = [:]
+        let recovered = try await engine.switchSpace(to: 1, config: config)
+        #expect(recovered.converged)
+        #expect(VisibilityPlanner.isHiddenWindowFrame(frame: control.window(1)!.frame, displays: [TestFixtures.display]))
+    }
+
     @Test func switchBackRestoresOriginalWindows() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
