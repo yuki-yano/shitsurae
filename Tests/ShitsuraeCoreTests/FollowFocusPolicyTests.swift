@@ -4,14 +4,26 @@ import Testing
 
 @Suite("FollowFocusPolicy")
 struct FollowFocusPolicyTests {
-    @Test func newlyCreatedFocusedWindowDoesNotSwitchWorkspace() {
-        var policy = FollowFocusPolicy(newWindowGrace: 1.0)
+    @Test func sequenceLessInvalidationDoesNotConsumeOSSequenceNumbers() {
+        let gate = FocusEventGate()
+        #expect(gate.accept(10))
+
+        gate.invalidateCurrent()
+        gate.invalidateCurrent()
+        #expect(!gate.isCurrent(10))
+        #expect(!gate.accept(10))
+
+        // The very next source sequence is accepted even after multiple IPC
+        // invalidations; the gate never invents values ahead of the source.
+        #expect(gate.accept(11))
+        #expect(gate.isCurrent(11))
+    }
+
+    @Test func trackedFocusedWindowKeepsItsWorkspace() {
+        let policy = FollowFocusPolicy()
         let now = Date(timeIntervalSince1970: 100)
 
-        policy.recordWindowCreated(windowID: 42, now: now)
-
         let decision = policy.decisionForFocusedWindow(
-            windowID: 42,
             targetSpaceID: 2,
             activeSpaceID: 1,
             followFocusEnabled: true,
@@ -20,15 +32,14 @@ struct FollowFocusPolicyTests {
             now: now.addingTimeInterval(0.2)
         )
 
-        #expect(decision == .adoptIntoActiveWorkspace)
+        #expect(decision == .switchSpace(2))
     }
 
     @Test func existingFocusedWindowSwitchesToItsTrackedWorkspace() {
-        var policy = FollowFocusPolicy(newWindowGrace: 1.0)
+        let policy = FollowFocusPolicy()
         let now = Date(timeIntervalSince1970: 100)
 
         let decision = policy.decisionForFocusedWindow(
-            windowID: 7,
             targetSpaceID: 2,
             activeSpaceID: 1,
             followFocusEnabled: true,
@@ -41,11 +52,10 @@ struct FollowFocusPolicyTests {
     }
 
     @Test func untrackedFocusedWindowIsAdoptedIntoActiveWorkspace() {
-        var policy = FollowFocusPolicy(newWindowGrace: 1.0)
+        let policy = FollowFocusPolicy()
         let now = Date(timeIntervalSince1970: 100)
 
         let decision = policy.decisionForFocusedWindow(
-            windowID: 99,
             targetSpaceID: nil,
             activeSpaceID: 1,
             followFocusEnabled: true,
@@ -58,11 +68,10 @@ struct FollowFocusPolicyTests {
     }
 
     @Test func followFocusDebounceSuppressesSwitch() {
-        var policy = FollowFocusPolicy(newWindowGrace: 1.0)
+        let policy = FollowFocusPolicy()
         let now = Date(timeIntervalSince1970: 100)
 
         let decision = policy.decisionForFocusedWindow(
-            windowID: 7,
             targetSpaceID: 2,
             activeSpaceID: 1,
             followFocusEnabled: true,
@@ -72,25 +81,6 @@ struct FollowFocusPolicyTests {
         )
 
         #expect(decision == .markActivated)
-    }
-
-    @Test func expiredCreatedWindowCanSwitchLater() {
-        var policy = FollowFocusPolicy(newWindowGrace: 1.0)
-        let now = Date(timeIntervalSince1970: 100)
-
-        policy.recordWindowCreated(windowID: 42, now: now)
-
-        let decision = policy.decisionForFocusedWindow(
-            windowID: 42,
-            targetSpaceID: 2,
-            activeSpaceID: 1,
-            followFocusEnabled: true,
-            lastFollowFocusSwitchAt: nil,
-            lastActiveSpaceChangeAt: nil,
-            now: now.addingTimeInterval(2.0)
-        )
-
-        #expect(decision == .switchSpace(2))
     }
 
     @Test func shortcutPolicyIgnoresFrontmostWindowFromInactiveWorkspace() {
@@ -103,5 +93,20 @@ struct FollowFocusPolicyTests {
         )
 
         #expect(disabled == false)
+    }
+
+    @Test func shortcutWorkspaceMembershipOnlyRejectsTrackedInactiveWindow() {
+        #expect(FollowFocusPolicy.frontmostBelongsToActiveWorkspace(
+            targetSpaceID: nil,
+            activeSpaceID: 1
+        ))
+        #expect(FollowFocusPolicy.frontmostBelongsToActiveWorkspace(
+            targetSpaceID: 1,
+            activeSpaceID: 1
+        ))
+        #expect(!FollowFocusPolicy.frontmostBelongsToActiveWorkspace(
+            targetSpaceID: 2,
+            activeSpaceID: 1
+        ))
     }
 }

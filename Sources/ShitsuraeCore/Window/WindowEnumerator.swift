@@ -8,7 +8,8 @@ import Foundation
 /// Primary enumeration uses CGWindowListCopyWindowInfo (fast, includes
 /// off-screen windows with `.optionAll`). The minimized state is not available
 /// from CGWindowList, so it is filled in with one AX batch query per process
-/// (kAXWindowsAttribute → kAXMinimizedAttribute). v1 hardcoded
+/// (`kAXWindowsAttribute` → `kAXMinimizedAttribute`). The same query records
+/// which CG window IDs are backed by real AX windows. v1 hardcoded
 /// `minimized: false`, which broke visibility planning for manually minimized
 /// windows — never reintroduce that.
 public enum WindowEnumerator {
@@ -16,69 +17,204 @@ public enum WindowEnumerator {
 
     /// Windows on the active (visible) portion of the desktop.
     public static func listWindows(displays: [DisplayInfo] = SystemProbe.displays()) -> [WindowSnapshot] {
-        listWindows(displays: displays, options: [.optionOnScreenOnly, .excludeDesktopElements])
+        inventory(displays: displays, options: [.optionOnScreenOnly, .excludeDesktopElements]).windows
     }
 
     /// Every window including off-screen (hidden by Shitsurae) and minimized.
     public static func listAllWindows(displays: [DisplayInfo] = SystemProbe.displays()) -> [WindowSnapshot] {
-        listWindows(displays: displays, options: [.optionAll, .excludeDesktopElements])
+        allWindowInventory(displays: displays).windows
+    }
+
+    public static func allWindowInventory(
+        displays: [DisplayInfo] = SystemProbe.displays()
+    ) -> WindowInventory {
+        inventory(displays: displays, options: [.optionAll, .excludeDesktopElements])
+    }
+
+    public static func onScreenWindowIdentities() -> Set<WindowIdentity> {
+        let ownersBefore = processOwners()
+        guard let raw = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else {
+            return []
+        }
+        let rawPIDs = Set(raw.compactMap {
+            ($0[kCGWindowOwnerPID as String] as? NSNumber)?.intValue
+        })
+        let ownersAfter = processOwners(pids: rawPIDs)
+        let stableOwners = ownersAfter.filter { pid, owner in
+            ownersBefore[pid]?.identity == owner.identity
+        }
+        return Set(raw.compactMap { info in
+            guard let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                  let pid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.intValue,
+                  let owner = stableOwners[pid]
+            else {
+                return nil
+            }
+            return WindowIdentity(
+                pid: pid,
+                processStartTime: owner.identity.processStartTime,
+                windowID: id,
+                bundleID: owner.identity.bundleID
+            )
+        })
     }
 
     public static func focusedWindow(displays: [DisplayInfo] = SystemProbe.displays()) -> WindowSnapshot? {
-        guard let app = NSWorkspace.shared.frontmostApplication,
-              let bundleID = app.bundleIdentifier
-        else {
-            return nil
-        }
+        let observation = focusedWindowObservation(displays: displays)
+        guard let identity = observation.focusedIdentity else { return nil }
+        return observation.inventory.windows.first { $0.identity == identity }
+    }
 
-        let windows = listAllWindows(displays: displays)
-        return resolveFocusedWindow(
-            frontmostPID: Int(app.processIdentifier),
-            frontmostBundleID: bundleID,
-            focusedWindowID: frontmostWindowID(pid: app.processIdentifier),
-            windows: windows
+    public static func focusedWindowObservation(
+        displays: [DisplayInfo] = SystemProbe.displays()
+    ) -> WindowObservation {
+        guard let appBefore = NSWorkspace.shared.frontmostApplication,
+              let bundleID = appBefore.bundleIdentifier,
+              let processStartTime = ProcessGenerationResolver.startTime(pid: Int(appBefore.processIdentifier))
+        else {
+            return WindowObservation(inventory: allWindowInventory(displays: displays), focusedIdentity: nil)
+        }
+        let inventory = allWindowInventory(displays: displays)
+        let focusedWindowID = frontmostWindowID(
+            pid: appBefore.processIdentifier,
+            allowMainWindowFallback: false
         )
+        guard let appAfter = NSWorkspace.shared.frontmostApplication,
+              appAfter.processIdentifier == appBefore.processIdentifier,
+              appAfter.bundleIdentifier == bundleID,
+              ProcessGenerationResolver.startTime(pid: Int(appAfter.processIdentifier)) == processStartTime
+        else {
+            return WindowObservation(inventory: inventory, focusedIdentity: nil)
+        }
+        let focused = resolveFocusedWindow(
+            frontmostPID: Int(appBefore.processIdentifier),
+            frontmostProcessStartTime: processStartTime,
+            frontmostBundleID: bundleID,
+            focusedWindowID: focusedWindowID,
+            windows: inventory.windows,
+            requireExactFocusedWindow: true
+        )
+        return WindowObservation(inventory: inventory, focusedIdentity: focused?.identity)
     }
 
     // MARK: - Internals
 
-    private static func listWindows(
+    private static func inventory(
         displays: [DisplayInfo],
         options: CGWindowListOption
-    ) -> [WindowSnapshot] {
+    ) -> WindowInventory {
+        let ownersBefore = processOwners()
         guard let raw = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
-            return []
+            return .unavailable
         }
 
-        return buildSnapshots(
+        let rawPIDs = Set(raw.compactMap {
+            ($0[kCGWindowOwnerPID as String] as? NSNumber)?.intValue
+        })
+        let ownersAfter = processOwners(pids: rawPIDs)
+        let stableOwners = ownersAfter.filter { pid, owner in
+            ownersBefore[pid]?.identity == owner.identity
+        }
+        let liveWindowHandles = rawWindowHandles(
+            rawWindowInfo: raw,
+            processStartTimesByPID: stableOwners.mapValues(\.identity.processStartTime)
+        )
+        return .available(buildSnapshots(
             rawWindowInfo: raw,
             displays: displays,
             appResolver: { pid in
-                guard let app = NSRunningApplication(processIdentifier: pid_t(pid)),
-                      let bundleID = app.bundleIdentifier
-                else {
-                    return nil
+                stableOwners[pid].map {
+                    (
+                        bundleID: $0.identity.bundleID,
+                        isHidden: $0.isHidden,
+                        processStartTime: $0.identity.processStartTime
+                    )
                 }
-                return (bundleID: bundleID, isHidden: app.isHidden)
             },
-            profileResolver: { bundleID, pid in
+            profileResolver: { bundleID, pid, processStartTime in
                 sharedProfileCache.profileDirectory(
                     bundleID: bundleID,
                     pid: pid,
+                    processStartTime: processStartTime,
                     resolver: SystemProbe.browserProfileDirectory(bundleID:pid:)
                 )
             },
-            windowAXInfoResolver: windowAXInfo(pids:)
-        )
+            windowAXInfoResolver: windowAXInfo(expectedBundlesByPID:)
+        ), liveWindowHandles: liveWindowHandles)
+    }
+
+    struct ProcessOwnerIdentity: Equatable, Hashable, Sendable {
+        let bundleID: String
+        let processStartTime: UInt64
+    }
+
+    private struct ProcessOwner: Equatable {
+        let identity: ProcessOwnerIdentity
+        let isHidden: Bool
+    }
+
+    private static func processOwners(pids: Set<Int>? = nil) -> [Int: ProcessOwner] {
+        let applications = pids.map {
+            $0.compactMap { NSRunningApplication(processIdentifier: pid_t($0)) }
+        } ?? NSWorkspace.shared.runningApplications
+        return Dictionary(uniqueKeysWithValues: applications.compactMap { app in
+            let pid = Int(app.processIdentifier)
+            guard !app.isTerminated,
+                  let bundleID = app.bundleIdentifier,
+                  let processStartTime = ProcessGenerationResolver.startTime(pid: pid)
+            else {
+                return nil
+            }
+            return (pid, ProcessOwner(
+                identity: ProcessOwnerIdentity(
+                    bundleID: bundleID,
+                    processStartTime: processStartTime
+                ),
+                isHidden: app.isHidden
+            ))
+        })
+    }
+
+    static func rawWindowHandles(
+        rawWindowInfo: [[String: Any]],
+        processStartTimesByPID: [Int: UInt64] = [:]
+    ) -> Set<WindowHandle> {
+        Set(rawWindowInfo.compactMap { info in
+            guard let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                  let pid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.intValue
+            else {
+                return nil
+            }
+            return WindowHandle(
+                pid: pid,
+                processStartTime: processStartTimesByPID[pid],
+                windowID: id
+            )
+        })
     }
 
     /// Per-window AX attributes not available from CGWindowList: the minimized
-    /// flag and the window subrole (used to keep dialogs/popups unmanaged).
+    /// flag, the window subrole (used to keep dialogs/popups unmanaged), and
+    /// the IDs actually exposed by the owning process's AX window list.
     struct WindowAXInfo {
-        let minimized: Set<UInt32>
-        let subroles: [UInt32: String]
+        /// A window ID absent from this set is "not AX-visible", which covers
+        /// CG-only surfaces, AX query failures, and windows the process does
+        /// not currently report (other native Space, some minimized states).
+        /// Consumers must treat absence as non-authoritative — see
+        /// `WindowSnapshot.isAXBacked`.
+        let axBackedWindowIDs: Set<WindowIdentity>
+        let minimized: Set<WindowIdentity>
+        let subroles: [WindowIdentity: String]
 
-        init(minimized: Set<UInt32> = [], subroles: [UInt32: String] = [:]) {
+        init(
+            axBackedWindowIDs: Set<WindowIdentity>,
+            minimized: Set<WindowIdentity> = [],
+            subroles: [WindowIdentity: String] = [:]
+        ) {
+            self.axBackedWindowIDs = axBackedWindowIDs
             self.minimized = minimized
             self.subroles = subroles
         }
@@ -88,14 +224,15 @@ public enum WindowEnumerator {
     static func buildSnapshots(
         rawWindowInfo: [[String: Any]],
         displays: [DisplayInfo],
-        appResolver: (Int) -> (bundleID: String, isHidden: Bool)?,
-        profileResolver: (String, Int) -> String? = { _, _ in nil },
-        windowAXInfoResolver: (Set<Int>) -> WindowAXInfo = { _ in WindowAXInfo() }
+        appResolver: (Int) -> (bundleID: String, isHidden: Bool, processStartTime: UInt64)?,
+        profileResolver: (String, Int, UInt64) -> String? = { _, _, _ in nil },
+        windowAXInfoResolver: ([Int: ProcessOwnerIdentity]) -> WindowAXInfo
     ) -> [WindowSnapshot] {
         struct PendingWindow {
             let windowID: UInt32
             let bundleID: String
             let pid: Int
+            let processStartTime: UInt64
             let title: String
             let isHidden: Bool
             let rect: CGRect
@@ -139,7 +276,7 @@ public enum WindowEnumerator {
             if let memoized = resolvedProfiles[pid] {
                 profileDirectory = memoized
             } else {
-                let resolved = profileResolver(app.bundleID, pid)
+                let resolved = profileResolver(app.bundleID, pid, app.processStartTime)
                 resolvedProfiles[pid] = resolved
                 profileDirectory = resolved
             }
@@ -149,6 +286,7 @@ public enum WindowEnumerator {
                     windowID: windowID,
                     bundleID: app.bundleID,
                     pid: pid,
+                    processStartTime: app.processStartTime,
                     title: (info[kCGWindowName as String] as? String) ?? "",
                     isHidden: app.isHidden,
                     rect: rect,
@@ -159,17 +297,34 @@ public enum WindowEnumerator {
             )
         }
 
-        let axInfo = windowAXInfoResolver(Set(pending.map(\.pid)))
+        let expectedBundlesByPID = Dictionary(grouping: pending, by: \.pid).compactMapValues { windows in
+            let owners = Set(windows.map {
+                ProcessOwnerIdentity(
+                    bundleID: $0.bundleID,
+                    processStartTime: $0.processStartTime
+                )
+            })
+            return owners.count == 1 ? owners.first : nil
+        }
+        let axInfo = windowAXInfoResolver(expectedBundlesByPID)
 
         return pending
             .map { window in
-                WindowSnapshot(
+                let axIdentity = WindowIdentity(
+                    pid: window.pid,
+                    processStartTime: window.processStartTime,
+                    windowID: window.windowID,
+                    bundleID: window.bundleID
+                )
+                return WindowSnapshot(
                     windowID: window.windowID,
                     bundleID: window.bundleID,
                     pid: window.pid,
+                    processStartTime: window.processStartTime,
                     title: window.title,
-                    subrole: axInfo.subroles[window.windowID],
-                    minimized: axInfo.minimized.contains(window.windowID),
+                    subrole: axInfo.subroles[axIdentity],
+                    isAXBacked: axInfo.axBackedWindowIDs.contains(axIdentity),
+                    minimized: axInfo.minimized.contains(axIdentity),
                     hidden: window.isHidden,
                     frame: ResolvedFrame(
                         x: window.rect.origin.x,
@@ -192,76 +347,133 @@ public enum WindowEnumerator {
     /// One AX query per pid, reading both the minimized flag and the subrole
     /// for every window (neither is available from CGWindowList). Folding both
     /// into a single pass avoids a second per-process AX round trip.
-    static func windowAXInfo(pids: Set<Int>) -> WindowAXInfo {
+    static func windowAXInfo(expectedBundlesByPID: [Int: ProcessOwnerIdentity]) -> WindowAXInfo {
         guard AXIsProcessTrusted() else {
-            return WindowAXInfo()
+            // No AX trust: nothing is confirmed AX-backed, nothing manageable.
+            return WindowAXInfo(axBackedWindowIDs: [])
         }
 
-        var minimized = Set<UInt32>()
-        var subroles: [UInt32: String] = [:]
+        var axBackedWindowIDs = Set<WindowIdentity>()
+        var minimized = Set<WindowIdentity>()
+        var subroles: [WindowIdentity: String] = [:]
 
-        for pid in pids {
+        for (pid, expectedOwner) in expectedBundlesByPID {
+            guard let ownerBefore = NSRunningApplication(processIdentifier: pid_t(pid)),
+                  !ownerBefore.isTerminated,
+                  ownerBefore.bundleIdentifier == expectedOwner.bundleID,
+                  ProcessGenerationResolver.startTime(pid: pid) == expectedOwner.processStartTime
+            else {
+                continue
+            }
             let appElement = AXUIElementCreateApplication(pid_t(pid))
 
             var windowsRef: CFTypeRef?
             guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
                   let windowElements = windowsRef as? [AXUIElement]
             else {
+                // A failed query is not "this process has no AX windows":
+                // busy processes (Chrome under automation) time out here.
+                // The windows simply stay non-AX-backed for this pass, which
+                // consumers must treat as non-authoritative.
                 continue
             }
 
+            var processBacked = Set<WindowIdentity>()
+            var processMinimized = Set<WindowIdentity>()
+            var processSubroles: [WindowIdentity: String] = [:]
             for element in windowElements {
                 var windowID: CGWindowID = 0
                 guard AXUIElementGetWindowID(element, &windowID) == .success else {
                     continue
                 }
-                let id = UInt32(windowID)
+                let identity = WindowIdentity(
+                    pid: pid,
+                    processStartTime: expectedOwner.processStartTime,
+                    windowID: UInt32(windowID),
+                    bundleID: expectedOwner.bundleID
+                )
+                processBacked.insert(identity)
 
                 var minimizedRef: CFTypeRef?
                 if AXUIElementCopyAttributeValue(element, kAXMinimizedAttribute as CFString, &minimizedRef) == .success,
                    (minimizedRef as? Bool) == true
                 {
-                    minimized.insert(id)
+                    processMinimized.insert(identity)
                 }
 
                 var subroleRef: CFTypeRef?
                 if AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleRef) == .success,
                    let subrole = subroleRef as? String
                 {
-                    subroles[id] = subrole
+                    processSubroles[identity] = subrole
                 }
             }
+
+            guard let ownerAfter = NSRunningApplication(processIdentifier: pid_t(pid)),
+                  !ownerAfter.isTerminated,
+                  ownerAfter.bundleIdentifier == expectedOwner.bundleID,
+                  ProcessGenerationResolver.startTime(pid: pid) == expectedOwner.processStartTime
+            else {
+                continue
+            }
+            axBackedWindowIDs.formUnion(processBacked)
+            minimized.formUnion(processMinimized)
+            subroles.merge(processSubroles, uniquingKeysWith: { current, _ in current })
         }
 
-        return WindowAXInfo(minimized: minimized, subroles: subroles)
+        return WindowAXInfo(
+            axBackedWindowIDs: axBackedWindowIDs,
+            minimized: minimized,
+            subroles: subroles
+        )
     }
 
     static func resolveFocusedWindow(
         frontmostPID: Int,
+        frontmostProcessStartTime: UInt64,
         frontmostBundleID: String,
         focusedWindowID: UInt32?,
-        windows: [WindowSnapshot]
+        windows: [WindowSnapshot],
+        requireExactFocusedWindow: Bool = false
     ) -> WindowSnapshot? {
-        if let focusedWindowID,
-           let exact = windows.first(where: { $0.windowID == focusedWindowID })
-        {
-            return exact
+        if let focusedWindowID {
+            let exact = windows.first(where: {
+               $0.pid == frontmostPID
+                   && $0.processStartTime == frontmostProcessStartTime
+                   && $0.bundleID == frontmostBundleID
+                   && $0.windowID == focusedWindowID
+           })
+            if exact != nil || requireExactFocusedWindow {
+                return exact
+            }
+        } else if requireExactFocusedWindow {
+            return nil
         }
 
-        if let exact = windows.first(where: { $0.pid == frontmostPID }) {
-            return exact
-        }
-
-        return windows.first(where: { $0.bundleID == frontmostBundleID })
+        // AX can temporarily omit the focused window ID, but the foreground
+        // process identity is still authoritative. Never fall back to a
+        // same-bundle sibling process: Chrome DevTools routinely runs one.
+        return windows.first(where: {
+            $0.pid == frontmostPID
+                && $0.processStartTime == frontmostProcessStartTime
+                && $0.bundleID == frontmostBundleID
+        })
     }
 
-    static func frontmostWindowID(pid: pid_t) -> UInt32? {
+    static func frontmostWindowID(
+        pid: pid_t,
+        allowMainWindowFallback: Bool = true
+    ) -> UInt32? {
         guard AXIsProcessTrusted() else {
             return nil
         }
 
         let appElement = AXUIElementCreateApplication(pid)
-        for attribute in [kAXFocusedWindowAttribute as CFString, kAXMainWindowAttribute as CFString] {
+        var attributes = [kAXFocusedWindowAttribute as CFString]
+        if allowMainWindowFallback {
+            attributes.append(kAXMainWindowAttribute as CFString)
+        }
+        for attribute in attributes {
             var ref: CFTypeRef?
             guard AXUIElementCopyAttributeValue(appElement, attribute, &ref) == .success,
                   let resolved = ref

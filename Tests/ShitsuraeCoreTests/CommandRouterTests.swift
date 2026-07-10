@@ -4,6 +4,16 @@ import Testing
 
 @Suite("CommandRouter")
 struct CommandRouterTests {
+    @Test func mutatingStateOnlyArrangeInvalidatesPendingFocus() {
+        var stateOnly = CommandRequest(command: "arrange")
+        stateOnly.stateOnly = true
+        #expect(CommandRouter.invalidatesPendingFocus(stateOnly))
+
+        var dryRun = CommandRequest(command: "arrange")
+        dryRun.dryRun = true
+        #expect(!CommandRouter.invalidatesPendingFocus(dryRun))
+    }
+
     private func makeRouter(
         windows: [WindowSnapshot]
     ) throws -> (router: CommandRouter, engine: VirtualSpaceEngine, control: MockWindowControl, cleanup: () -> Void) {
@@ -62,9 +72,9 @@ struct CommandRouterTests {
 
     private func standardWindows() -> [WindowSnapshot] {
         [
-            TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", frontIndex: 0),
-            TestFixtures.window(id: 2, bundleID: "com.apple.Terminal", frontIndex: 1),
-            TestFixtures.window(id: 3, bundleID: "com.apple.Notes", frontIndex: 2),
+            TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", isAXBacked: true, frontIndex: 0),
+            TestFixtures.window(id: 2, bundleID: "com.apple.Terminal", isAXBacked: true, frontIndex: 1),
+            TestFixtures.window(id: 3, bundleID: "com.apple.Notes", isAXBacked: true, frontIndex: 2),
         ]
     }
 
@@ -148,6 +158,32 @@ struct CommandRouterTests {
         #expect(response["exitCode"] as? Int == ErrorCode.validationError.rawValue)
     }
 
+    @Test func windowIDSelectorRequiresAndUsesCompleteIdentity() async throws {
+        let (router, _, control, cleanup) = try makeRouter(windows: standardWindows())
+        defer { cleanup() }
+        let target = control.window(2)!
+
+        var incomplete = CommandRequest(command: "focus")
+        incomplete.windowID = target.windowID
+        let rejected = try await send(router, incomplete)
+        #expect(rejected["ok"] as? Bool == false)
+        #expect(rejected["exitCode"] as? Int == ErrorCode.validationError.rawValue)
+
+        var exact = incomplete
+        exact.pid = target.pid
+        exact.processStartTime = target.processStartTime
+        exact.bundleID = target.bundleID
+
+        var reusedProcess = exact
+        reusedProcess.processStartTime = target.processStartTime + 1
+        let staleRejected = try await send(router, reusedProcess)
+        #expect(staleRejected["ok"] as? Bool == false)
+
+        let accepted = try await send(router, exact)
+        #expect(accepted["ok"] as? Bool == true)
+        #expect(control.focusedWindow()?.identity == target.identity)
+    }
+
     @Test func switcherListReturnsMRUCandidatesWithQuickKeys() async throws {
         let (router, engine, control, cleanup) = try makeRouter(windows: standardWindows())
         defer { cleanup() }
@@ -163,8 +199,11 @@ struct CommandRouterTests {
 
         let response = try await send(router, CommandRequest(command: "switcherList"))
         let payload = try #require(response["payload"] as? [String: Any])
+        #expect(payload["schemaVersion"] as? Int == 4)
         let candidates = try #require(payload["candidates"] as? [[String: Any]])
         #expect(candidates.first?["bundleID"] as? String == "com.apple.Terminal")
+        #expect(candidates.first?["pid"] as? Int == control.window(2)?.pid)
+        #expect(candidates.first?["processStartTime"] as? UInt64 == control.window(2)?.processStartTime)
         #expect(candidates.first?["quickKey"] as? String == "1")
     }
 
@@ -184,7 +223,7 @@ struct CommandRouterTests {
 struct CommandServerTests {
     @Test func endToEndOverUnixSocket() async throws {
         let control = MockWindowControl(
-            windows: [TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit")],
+            windows: [TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", isAXBacked: true)],
             displays: [TestFixtures.display]
         )
         let (store, stateURL) = TestFixtures.tempStateStore()
@@ -237,7 +276,7 @@ struct CommandServerTests {
 
     @Test func secondServerDoesNotStealLiveSocket() async throws {
         let control = MockWindowControl(
-            windows: [TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit")],
+            windows: [TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", isAXBacked: true)],
             displays: [TestFixtures.display]
         )
         let (store, stateURL) = TestFixtures.tempStateStore()

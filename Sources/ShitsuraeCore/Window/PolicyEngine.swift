@@ -27,12 +27,14 @@ public enum PolicyEngine {
             windowID: 0,
             bundleID: windowDefinition.match.bundleID,
             pid: 0,
+            processStartTime: 0,
             title: windowDefinition.match.title?.equals
                 ?? windowDefinition.match.title?.contains
                 ?? windowDefinition.match.title?.regex
                 ?? "",
             role: windowDefinition.match.role ?? "AXWindow",
             subrole: windowDefinition.match.subrole,
+            isAXBacked: false,
             minimized: false,
             hidden: false,
             frame: ResolvedFrame(x: 0, y: 0, width: 100, height: 100),

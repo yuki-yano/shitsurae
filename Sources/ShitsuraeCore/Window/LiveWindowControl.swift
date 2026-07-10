@@ -23,14 +23,16 @@ public struct LiveWindowControl: WindowControl {
         WindowEnumerator.listAllWindows()
     }
 
-    public func onScreenWindowIDs() -> Set<UInt32> {
-        guard let raw = CGWindowListCopyWindowInfo(
-            [.optionOnScreenOnly, .excludeDesktopElements],
-            kCGNullWindowID
-        ) as? [[String: Any]] else {
-            return []
-        }
-        return Set(raw.compactMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value })
+    public func windowInventory() -> WindowInventory {
+        WindowEnumerator.allWindowInventory()
+    }
+
+    public func focusedWindowObservation() -> WindowObservation {
+        WindowEnumerator.focusedWindowObservation()
+    }
+
+    public func onScreenWindowIdentities() -> Set<WindowIdentity> {
+        WindowEnumerator.onScreenWindowIdentities()
     }
 
     public func focusedWindow() -> WindowSnapshot? {
@@ -48,8 +50,18 @@ public struct LiveWindowControl: WindowControl {
     // MARK: - Frame
 
     @discardableResult
-    public func setWindowFrame(windowID: UInt32, bundleID: String, frame: ResolvedFrame) -> Bool {
-        guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first else {
+    public func setWindowFrame(
+        windowID: UInt32,
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String,
+        frame: ResolvedFrame
+    ) -> Bool {
+        guard let running = Self.runningApplication(
+            pid: pid,
+            processStartTime: processStartTime,
+            bundleID: bundleID
+        ) else {
             return false
         }
 
@@ -108,8 +120,18 @@ public struct LiveWindowControl: WindowControl {
     }
 
     @discardableResult
-    public func setWindowPosition(windowID: UInt32, bundleID: String, position: CGPoint) -> Bool {
-        guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first else {
+    public func setWindowPosition(
+        windowID: UInt32,
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String,
+        position: CGPoint
+    ) -> Bool {
+        guard let running = Self.runningApplication(
+            pid: pid,
+            processStartTime: processStartTime,
+            bundleID: bundleID
+        ) else {
             return false
         }
 
@@ -147,11 +169,21 @@ public struct LiveWindowControl: WindowControl {
 
     // MARK: - Minimize
 
-    public func setWindowMinimized(windowID: UInt32, bundleID: String, minimized: Bool) -> WindowInteractionResult {
+    public func setWindowMinimized(
+        windowID: UInt32,
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String,
+        minimized: Bool
+    ) -> WindowInteractionResult {
         guard AXIsProcessTrusted() else {
             return .permissionDenied
         }
-        guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first else {
+        guard let running = Self.runningApplication(
+            pid: pid,
+            processStartTime: processStartTime,
+            bundleID: bundleID
+        ) else {
             return .failed
         }
 
@@ -173,11 +205,20 @@ public struct LiveWindowControl: WindowControl {
 
     // MARK: - Focus / activation
 
-    public func focusWindow(windowID: UInt32, bundleID: String) -> WindowInteractionResult {
+    public func focusWindow(
+        windowID: UInt32,
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String
+    ) -> WindowInteractionResult {
         guard AXIsProcessTrusted() else {
             return .permissionDenied
         }
-        guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first else {
+        guard let running = Self.runningApplication(
+            pid: pid,
+            processStartTime: processStartTime,
+            bundleID: bundleID
+        ) else {
             return .failed
         }
 
@@ -212,8 +253,12 @@ public struct LiveWindowControl: WindowControl {
     }
 
     @discardableResult
-    public func activateBundle(bundleID: String) -> Bool {
-        guard let running = Self.runningApplication(bundleID: bundleID) else {
+    public func activateApplication(pid: Int, processStartTime: UInt64, bundleID: String) -> Bool {
+        guard let running = Self.runningApplication(
+            pid: pid,
+            processStartTime: processStartTime,
+            bundleID: bundleID
+        ) else {
             return false
         }
 
@@ -228,16 +273,19 @@ public struct LiveWindowControl: WindowControl {
 
     // MARK: - Internals
 
-    private static func runningApplication(bundleID: String) -> NSRunningApplication? {
-        if let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
-            return running
-        }
-
-        guard SystemProbe.launchApplication(bundleID: bundleID) else {
+    private static func runningApplication(
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String
+    ) -> NSRunningApplication? {
+        guard let running = NSRunningApplication(processIdentifier: pid_t(pid)),
+              running.bundleIdentifier == bundleID,
+              ProcessGenerationResolver.startTime(pid: pid) == processStartTime,
+              !running.isTerminated
+        else {
             return nil
         }
-
-        return NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first
+        return running
     }
 
     private static func prepareForTargetedWindowInteraction(_ running: NSRunningApplication) {

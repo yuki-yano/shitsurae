@@ -571,9 +571,7 @@ final class HotkeyManager {
                 self.pendingQuickAccept = nil
                 if !candidates.isEmpty {
                     let index = candidates.count > 1 ? 1 : 0
-                    if let windowID = candidates[index].windowID {
-                        self.model?.focusWindow(windowID: windowID)
-                    }
+                    self.model?.focusWindow(identity: candidates[index].identity)
                 }
                 return
             }
@@ -647,8 +645,8 @@ final class HotkeyManager {
                 return
             }
 
-            let focusedWindowID = await engine.resolveTargetWindow(selector: WindowTargetSelector())?.windowID
-            let currentIndex = candidates.firstIndex(where: { $0.windowID == focusedWindowID }) ?? 0
+            let focusedIdentity = await engine.resolveTargetWindow(selector: WindowTargetSelector())?.identity
+            let currentIndex = candidates.firstIndex(where: { $0.identity == focusedIdentity }) ?? 0
             let startIndex = forward
                 ? (currentIndex + 1) % candidates.count
                 : (currentIndex - 1 + candidates.count) % candidates.count
@@ -794,12 +792,10 @@ final class HotkeyManager {
             return
         }
 
-        guard session.candidates.indices.contains(session.selectedIndex),
-              let windowID = session.candidates[session.selectedIndex].windowID
-        else {
+        guard session.candidates.indices.contains(session.selectedIndex) else {
             return
         }
-        model?.focusWindow(windowID: windowID)
+        model?.focusWindow(identity: session.candidates[session.selectedIndex].identity)
     }
 
     private func cancelSession() {

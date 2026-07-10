@@ -1,6 +1,6 @@
 import Foundation
 
-/// Chromium profile-directory cache keyed by (bundleID, pid).
+/// Chromium profile-directory cache keyed by the complete process instance.
 ///
 /// v1 cached `nil` resolutions forever, so a browser probed right after launch
 /// (before its profile lock file shows up in lsof) could never match its
@@ -16,6 +16,7 @@ public final class ProfileCache: @unchecked Sendable {
     private struct Key: Hashable {
         let bundleID: String
         let pid: Int
+        let processStartTime: UInt64
     }
 
     private let lock = NSLock()
@@ -32,6 +33,7 @@ public final class ProfileCache: @unchecked Sendable {
     public func profileDirectory(
         bundleID: String,
         pid: Int,
+        processStartTime: UInt64,
         now: Date = Date(),
         resolver: (String, Int) -> String?
     ) -> String? {
@@ -39,7 +41,7 @@ public final class ProfileCache: @unchecked Sendable {
             return nil
         }
 
-        let key = Key(bundleID: bundleID, pid: pid)
+        let key = Key(bundleID: bundleID, pid: pid, processStartTime: processStartTime)
 
         lock.lock()
         let cached = entries[key]
@@ -81,10 +83,10 @@ public final class ProfileCache: @unchecked Sendable {
         lock.unlock()
     }
 
-    func entryKind(bundleID: String, pid: Int) -> String? {
+    func entryKind(bundleID: String, pid: Int, processStartTime: UInt64) -> String? {
         lock.lock()
         defer { lock.unlock() }
-        switch entries[Key(bundleID: bundleID, pid: pid)] {
+        switch entries[Key(bundleID: bundleID, pid: pid, processStartTime: processStartTime)] {
         case .resolved: return "resolved"
         case .pending: return "pending"
         case nil: return nil

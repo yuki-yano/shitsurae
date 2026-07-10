@@ -30,6 +30,39 @@ enum EngineActionUrgency: Sendable {
 }
 
 @MainActor
+final class FocusEventCoordinator {
+    private let gate: FocusEventGate
+    private(set) var latestSequence: UInt64 = 0
+
+    init(gate: FocusEventGate = FocusEventGate()) {
+        self.gate = gate
+    }
+
+    func accept(_ sequence: UInt64) -> Bool {
+        guard sequence > latestSequence, gate.accept(sequence) else { return false }
+        latestSequence = sequence
+        return true
+    }
+
+    /// AX observers can deliver queued notifications after their application
+    /// has moved to the background. Such an event must not supersede the
+    /// activation retry of the application that is actually frontmost.
+    func acceptWindowEvent(_ sequence: UInt64, isCurrentFrontmost: Bool) -> Bool {
+        guard isCurrentFrontmost else { return false }
+        return accept(sequence)
+    }
+
+    func isCurrent(_ sequence: UInt64) -> Bool {
+        sequence == latestSequence && gate.isCurrent(sequence)
+    }
+
+    func invalidate(with sequence: UInt64) {
+        latestSequence = max(latestSequence, sequence)
+        gate.invalidate(with: sequence)
+    }
+}
+
+@MainActor
 final class AppModel: ObservableObject {
     let logger = ShitsuraeLogger()
     let configManager: ConfigManager
@@ -73,17 +106,24 @@ final class AppModel: ObservableObject {
             syncHotkeyFastPathPolicy()
         }
     }
-    private var followFocusPolicy = FollowFocusPolicy()
+    private let followFocusPolicy = FollowFocusPolicy()
+    private let focusEventGate: FocusEventGate
+    private let focusEventCoordinator: FocusEventCoordinator
     private let interactiveActivationGrace: TimeInterval = 0.18
+    private static let activationFocusRetryDelayNanoseconds: UInt64 = 40_000_000
 
     private var observers: [NSObjectProtocol] = []
 
     init() {
+        let focusEventGate = FocusEventGate()
+        self.focusEventGate = focusEventGate
+        focusEventCoordinator = FocusEventCoordinator(gate: focusEventGate)
         configManager = ConfigManager(logger: logger)
         engine = VirtualSpaceEngine(
             store: RuntimeStateStore(),
             control: LiveWindowControl(),
-            logger: logger
+            logger: logger,
+            focusEventGate: focusEventGate
         )
         router = CommandRouter(engine: engine, configManager: configManager, logger: logger)
     }
@@ -214,8 +254,17 @@ final class AppModel: ObservableObject {
     // MARK: - Actions
 
     func applyLayout(_ name: String, spaceID: Int?) {
-        runEngineAction("arrange \(name)") { engine, config in
-            _ = try await engine.arrange(layoutName: name, spaceID: spaceID, config: config)
+        runEngineAction("arrange \(name)", urgency: .interactive) { engine, config in
+            let result = try await engine.arrange(layoutName: name, spaceID: spaceID, config: config)
+            if result.result == "failed" {
+                let detail = result.hardErrors.map(\.message).joined(separator: "; ")
+                let message = [result.subcode, detail.isEmpty ? nil : detail]
+                    .compactMap { $0 }
+                    .joined(separator: ": ")
+                throw VirtualSpaceEngineError.stateError(
+                    message.isEmpty ? "arrange failed" : message
+                )
+            }
         }
     }
 
@@ -255,13 +304,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func focusWindow(windowID: UInt32) {
+    func focusWindow(identity: WindowIdentity) {
         markInteractiveActivation()
-        runEngineAction("focus window \(windowID)", urgency: .interactive) { [weak self] engine, config in
-            let result = try await engine.focusWindow(
-                selector: WindowTargetSelector(windowID: windowID),
-                config: config
-            )
+        runEngineAction("focus window \(identity.windowID)", urgency: .interactive) { [weak self] engine, config in
+            let result = try await engine.focusWindow(identity: identity, config: config)
             await MainActor.run {
                 self?.markInteractiveActivation()
                 if result.didSwitchSpace {
@@ -307,8 +353,8 @@ final class AppModel: ObservableObject {
             )
             guard !candidates.isEmpty else { return }
 
-            let focusedWindowID = await engine.resolveTargetWindow(selector: WindowTargetSelector())?.windowID
-            let currentIndex = candidates.firstIndex(where: { $0.windowID == focusedWindowID }) ?? -1
+            let focusedIdentity = await engine.resolveTargetWindow(selector: WindowTargetSelector())?.identity
+            let currentIndex = candidates.firstIndex(where: { $0.identity == focusedIdentity }) ?? -1
             let nextIndex: Int
             if currentIndex < 0 {
                 nextIndex = 0
@@ -318,11 +364,7 @@ final class AppModel: ObservableObject {
                 nextIndex = (currentIndex - 1 + candidates.count) % candidates.count
             }
 
-            guard let windowID = candidates[nextIndex].windowID else { return }
-            _ = try await engine.focusWindow(
-                selector: WindowTargetSelector(windowID: windowID),
-                config: config
-            )
+            _ = try await engine.focusWindow(identity: candidates[nextIndex].identity, config: config)
             await MainActor.run {
                 self?.markInteractiveActivation()
                 self?.frontmostWindowBelongsToActiveWorkspace = true
@@ -338,6 +380,9 @@ final class AppModel: ObservableObject {
 
     func markInteractiveActivation() {
         lastInteractiveActivationAt = Date()
+        let sequence = AXWindowEventMonitor.nextSequence()
+        focusEventCoordinator.invalidate(with: sequence)
+        invalidateEngineFocusEvents(upTo: sequence)
     }
 
     func frontmostBelongsToActiveWorkspaceForShortcutPolicy() -> Bool {
@@ -378,6 +423,9 @@ final class AppModel: ObservableObject {
         urgency: EngineActionUrgency = .normal,
         _ body: @escaping @Sendable (VirtualSpaceEngine, LoadedConfig) async throws -> Void
     ) {
+        if case .interactive = urgency {
+            markInteractiveActivation()
+        }
         guard let config = configManager.configIfLoaded() else {
             lastActionMessage = "config not loaded"
             actionStatus = .failed(label, "config not loaded")
@@ -437,8 +485,9 @@ final class AppModel: ObservableObject {
                 else {
                     return
                 }
+                let sequence = AXWindowEventMonitor.nextSequence()
                 Task { @MainActor [weak self] in
-                    self?.handleAppActivated(application: app, bundleID: bundleID)
+                    self?.handleAppActivated(application: app, bundleID: bundleID, sequence: sequence)
                 }
             }
         )
@@ -460,7 +509,7 @@ final class AppModel: ObservableObject {
                         if name == NSWorkspace.didLaunchApplicationNotification {
                             self?.windowEventMonitor.register(application: app)
                         } else {
-                            self?.windowEventMonitor.unregister(pid: app.processIdentifier)
+                            self?.windowEventMonitor.unregister(application: app)
                         }
                     }
                 }
@@ -480,34 +529,138 @@ final class AppModel: ObservableObject {
         )
     }
 
-    private func handleAppActivated(application: NSRunningApplication, bundleID: String) {
-        syncHotkeyFastPathPolicy(frontmostBundleID: bundleID)
-
+    private func handleAppActivated(
+        application: NSRunningApplication,
+        bundleID: String,
+        sequence: UInt64
+    ) {
         guard !bundleID.hasPrefix("com.yuki-yano.shitsurae"),
-              bundleID != Bundle.main.bundleIdentifier
+              bundleID != Bundle.main.bundleIdentifier,
+              !application.isTerminated,
+              application.bundleIdentifier == bundleID,
+              let frontmost = NSWorkspace.shared.frontmostApplication,
+              frontmost.processIdentifier == application.processIdentifier,
+              frontmost.bundleIdentifier == bundleID,
+              frontmost.launchDate == application.launchDate,
+              let processStartTime = ProcessGenerationResolver.startTime(
+                  pid: Int(application.processIdentifier)
+              )
         else {
             return
         }
 
+        syncHotkeyFastPathPolicy(frontmostBundleID: bundleID)
         windowEventMonitor.register(application: application)
+        guard focusEventCoordinator.accept(sequence) else { return }
+        sampleActivatedWindowFocus(
+            application: application,
+            bundleID: bundleID,
+            expectedProcessStartTime: processStartTime,
+            sequence: sequence,
+            retriesRemaining: 1
+        )
+    }
+
+    private func sampleActivatedWindowFocus(
+        application: NSRunningApplication,
+        bundleID: String,
+        expectedProcessStartTime: UInt64,
+        sequence: UInt64,
+        retriesRemaining: Int
+    ) {
+        guard focusEventCoordinator.isCurrent(sequence) else { return }
+        let pid = Int(application.processIdentifier)
+        guard !application.isTerminated,
+              application.bundleIdentifier == bundleID,
+              ProcessGenerationResolver.startTime(pid: pid) == expectedProcessStartTime,
+              let frontmost = NSWorkspace.shared.frontmostApplication,
+              frontmost.processIdentifier == application.processIdentifier,
+              frontmost.bundleIdentifier == bundleID,
+              frontmost.launchDate == application.launchDate
+        else {
+            invalidateEngineFocusEvents(upTo: sequence)
+            return
+        }
+
         if let windowID = windowEventMonitor.focusedWindowID(application: application) {
-            handleFocusedWindowChanged(bundleID: bundleID, windowID: windowID)
+            handleFocusedWindowChanged(
+                sequence: sequence,
+                bundleID: bundleID,
+                pid: pid,
+                processStartTime: expectedProcessStartTime,
+                windowID: windowID
+            )
+            return
+        }
+
+        guard retriesRemaining > 0 else {
+            invalidateEngineFocusEvents(upTo: sequence)
+            return
+        }
+
+        // Chrome can publish its activation before kAXFocusedWindowAttribute
+        // is populated, and no later notification is guaranteed when focus
+        // inside Chrome did not change. Retry once while the exact process is
+        // still frontmost; a newer source sequence invalidates this work.
+        Task { @MainActor [weak self, weak application] in
+            try? await Task.sleep(nanoseconds: Self.activationFocusRetryDelayNanoseconds)
+            guard let self, let application else { return }
+            self.sampleActivatedWindowFocus(
+                application: application,
+                bundleID: bundleID,
+                expectedProcessStartTime: expectedProcessStartTime,
+                sequence: sequence,
+                retriesRemaining: retriesRemaining - 1
+            )
         }
     }
 
     private func handleWindowEvent(_ event: AXWindowEventMonitor.Event) {
         switch event {
-        case let .windowCreated(_, _, windowID):
-            guard let windowID else { return }
-            followFocusPolicy.recordWindowCreated(windowID: windowID, now: Date())
-
-        case let .focusedWindowChanged(bundleID, _, windowID):
-            guard let windowID else { return }
-            handleFocusedWindowChanged(bundleID: bundleID, windowID: windowID)
+        case let .focusedWindowChanged(sequence, bundleID, pid, processStartTime, windowID):
+            // Gate before sequence acceptance. A delayed event from a
+            // background Chrome helper/process must not cancel the one-shot
+            // activation retry for the exact process that is frontmost.
+            guard let application = NSRunningApplication(processIdentifier: pid),
+                  !application.isTerminated,
+                  application.bundleIdentifier == bundleID,
+                  ProcessGenerationResolver.startTime(pid: Int(pid)) == processStartTime,
+                  let frontmost = NSWorkspace.shared.frontmostApplication,
+                  !frontmost.isTerminated,
+                  frontmost.processIdentifier == pid,
+                  frontmost.bundleIdentifier == bundleID,
+                  frontmost.launchDate == application.launchDate,
+                  focusEventCoordinator.acceptWindowEvent(sequence, isCurrentFrontmost: true)
+            else {
+                return
+            }
+            guard let windowID else {
+                sampleActivatedWindowFocus(
+                    application: application,
+                    bundleID: bundleID,
+                    expectedProcessStartTime: processStartTime,
+                    sequence: sequence,
+                    retriesRemaining: 1
+                )
+                return
+            }
+            handleFocusedWindowChanged(
+                sequence: sequence,
+                bundleID: bundleID,
+                pid: Int(pid),
+                processStartTime: processStartTime,
+                windowID: windowID
+            )
         }
     }
 
-    private func handleFocusedWindowChanged(bundleID: String, windowID: UInt32) {
+    private func handleFocusedWindowChanged(
+        sequence: UInt64,
+        bundleID: String,
+        pid: Int,
+        processStartTime: UInt64,
+        windowID: UInt32
+    ) {
         if let lastInteractive = lastInteractiveActivationAt,
            Date().timeIntervalSince(lastInteractive) < interactiveActivationGrace
         {
@@ -519,28 +672,36 @@ final class AppModel: ObservableObject {
         let engine = engine
 
         Task { [weak self] in
-            guard let window = await engine.resolveTargetWindow(selector: WindowTargetSelector(windowID: windowID)),
-                  window.bundleID == bundleID
-            else {
-                return
-            }
-            guard WindowEligibility.isManageableForVirtualWorkspace(window) else {
+            // One engine call = one live snapshot: target resolution, the
+            // global assignment, MRU/binding updates and adoption all happen
+            // inside processFocusEvent. Nothing below re-runs them.
+            guard let outcome = await engine.processFocusEvent(
+                sequence: sequence,
+                windowID: windowID,
+                pid: pid,
+                processStartTime: processStartTime,
+                bundleID: bundleID,
+                config: config
+            ) else {
+                await MainActor.run { [weak self] in
+                    guard self?.focusEventCoordinator.isCurrent(sequence) == true else { return }
+                    self?.frontmostWindowBelongsToActiveWorkspace = false
+                }
                 return
             }
 
-            // OS-level MRU tracking: every activation path updates recency.
-            await engine.markActivated(window: window)
-
-            let targetSpaceID = await engine.spaceID(forWindowID: window.windowID)
-            let activeSpaceID = await engine.activeSpaceID()
+            guard self?.focusEventCoordinator.isCurrent(sequence) == true else { return }
 
             let decision = await MainActor.run { [weak self] in
                 guard let self else { return FollowFocusPolicy.Decision.markActivated }
-                self.frontmostWindowBelongsToActiveWorkspace = targetSpaceID == nil || targetSpaceID == activeSpaceID
+                self.frontmostWindowBelongsToActiveWorkspace = FollowFocusPolicy
+                    .frontmostBelongsToActiveWorkspace(
+                        targetSpaceID: outcome.spaceID,
+                        activeSpaceID: outcome.activeSpaceID
+                    )
                 return self.followFocusPolicy.decisionForFocusedWindow(
-                    windowID: window.windowID,
-                    targetSpaceID: targetSpaceID,
-                    activeSpaceID: activeSpaceID,
+                    targetSpaceID: outcome.spaceID,
+                    activeSpaceID: outcome.activeSpaceID,
                     followFocusEnabled: followFocusEnabled,
                     lastFollowFocusSwitchAt: self.lastFollowFocusSwitchAt,
                     lastActiveSpaceChangeAt: self.lastActiveSpaceChangeAt,
@@ -549,29 +710,40 @@ final class AppModel: ObservableObject {
             }
 
             switch decision {
-            case .adoptIntoActiveWorkspace:
-                _ = try? await engine.adoptWindowIntoActiveWorkspace(window, config: config)
-                await engine.markActivated(window: window)
-                await MainActor.run {
-                    self?.frontmostWindowBelongsToActiveWorkspace = true
-                }
-                return
-
-            case .markActivated:
+            case .adoptIntoActiveWorkspace, .markActivated:
+                // Adoption (or its rejection by a focus ignore rule) already
+                // happened inside processFocusEvent on the same snapshot;
+                // there is nothing left to apply for these decisions.
                 return
 
             case let .switchSpace(targetSpaceID):
+                guard self?.focusEventCoordinator.isCurrent(sequence) == true else { return }
+                let switchOutcome = try? await engine.switchSpaceForFocusEvent(
+                    sequence: sequence,
+                    identity: outcome.identity,
+                    to: targetSpaceID,
+                    config: config
+                )
                 await MainActor.run {
+                    guard self?.focusEventCoordinator.isCurrent(sequence) == true,
+                          let switchOutcome
+                    else {
+                        return
+                    }
                     let now = Date()
                     self?.lastFollowFocusSwitchAt = now
                     self?.lastActiveSpaceChangeAt = now
-                }
-                let outcome = try? await engine.switchSpace(to: targetSpaceID, config: config)
-                await MainActor.run {
-                    self?.frontmostWindowBelongsToActiveWorkspace = outcome?.focusedWindowID != nil
+                    self?.frontmostWindowBelongsToActiveWorkspace = switchOutcome.focusedWindowID != nil
                     self?.refreshStatus()
                 }
             }
+        }
+    }
+
+    private func invalidateEngineFocusEvents(upTo sequence: UInt64) {
+        let engine = engine
+        Task {
+            await engine.invalidateFocusEvents(upTo: sequence)
         }
     }
 

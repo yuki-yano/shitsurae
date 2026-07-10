@@ -8,6 +8,7 @@ public struct WindowCurrentJSON: Codable, Equatable, Sendable {
     public let windowID: UInt32
     public let bundleID: String
     public let pid: Int
+    public let processStartTime: UInt64
     public let title: String
     public let profile: String?
     public let spaceID: Int?
@@ -23,6 +24,7 @@ public struct WindowCurrentJSON: Codable, Equatable, Sendable {
         windowID: UInt32,
         bundleID: String,
         pid: Int,
+        processStartTime: UInt64,
         title: String,
         profile: String?,
         spaceID: Int?,
@@ -34,10 +36,11 @@ public struct WindowCurrentJSON: Codable, Equatable, Sendable {
         frame: ResolvedFrame,
         slot: Int?
     ) {
-        self.schemaVersion = 2
+        self.schemaVersion = 4
         self.windowID = windowID
         self.bundleID = bundleID
         self.pid = pid
+        self.processStartTime = processStartTime
         self.title = title
         self.profile = profile
         self.spaceID = spaceID
@@ -264,34 +267,49 @@ public struct SpaceRecoveryJSON: Codable, Equatable, Sendable {
 public struct SwitcherCandidate: Codable, Equatable, Sendable {
     public let id: String
     public let title: String
-    public let bundleID: String?
+    public let bundleID: String
+    public let pid: Int
+    public let processStartTime: UInt64
     public let profile: String?
     public let spaceID: Int?
     public let displayID: String?
     public let slot: Int?
     public let quickKey: String?
-    public let windowID: UInt32?
+    public let windowID: UInt32
 
     public init(
         id: String,
         title: String,
-        bundleID: String?,
+        bundleID: String,
+        pid: Int,
+        processStartTime: UInt64,
         profile: String? = nil,
         spaceID: Int?,
         displayID: String?,
         slot: Int?,
         quickKey: String?,
-        windowID: UInt32?
+        windowID: UInt32
     ) {
         self.id = id
         self.title = title
         self.bundleID = bundleID
+        self.pid = pid
+        self.processStartTime = processStartTime
         self.profile = profile
         self.spaceID = spaceID
         self.displayID = displayID
         self.slot = slot
         self.quickKey = quickKey
         self.windowID = windowID
+    }
+
+    public var identity: WindowIdentity {
+        WindowIdentity(
+            pid: pid,
+            processStartTime: processStartTime,
+            windowID: windowID,
+            bundleID: bundleID
+        )
     }
 }
 
@@ -302,7 +320,7 @@ public struct SwitcherListJSON: Codable, Equatable, Sendable {
     public let candidates: [SwitcherCandidate]
 
     public init(generatedAt: String, includeAllSpaces: Bool, candidates: [SwitcherCandidate]) {
-        self.schemaVersion = 2
+        self.schemaVersion = 4
         self.generatedAt = generatedAt
         self.includeAllSpaces = includeAllSpaces
         self.candidates = candidates

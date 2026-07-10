@@ -23,17 +23,27 @@ public extension JSONEncoder {
 
 public struct WindowTargetSelector: Codable, Equatable, Sendable {
     public let windowID: UInt32?
+    public let pid: Int?
+    public let processStartTime: UInt64?
     public let bundleID: String?
     public let title: String?
 
-    public init(windowID: UInt32? = nil, bundleID: String? = nil, title: String? = nil) {
+    public init(
+        windowID: UInt32? = nil,
+        pid: Int? = nil,
+        processStartTime: UInt64? = nil,
+        bundleID: String? = nil,
+        title: String? = nil
+    ) {
         self.windowID = windowID
+        self.pid = pid
+        self.processStartTime = processStartTime
         self.bundleID = bundleID
         self.title = title
     }
 
     public var isEmpty: Bool {
-        windowID == nil && bundleID == nil && title == nil
+        windowID == nil && pid == nil && processStartTime == nil && bundleID == nil && title == nil
     }
 }
 

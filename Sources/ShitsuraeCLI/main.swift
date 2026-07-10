@@ -99,6 +99,12 @@ struct WindowSelectorOptions: ParsableArguments {
     @Option(name: .customLong("window-id"), help: "Target window ID")
     var windowID: UInt32?
 
+    @Option(name: .customLong("pid"), help: "Target process ID (required with --window-id)")
+    var pid: Int?
+
+    @Option(name: .customLong("process-start-time"), help: "Target process generation (required with --window-id)")
+    var processStartTime: UInt64?
+
     @Option(name: .customLong("bundle-id"), help: "Target application bundle ID")
     var bundleID: String?
 
@@ -107,6 +113,8 @@ struct WindowSelectorOptions: ParsableArguments {
 
     func apply(to request: inout CommandRequest) {
         request.windowID = windowID
+        request.pid = pid
+        request.processStartTime = processStartTime
         request.bundleID = bundleID
         request.title = title
     }

@@ -21,7 +21,7 @@ public extension VirtualSpaceEngine {
             config: config.config,
             hostDisplay: hostDisplay,
             displays: displays,
-            currentWindows: control.listAllWindows()
+            currentWindows: control.listAllWindows().filter(WindowEligibility.isManageableForVirtualWorkspace)
         )
 
         return ArrangeDryRunJSON(
@@ -106,10 +106,6 @@ public extension VirtualSpaceEngine {
             config: config
         )
 
-        // Invariant: every managed window is visible before arranging, so
-        // frame placement never fights the offscreen parking.
-        restoreHiddenWindowsBeforeArrange(layoutName: layoutName, layout: layout, config: config)
-
         let plan = ArrangePlanner.buildPlan(
             layoutName: layoutName,
             layout: layout,
@@ -119,9 +115,51 @@ public extension VirtualSpaceEngine {
             displays: displays,
             currentWindows: nil
         )
+        let arrangedFingerprints = Set(plan.steps.map { step in
+            SlotEntry.fingerprint(
+                layoutName: layoutName,
+                spaceID: step.spaceID,
+                definition: step.definition
+            )
+        })
+        let arrangeRegistryEntries = makeArrangeRegistryEntries(
+            layoutName: layoutName,
+            layout: layout,
+            config: config
+        )
+
+        // Only windows that this invocation will place need to be visible.
+        // Restoring hidden entries from another requested space (or adopted /
+        // ignored entries) can both mutate out-of-scope windows and make an
+        // otherwise independent arrange fail on an AX-invisible window.
+        guard restoreHiddenWindowsBeforeArrange(
+            layoutName: layoutName,
+            layout: layout,
+            arrangedFingerprints: arrangedFingerprints,
+            config: config
+        ) else {
+            let error = ErrorItem(
+                code: ErrorCode.operationTimedOut.rawValue,
+                message: "unable to restore hidden windows before arrange",
+                spaceID: nil,
+                slot: nil
+            )
+            return ArrangeExecutionJSON(
+                layout: layoutName,
+                result: "failed",
+                subcode: "restoreIncomplete",
+                unresolvedSlots: [],
+                hardErrors: [error],
+                softErrors: [],
+                skipped: [],
+                warnings: [],
+                exitCode: ErrorCode.operationTimedOut.rawValue
+            )
+        }
 
         var softErrors: [ErrorItem] = []
         var boundWindows: [String: WindowSnapshot] = [:] // fingerprint → window
+        var provisionalBindings: [String: WindowSnapshot] = [:]
         var frames: [String: ResolvedFrame] = [:]
 
         for step in plan.steps {
@@ -133,8 +171,11 @@ public extension VirtualSpaceEngine {
                 definition: definition
             )
 
-            let preLaunchWindowIDs = launch && definition.match.profile != nil
-                ? Set(control.listAllWindows().filter { $0.bundleID == definition.match.bundleID }.map(\.windowID))
+            let preLaunchInventory = launch && definition.match.profile != nil
+                ? control.windowInventory()
+                : nil
+            let preLaunchWindowHandles = preLaunchInventory?.isAuthoritative == true
+                ? preLaunchInventory?.liveWindowHandles
                 : nil
 
             if launch,
@@ -158,11 +199,13 @@ public extension VirtualSpaceEngine {
 
             guard let window = waitForWindow(
                 rule: definition.match,
-                layoutName: layoutName,
+                fingerprint: fingerprint,
                 spaceID: step.spaceID,
                 slot: definition.slot,
-                preLaunchWindowIDs: preLaunchWindowIDs,
-                alreadyBound: Set(boundWindows.values.map(\.windowID))
+                preLaunchWindowHandles: preLaunchWindowHandles,
+                alreadyBound: Set(boundWindows.values.map(\.identity)),
+                registryEntries: arrangeRegistryEntries,
+                provisionalBindings: &provisionalBindings
             ) else {
                 softErrors.append(
                     ErrorItem(
@@ -200,8 +243,17 @@ public extension VirtualSpaceEngine {
                 definition: focusStep.definition
             )
             if let window = boundWindows[fingerprint] {
-                if !control.focusWindow(windowID: window.windowID, bundleID: window.bundleID).isSuccess {
-                    _ = control.activateBundle(bundleID: window.bundleID)
+                if !control.focusWindow(
+                    windowID: window.windowID,
+                    pid: window.pid,
+                    processStartTime: window.processStartTime,
+                    bundleID: window.bundleID
+                ).isSuccess {
+                    _ = control.activateApplication(
+                        pid: window.pid,
+                        processStartTime: window.processStartTime,
+                        bundleID: window.bundleID
+                    )
                 }
             }
         }
@@ -306,48 +358,78 @@ public extension VirtualSpaceEngine {
     private func restoreHiddenWindowsBeforeArrange(
         layoutName: String,
         layout: LayoutDefinition,
+        arrangedFingerprints: Set<String>,
         config: LoadedConfig
-    ) {
+    ) -> Bool {
         let displays = control.displays()
         guard let hostDisplay = DisplayResolver.hostDisplay(
             layout: layout,
             config: config.config,
             displays: displays
         ) else {
-            return
+            return false
         }
 
         let hiddenEntries = currentState.slots(layoutName: layoutName)
-            .filter { $0.visibilityState == .hiddenOffscreen }
+            .filter {
+                $0.visibilityState == .hiddenOffscreen
+                    && $0.origin == .layout
+                    && arrangedFingerprints.contains($0.definitionFingerprint)
+            }
         guard !hiddenEntries.isEmpty else {
-            return
+            return true
         }
 
-        let windows = control.listAllWindows()
+        let inventory = control.windowInventory()
+        guard inventory.isAuthoritative else { return false }
+        let windows = inventory.windows.filter(WindowEligibility.isManageableForVirtualWorkspace)
+        // Restore participates in the same global ownership assignment as
+        // wait/place. Resolving only the selected hidden entries lets a stale
+        // binding borrow a live window that an out-of-scope layout entry owns
+        // exactly, mutating it before the later global arrange pass can stop
+        // the duplicate claim.
+        let registryEntries = makeArrangeRegistryEntries(
+            layoutName: layoutName,
+            layout: layout,
+            config: config
+        )
         let resolution = WindowRegistry.resolve(
-            entries: hiddenEntries.map(\.registryEntry),
-            windows: windows
+            entries: registryEntries.map(\.entry),
+            manageableWindows: windows,
+            fullInventory: inventory
         )
 
-        let plans = hiddenEntries.compactMap { entry -> VisibilityPlan? in
-            guard let window = resolution.assignments[entry.id] else { return nil }
-            return VisibilityPlanner.plan(
+        var plans: [VisibilityPlan] = []
+        for entry in hiddenEntries {
+            guard let window = resolution.assignments[entry.id] else {
+                if resolution.unresolvedReasons[entry.id] == .reservedExactIdentity {
+                    return false
+                }
+                // An authoritatively gone exact-only window needs no restore.
+                continue
+            }
+            guard let plan = VisibilityPlanner.plan(
                 entry: entry,
                 window: window,
                 transition: .show,
                 layout: layout,
                 hostDisplay: hostDisplay,
                 displays: displays
-            )
+            ) else {
+                return false
+            }
+            plans.append(plan)
         }
 
         let applied = VisibilityApplier.apply(plans: plans, control: control, logger: logger)
-        _ = VisibilityApplier.converge(
+        let convergence = VisibilityApplier.converge(
             changes: applied,
             control: control,
             logger: logger,
             retryDelaysMS: retryDelaysMS
         )
+        return !convergence.hasPending
+            && convergence.changes.allSatisfy { $0.effectiveEntry == $0.desiredEntry }
     }
 
     private func rebuildStateAfterArrange(
@@ -381,6 +463,7 @@ public extension VirtualSpaceEngine {
                     entry.id = previous.id
                     entry.spaceID = previous.spaceID
                     entry.pid = previous.pid
+                    entry.processStartTime = previous.processStartTime
                     entry.windowID = previous.windowID
                     entry.lastKnownTitle = previous.lastKnownTitle
                     entry.displayID = previous.displayID
@@ -403,7 +486,11 @@ public extension VirtualSpaceEngine {
             }
         }
 
-        let adopted = existing.filter { $0.origin == .adopted }
+        let claimedIdentities = Set(boundWindows.values.map(\.identity))
+        let adopted = existing.filter {
+            $0.origin == .adopted
+                && ($0.boundIdentity.map { !claimedIdentities.contains($0) } ?? true)
+        }
 
         var newState = currentState
         newState.slots = newState.slots.filter { $0.layoutName != layoutName } + entries + adopted
@@ -422,43 +509,97 @@ public extension VirtualSpaceEngine {
 
     private func waitForWindow(
         rule: WindowMatchRule,
-        layoutName: String,
+        fingerprint: String,
         spaceID: Int,
         slot: Int,
-        preLaunchWindowIDs: Set<UInt32>?,
-        alreadyBound: Set<UInt32>
+        preLaunchWindowHandles: Set<WindowHandle>?,
+        alreadyBound: Set<WindowIdentity>,
+        registryEntries: [(fingerprint: String, entry: WindowRegistry.Entry)],
+        provisionalBindings: inout [String: WindowSnapshot]
     ) -> WindowSnapshot? {
         let deadline = Date().addingTimeInterval(TimeInterval(arrangeWaitTimeoutMS) / 1000)
-
-        let preferredWindowID = currentState.slots(layoutName: layoutName)
-            .first(where: { $0.spaceID == spaceID && $0.slot == slot && $0.bundleID == rule.bundleID })?
-            .windowID
+        var preferredFullscreenWindow: WindowSnapshot?
 
         while Date() <= deadline {
             // index rules must see the FULL pool: shrinking it per bound
             // window shifts the index positions and breaks index:2 after
             // index:1 has bound (same bug class as v1's switch path).
             // alreadyBound is enforced after selection instead.
-            let nonFullscreen = control.listAllWindows().filter { !$0.isFullscreen }
-
-            if let preferredWindowID,
-               !alreadyBound.contains(preferredWindowID),
-               let preferred = nonFullscreen.first(where: { $0.windowID == preferredWindowID })
-            {
-                return preferred
+            let inventory = control.windowInventory()
+            guard inventory.isAuthoritative else {
+                let remainingMS = Int(deadline.timeIntervalSinceNow * 1000)
+                if remainingMS <= 0 { break }
+                control.sleep(milliseconds: min(100, remainingMS))
+                continue
+            }
+            let manageable = inventory.windows.filter(WindowEligibility.isManageableForVirtualWorkspace)
+            let entries = registryEntries.map { item -> WindowRegistry.Entry in
+                guard let bound = provisionalBindings[item.fingerprint] else {
+                    return item.entry
+                }
+                return WindowRegistry.Entry(
+                    id: item.entry.id,
+                    rule: item.entry.rule,
+                    pid: bound.pid,
+                    processStartTime: bound.processStartTime,
+                    windowID: bound.windowID,
+                    bindingPolicy: item.entry.bindingPolicy
+                )
+            }
+            guard let currentEntry = registryEntries.first(where: { $0.fingerprint == fingerprint })?.entry
+            else { return nil }
+            let resolution = WindowRegistry.resolve(
+                entries: entries,
+                manageableWindows: manageable,
+                fullInventory: inventory
+            )
+            for item in registryEntries {
+                if let assigned = resolution.assignments[item.entry.id] {
+                    provisionalBindings[item.fingerprint] = assigned
+                } else if resolution.unresolvedReasons[item.entry.id] != .reservedExactIdentity {
+                    provisionalBindings.removeValue(forKey: item.fingerprint)
+                }
             }
 
-            if let found = selectWindow(
-                rule: rule,
-                candidates: nonFullscreen,
-                preLaunchWindowIDs: preLaunchWindowIDs,
-                alreadyBound: alreadyBound
-            ) {
-                return found
+            if let assigned = resolution.assignments[currentEntry.id],
+               !alreadyBound.contains(assigned.identity)
+            {
+                if !assigned.isFullscreen {
+                    return assigned
+                }
+                // Refresh every authoritative pass. A window that disappears
+                // before the deadline must never be returned from stale cache.
+                preferredFullscreenWindow = assigned
+            } else {
+                preferredFullscreenWindow = nil
+            }
+
+            if resolution.unresolvedReasons[currentEntry.id] != .reservedExactIdentity {
+                let identitiesOwnedByOtherEntries = Set(resolution.assignments.compactMap { entryID, window in
+                    entryID == currentEntry.id ? nil : window.identity
+                })
+                let unownedNonFullscreen = manageable.filter {
+                    !$0.isFullscreen && !identitiesOwnedByOtherEntries.contains($0.identity)
+                }
+                if let found = selectWindow(
+                    rule: rule,
+                    candidates: unownedNonFullscreen,
+                    preLaunchWindowHandles: preLaunchWindowHandles,
+                    alreadyBound: alreadyBound
+                ) {
+                    return found
+                }
             }
 
             let remainingMS = Int(deadline.timeIntervalSinceNow * 1000)
             if remainingMS <= 0 {
+                // Never steal a sibling while the exact binding is alive. If
+                // the only reason the exact window was excluded is native
+                // fullscreen, return that same identity at the deadline and
+                // let setFrameWithRetry report whether macOS accepts arrange.
+                if let preferredFullscreenWindow {
+                    return preferredFullscreenWindow
+                }
                 break
             }
             control.sleep(milliseconds: min(100, remainingMS))
@@ -468,11 +609,45 @@ public extension VirtualSpaceEngine {
         return nil
     }
 
+    private func makeArrangeRegistryEntries(
+        layoutName: String,
+        layout: LayoutDefinition,
+        config: LoadedConfig
+    ) -> [(fingerprint: String, entry: WindowRegistry.Entry)] {
+        let existingByFingerprint = Dictionary(
+            currentState.slots(layoutName: layoutName)
+                .filter { $0.origin == .layout }
+                .map { ($0.definitionFingerprint, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        return layout.spaces.flatMap { space in
+            space.windows.compactMap { definition -> (fingerprint: String, entry: WindowRegistry.Entry)? in
+                guard !PolicyEngine.matchesIgnoreRule(
+                    windowDefinition: definition,
+                    rules: config.config.ignore?.apply
+                ) else {
+                    return nil
+                }
+                let fresh = SlotEntry.makeEntry(
+                    layoutName: layoutName,
+                    spaceID: space.spaceID,
+                    definition: definition
+                )
+                return (
+                    fingerprint: fresh.definitionFingerprint,
+                    entry: existingByFingerprint[fresh.definitionFingerprint]?.registryEntry
+                        ?? fresh.registryEntry
+                )
+            }
+        }
+    }
+
     private func selectWindow(
         rule: WindowMatchRule,
         candidates: [WindowSnapshot],
-        preLaunchWindowIDs: Set<UInt32>?,
-        alreadyBound: Set<UInt32>
+        preLaunchWindowHandles: Set<WindowHandle>?,
+        alreadyBound: Set<WindowIdentity>
     ) -> WindowSnapshot? {
         if let found = pick(rule: rule, pool: candidates, alreadyBound: alreadyBound) {
             return found
@@ -480,11 +655,11 @@ public extension VirtualSpaceEngine {
 
         // Profile launch fallback: lsof may lag right after a profile-window
         // launch; a window that appeared after the launch is the one we made.
-        guard rule.profile != nil, let preLaunchWindowIDs else {
+        guard rule.profile != nil, let preLaunchWindowHandles else {
             return nil
         }
 
-        let newWindows = candidates.filter { !preLaunchWindowIDs.contains($0.windowID) }
+        let newWindows = candidates.filter { !preLaunchWindowHandles.contains($0.handle) }
         guard !newWindows.isEmpty else {
             return nil
         }
@@ -507,22 +682,28 @@ public extension VirtualSpaceEngine {
     private func pick(
         rule: WindowMatchRule,
         pool: [WindowSnapshot],
-        alreadyBound: Set<UInt32>
+        alreadyBound: Set<WindowIdentity>
     ) -> WindowSnapshot? {
         let matched = WindowRegistry.sortedCandidates(rule: rule, pool: pool)
         if let index = rule.index {
             let zeroBased = index - 1
             guard zeroBased >= 0, zeroBased < matched.count else { return nil }
             let chosen = matched[zeroBased]
-            return alreadyBound.contains(chosen.windowID) ? nil : chosen
+            return alreadyBound.contains(chosen.identity) ? nil : chosen
         }
-        return matched.first(where: { !alreadyBound.contains($0.windowID) })
+        return matched.first(where: { !alreadyBound.contains($0.identity) })
     }
 
     private func setFrameWithRetry(window: WindowSnapshot, frame: ResolvedFrame) -> Bool {
         let attempts = 2
         for current in 0 ..< attempts {
-            if control.setWindowFrame(windowID: window.windowID, bundleID: window.bundleID, frame: frame) {
+            if control.setWindowFrame(
+                windowID: window.windowID,
+                pid: window.pid,
+                processStartTime: window.processStartTime,
+                bundleID: window.bundleID,
+                frame: frame
+            ) {
                 return true
             }
             if current < attempts - 1 {

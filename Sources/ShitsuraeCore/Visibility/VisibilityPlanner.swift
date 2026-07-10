@@ -46,6 +46,10 @@ public enum VisibilityPlanner {
         hostDisplay: DisplayInfo,
         displays: [DisplayInfo]
     ) -> VisibilityPlan? {
+        guard WindowEligibility.isManageableForVirtualWorkspace(window) else {
+            return nil
+        }
+
         switch transition {
         case .show:
             guard let visibleFrame = resolveVisibleFrame(
@@ -73,13 +77,16 @@ public enum VisibilityPlanner {
             )
 
         case .hide:
-            guard !window.minimized, !window.isFullscreen else {
+            guard !window.minimized else {
                 // Already invisible to the user; leave it alone.
+                // Refresh the exact binding without claiming Shitsurae hid a
+                // window the user deliberately minimized.
+                let desired = entry.bound(to: window)
                 return VisibilityPlan(
                     entryID: entry.id,
                     window: window,
                     originalEntry: entry,
-                    desiredEntry: entry,
+                    desiredEntry: desired,
                     mutation: .none,
                     restoreFromMinimized: false,
                     action: "unchanged"
@@ -96,7 +103,9 @@ public enum VisibilityPlanner {
             var desired = entry.bound(to: window)
             // Keep the last truly-visible frame: if the window is already
             // hidden, the current frame is the parking spot, not a real one.
-            desired.lastVisibleFrame = entry.visibilityState == .hiddenOffscreen
+            // A native-fullscreen frame is equally unsuitable: it describes
+            // the display, not the windowed frame macOS should restore later.
+            desired.lastVisibleFrame = entry.visibilityState == .hiddenOffscreen || window.isFullscreen
                 ? entry.lastVisibleFrame
                 : window.frame
             desired.lastHiddenFrame = hiddenFrame
@@ -137,6 +146,14 @@ public enum VisibilityPlanner {
             displays: displays
         ) {
             return layoutFrame
+        }
+
+        // A native-fullscreen frame describes the display, not a restorable
+        // windowed geometry. If neither persisted nor layout geometry exists,
+        // stay unresolved until the app leaves fullscreen instead of storing
+        // the display rectangle as lastVisibleFrame.
+        guard !window.isFullscreen else {
+            return nil
         }
 
         if isWithinVisibleArea(frame: window.frame, hostDisplay: hostDisplay, displays: displays),

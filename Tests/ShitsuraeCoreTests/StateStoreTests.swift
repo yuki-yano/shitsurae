@@ -4,6 +4,17 @@ import Testing
 
 @Suite("RuntimeStateStore")
 struct StateStoreTests {
+    @Test func canonicalizationPreservesPrimaryDisplayOrder() {
+        let state = RuntimeState(activeSpaces: [
+            ActiveSpace(displayID: "z-primary", spaceID: 1),
+            ActiveSpace(displayID: "a-secondary", spaceID: 2),
+        ])
+
+        let canonical = state.canonicalized()
+        #expect(canonical.activeSpaces.map(\.displayID) == ["z-primary", "a-secondary"])
+        #expect(canonical.primaryActiveSpaceID == 1)
+    }
+
     private func makeEntry(spaceID: Int, slot: Int, bundleID: String = "com.example.App") -> SlotEntry {
         SlotEntry(
             layoutName: "work",
@@ -28,7 +39,7 @@ struct StateStoreTests {
         try store.saveStrict(state: state)
         let loaded = try store.loadStrict()
 
-        #expect(loaded.schemaVersion == 2)
+        #expect(loaded.schemaVersion == 4)
         #expect(loaded.activeLayoutName == "work")
         #expect(loaded.activeSpaceID(displayID: "uuid-main") == 2)
         #expect(loaded.primaryActiveSpaceID == 2)
@@ -42,13 +53,14 @@ struct StateStoreTests {
         #expect(state.activeLayoutName == nil)
     }
 
-    // v1状態ファイルの破棄(確定仕様)
-    @Test func discardsV1StateFile() throws {
+    // 直前のv3状態ファイルも破棄する（後方互換fallbackなし）。
+    @Test func discardsV3StateFile() throws {
         let (store, url) = TestFixtures.tempStateStore()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
-        let v1JSON = """
+        let v3JSON = """
         {
+          "schemaVersion": 3,
           "updatedAt": "2026-01-01T00:00:00Z",
           "revision": 7,
           "stateMode": "virtual",
@@ -62,7 +74,7 @@ struct StateStoreTests {
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        try v1JSON.write(to: url, atomically: true, encoding: .utf8)
+        try v3JSON.write(to: url, atomically: true, encoding: .utf8)
 
         let state = try store.loadStrict()
         #expect(state.activeLayoutName == nil)
@@ -82,9 +94,9 @@ struct StateStoreTests {
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        try "{\"schemaVersion\": 2, \"broken".write(to: url, atomically: true, encoding: .utf8)
+        try "{\"schemaVersion\": 4, \"broken".write(to: url, atomically: true, encoding: .utf8)
 
-        // Probe fails to decode → treated as non-v2 → discarded, fresh state.
+        // Probe fails to decode → treated as invalid schema → discarded, fresh state.
         let state = try store.loadStrict()
         #expect(state.slots.isEmpty)
     }

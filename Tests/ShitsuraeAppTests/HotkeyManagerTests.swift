@@ -1,6 +1,67 @@
 import Carbon.HIToolbox
 import Testing
 @testable import Shitsurae
+
+@Suite("FocusEventCoordinator")
+@MainActor
+struct FocusEventCoordinatorTests {
+    @Test func latestSourceSequenceWinsAcrossOutOfOrderDelivery() {
+        let coordinator = FocusEventCoordinator()
+        #expect(coordinator.accept(2))
+        #expect(!coordinator.accept(1))
+        #expect(coordinator.isCurrent(2))
+    }
+
+    @Test func interactiveInvalidationMakesPendingEventStale() {
+        let coordinator = FocusEventCoordinator()
+        #expect(coordinator.accept(1))
+        coordinator.invalidate(with: 2)
+        #expect(!coordinator.isCurrent(1))
+        #expect(coordinator.isCurrent(2))
+    }
+
+    @Test func sharedGateInvalidatesContinuationBeforeActorScheduling() {
+        let gate = FocusEventGate()
+        let coordinator = FocusEventCoordinator(gate: gate)
+        #expect(coordinator.accept(1))
+
+        // Models synchronous user-action invalidation while the engine actor's
+        // older conditional switch is still queued.
+        gate.invalidate(with: 2)
+
+        #expect(!coordinator.isCurrent(1))
+        #expect(!gate.isCurrent(1))
+    }
+
+    @Test func backgroundWindowEventDoesNotSupersedeFrontmostActivationRetry() {
+        let coordinator = FocusEventCoordinator()
+        #expect(coordinator.accept(1))
+
+        #expect(!coordinator.acceptWindowEvent(2, isCurrentFrontmost: false))
+        #expect(coordinator.isCurrent(1))
+        #expect(coordinator.latestSequence == 1)
+
+        #expect(coordinator.acceptWindowEvent(3, isCurrentFrontmost: true))
+        #expect(coordinator.isCurrent(3))
+    }
+
+    @Test func thumbnailCacheKeyIncludesProcessGeneration() {
+        let old = WindowIdentity(
+            pid: 100,
+            processStartTime: 1,
+            windowID: 20,
+            bundleID: "com.google.Chrome"
+        )
+        let replacement = WindowIdentity(
+            pid: 100,
+            processStartTime: 2,
+            windowID: 20,
+            bundleID: "com.google.Chrome"
+        )
+
+        #expect(WindowThumbnailProvider.cacheKey(for: old) != WindowThumbnailProvider.cacheKey(for: replacement))
+    }
+}
 import ShitsuraeCore
 
 @Suite("HotkeyManager")

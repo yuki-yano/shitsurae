@@ -27,10 +27,40 @@ struct VisibilityPlannerTests {
         )
     }
 
+    @Test func cgOnlySurfaceNeverProducesVisibilityPlan() {
+        let layout = TestFixtures.twoSpaceLayout()
+        let entry = makeEntry(spaceID: 1)
+        let surface = TestFixtures.window(
+            id: 99,
+            bundleID: "com.google.Chrome",
+            isAXBacked: false
+        )
+
+        let show = VisibilityPlanner.plan(
+            entry: entry,
+            window: surface,
+            transition: .show,
+            layout: layout,
+            hostDisplay: display,
+            displays: [display]
+        )
+        let hide = VisibilityPlanner.plan(
+            entry: entry,
+            window: surface,
+            transition: .hide,
+            layout: layout,
+            hostDisplay: display,
+            displays: [display]
+        )
+
+        #expect(show == nil)
+        #expect(hide == nil)
+    }
+
     @Test func showPlanUsesLayoutFrame() {
         let layout = TestFixtures.twoSpaceLayout()
         let entry = makeEntry(spaceID: 1)
-        let window = TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit")
+        let window = TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", isAXBacked: true)
 
         let plan = VisibilityPlanner.plan(
             entry: entry,
@@ -54,7 +84,12 @@ struct VisibilityPlannerTests {
     @Test func showPlanRestoresMinimizedWindow() {
         let layout = TestFixtures.twoSpaceLayout()
         let entry = makeEntry(spaceID: 1)
-        let window = TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", minimized: true)
+        let window = TestFixtures.window(
+            id: 1,
+            bundleID: "com.apple.TextEdit",
+            isAXBacked: true,
+            minimized: true
+        )
 
         let plan = VisibilityPlanner.plan(
             entry: entry,
@@ -71,7 +106,7 @@ struct VisibilityPlannerTests {
     @Test func hidePlanParksWindowOnePixelOutside() {
         let layout = TestFixtures.twoSpaceLayout()
         let entry = makeEntry(spaceID: 1)
-        let window = TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit")
+        let window = TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", isAXBacked: true)
 
         let plan = VisibilityPlanner.plan(
             entry: entry,
@@ -99,10 +134,16 @@ struct VisibilityPlannerTests {
         #expect(plan?.desiredEntry.lastVisibleFrame == window.frame)
     }
 
-    @Test func hidePlanSkipsMinimizedAndFullscreenWindows() {
+    @Test func hidePlanSkipsMinimizedButStillPlansFullscreenWindow() {
         let layout = TestFixtures.twoSpaceLayout()
-        let entry = makeEntry(spaceID: 1)
-        let minimized = TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", minimized: true)
+        let previousWindowedFrame = ResolvedFrame(x: 80, y: 90, width: 900, height: 600)
+        let entry = makeEntry(spaceID: 1, lastVisibleFrame: previousWindowedFrame)
+        let minimized = TestFixtures.window(
+            id: 1,
+            bundleID: "com.apple.TextEdit",
+            isAXBacked: true,
+            minimized: true
+        )
 
         let plan = VisibilityPlanner.plan(
             entry: entry,
@@ -115,6 +156,58 @@ struct VisibilityPlannerTests {
 
         #expect(plan?.mutation == VisibilityMutation.none)
         #expect(plan?.action == "unchanged")
+
+        let fullscreen = TestFixtures.window(
+            id: 2,
+            bundleID: "com.apple.TextEdit",
+            isAXBacked: true,
+            isFullscreen: true
+        )
+        let fullscreenPlan = VisibilityPlanner.plan(
+            entry: entry,
+            window: fullscreen,
+            transition: .hide,
+            layout: layout,
+            hostDisplay: display,
+            displays: [display]
+        )
+        if case .position = fullscreenPlan?.mutation {
+            // expected
+        } else {
+            Issue.record("fullscreen hide must attempt a physical mutation")
+        }
+        #expect(fullscreenPlan?.desiredEntry.lastVisibleFrame == previousWindowedFrame)
+        #expect(fullscreenPlan?.desiredEntry.lastVisibleFrame != fullscreen.frame)
+    }
+
+    @Test func fullscreenShowWithoutWindowedGeometryDoesNotStoreDisplayFrame() {
+        let layout = TestFixtures.twoSpaceLayout()
+        var entry = makeEntry(
+            spaceID: 1,
+            visibilityState: .hiddenOffscreen,
+            lastVisibleFrame: nil
+        )
+        entry.origin = .adopted
+        entry.layoutSpaceID = nil
+        let fullscreen = TestFixtures.window(
+            id: 2,
+            bundleID: "com.apple.TextEdit",
+            frame: ResolvedFrame(x: 0, y: 0, width: 1440, height: 900),
+            isAXBacked: true,
+            isFullscreen: true
+        )
+
+        let plan = VisibilityPlanner.plan(
+            entry: entry,
+            window: fullscreen,
+            transition: .show,
+            layout: layout,
+            hostDisplay: display,
+            displays: [display]
+        )
+
+        #expect(plan == nil)
+        #expect(entry.lastVisibleFrame == nil)
     }
 
     @Test func rehidePreservesOriginalVisibleFrame() {
@@ -129,7 +222,8 @@ struct VisibilityPlannerTests {
         let parked = TestFixtures.window(
             id: 1,
             bundleID: "com.apple.TextEdit",
-            frame: ResolvedFrame(x: -699, y: 100, width: 700, height: 400)
+            frame: ResolvedFrame(x: -699, y: 100, width: 700, height: 400),
+            isAXBacked: true
         )
 
         let plan = VisibilityPlanner.plan(
@@ -152,7 +246,7 @@ struct VisibilityPlannerTests {
         var entry = makeEntry(spaceID: 1, lastVisibleFrame: ResolvedFrame(x: 50, y: 60, width: 500, height: 300))
         entry.spaceID = 2
 
-        let window = TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit")
+        let window = TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", isAXBacked: true)
         let frame = VisibilityPlanner.resolveVisibleFrame(
             entry: entry,
             window: window,
@@ -171,7 +265,8 @@ struct VisibilityPlannerTests {
         let window = TestFixtures.window(
             id: 1,
             bundleID: "com.apple.TextEdit",
-            frame: ResolvedFrame(x: -5000, y: -5000, width: 700, height: 400)
+            frame: ResolvedFrame(x: -5000, y: -5000, width: 700, height: 400),
+            isAXBacked: true
         )
 
         let frame = VisibilityPlanner.resolveVisibleFrame(
@@ -228,8 +323,42 @@ struct VisibilityPlannerTests {
 
 @Suite("VisibilityApplier")
 struct VisibilityApplierTests {
+    @Test func fullscreenWindowMustReachHiddenPositionToConverge() {
+        let window = TestFixtures.window(
+            id: 1,
+            bundleID: "app",
+            frame: ResolvedFrame(x: 0, y: 0, width: 1440, height: 900),
+            isAXBacked: true,
+            isFullscreen: true
+        )
+        var desired = SlotEntry(
+            layoutName: "work",
+            spaceID: 2,
+            slot: 1,
+            origin: .layout,
+            definitionFingerprint: "fp",
+            layoutSpaceID: 2,
+            bundleID: "app",
+            visibilityState: .hiddenOffscreen
+        )
+        desired.lastHiddenFrame = ResolvedFrame(x: -1439, y: 0, width: 1440, height: 900)
+        let change = AppliedVisibilityChange(
+            window: window,
+            originalEntry: desired,
+            effectiveEntry: desired,
+            desiredEntry: desired,
+            restoredFromMinimized: false
+        )
+
+        #expect(!VisibilityApplier.matchesDesiredState(change: change, windows: [window]))
+        #expect(VisibilityApplier.matchesDesiredState(
+            change: change,
+            windows: [window.withFrame(desired.lastHiddenFrame!)]
+        ))
+    }
+
     @Test func convergeRollsBackUnconvergedChanges() {
-        let window = TestFixtures.window(id: 1, bundleID: "app")
+        let window = TestFixtures.window(id: 1, bundleID: "app", isAXBacked: true)
         let control = MockWindowControl(windows: [window], displays: [TestFixtures.display])
         control.failPositionWindowIDs = [1]
 
@@ -263,13 +392,14 @@ struct VisibilityApplierTests {
             retryDelaysMS: [1, 1]
         )
 
-        #expect(!outcome.hasPending)
+        #expect(outcome.hasPending)
         #expect(outcome.changes.first?.effectiveEntry.visibilityState == .visible)
+        #expect(outcome.desiredUnresolvedWindowIdentities == [window.identity])
         #expect(outcome.retryCount == 2)
     }
 
     @Test func convergeAcceptsSuccessfulMutations() {
-        let window = TestFixtures.window(id: 1, bundleID: "app")
+        let window = TestFixtures.window(id: 1, bundleID: "app", isAXBacked: true)
         let control = MockWindowControl(windows: [window], displays: [TestFixtures.display])
 
         var desired = SlotEntry(
@@ -286,7 +416,13 @@ struct VisibilityApplierTests {
         desired.visibilityState = .hiddenOffscreen
 
         // Apply moved the window already.
-        _ = control.setWindowPosition(windowID: 1, bundleID: "app", position: CGPoint(x: -699, y: 10))
+        _ = control.setWindowPosition(
+            windowID: 1,
+            pid: window.pid,
+            processStartTime: window.processStartTime,
+            bundleID: "app",
+            position: CGPoint(x: -699, y: 10)
+        )
 
         let change = AppliedVisibilityChange(
             window: window,
@@ -306,5 +442,87 @@ struct VisibilityApplierTests {
         #expect(!outcome.hasPending)
         #expect(outcome.retryCount == 0)
         #expect(outcome.verifyCount == 1)
+    }
+
+    @Test func unavailableInventoryDoesNotRollbackOrRetrySuccessfulMutation() {
+        let window = TestFixtures.window(id: 1, bundleID: "app", isAXBacked: true)
+        let control = MockWindowControl(windows: [window], displays: [TestFixtures.display])
+        var original = SlotEntry(
+            layoutName: "work",
+            spaceID: 1,
+            slot: 1,
+            origin: .layout,
+            definitionFingerprint: "fp",
+            layoutSpaceID: 1,
+            bundleID: "app",
+            visibilityState: .visible
+        )
+        original.lastVisibleFrame = window.frame
+        var desired = original
+        desired.visibilityState = .hiddenOffscreen
+        desired.lastHiddenFrame = ResolvedFrame(x: -699, y: 10, width: window.frame.width, height: window.frame.height)
+        let change = AppliedVisibilityChange(
+            window: window,
+            originalEntry: original,
+            effectiveEntry: desired,
+            desiredEntry: desired,
+            restoredFromMinimized: false
+        )
+        control.windowInventoryAvailable = false
+        let attemptsBefore = control.frameMutationAttemptWindowIDs.count
+
+        let outcome = VisibilityApplier.converge(
+            changes: [change],
+            control: control,
+            logger: TestFixtures.nullLogger(),
+            retryDelaysMS: [1, 1]
+        )
+
+        #expect(outcome.hasPending)
+        #expect(outcome.changes.first?.effectiveEntry == desired)
+        #expect(outcome.retryCount == 0)
+        #expect(outcome.verifyCount == 3)
+        #expect(outcome.unverifiedWindowIdentities == [window.identity])
+        #expect(control.frameMutationAttemptWindowIDs.count == attemptsBefore)
+    }
+
+    @Test func rawLiveHandlePreventsSnapshotAssemblyGapFromRollingBackMutation() {
+        let window = TestFixtures.window(id: 1, bundleID: "app", isAXBacked: true)
+        let control = MockWindowControl(windows: [window], displays: [TestFixtures.display])
+        var original = SlotEntry(
+            layoutName: "work",
+            spaceID: 1,
+            slot: 1,
+            origin: .layout,
+            definitionFingerprint: "fp",
+            layoutSpaceID: 1,
+            bundleID: "app",
+            visibilityState: .visible
+        )
+        original.lastVisibleFrame = window.frame
+        var desired = original
+        desired.visibilityState = .hiddenOffscreen
+        desired.lastHiddenFrame = ResolvedFrame(x: -699, y: 10, width: window.frame.width, height: window.frame.height)
+        let change = AppliedVisibilityChange(
+            window: window,
+            originalEntry: original,
+            effectiveEntry: desired,
+            desiredEntry: desired,
+            restoredFromMinimized: false
+        )
+        control.removeWindow(window.windowID)
+        control.liveWindowHandlesOverride = [window.handle]
+
+        let outcome = VisibilityApplier.converge(
+            changes: [change],
+            control: control,
+            logger: TestFixtures.nullLogger(),
+            retryDelaysMS: []
+        )
+
+        #expect(outcome.hasPending)
+        #expect(outcome.changes.first?.effectiveEntry == desired)
+        #expect(outcome.unverifiedWindowIdentities == [window.identity])
+        #expect(outcome.unconvergedWindowIdentities.isEmpty)
     }
 }

@@ -29,9 +29,15 @@ public struct SpaceSwitchPlan: Equatable, Sendable {
     public let focusTarget: BoundWindow?
     /// Layout entries that could not be bound to any live window.
     public let unresolvedSlots: [PendingUnresolvedSlot]
-    /// Adopted entries whose window no longer exists — prune them instead of
-    /// reporting recovery (their fingerprint contains the dead windowID, so
-    /// they can never resolve again).
+    /// Every unresolved layout entry plus adopted entries whose exact window
+    /// is still conservatively live. Authoritatively gone adopted entries are
+    /// pruned instead of keeping recovery pending forever.
+    public let unresolvedEntryIDs: [String]
+    /// Adopted entries that did not resolve against the manageable window
+    /// pool. Exact-only bindings must never be rebound by application rule,
+    /// but "unresolved" is not proof the window is gone: the engine checks
+    /// the full CG list and only drops entries whose exact identity has
+    /// actually disappeared (an AX-invisible window keeps its entry).
     public let staleAdoptedEntryIDs: [String]
     /// Live windows no entry claimed (candidates for adoption).
     public let unassignedWindows: [WindowSnapshot]
@@ -50,17 +56,19 @@ public enum SpaceSwitchPlanner {
         layoutName: String,
         layout: LayoutDefinition,
         targetSpaceID: Int,
-        windows: [WindowSnapshot],
+        manageableWindows: [WindowSnapshot],
+        fullInventory: WindowInventory,
         hostDisplay: DisplayInfo,
         displays: [DisplayInfo],
-        quarantinedWindowIDs: Set<UInt32> = []
+        quarantinedWindowIdentities: Set<WindowIdentity> = []
     ) -> SpaceSwitchPlan {
         let layoutSlots = slots.filter { $0.layoutName == layoutName }
         let entryByID = Dictionary(uniqueKeysWithValues: layoutSlots.map { ($0.id, $0) })
 
         let resolution = WindowRegistry.resolve(
             entries: layoutSlots.map(\.registryEntry),
-            windows: windows
+            manageableWindows: manageableWindows,
+            fullInventory: fullInventory
         )
 
         var targets: [BoundWindow] = []
@@ -72,7 +80,7 @@ public enum SpaceSwitchPlanner {
             // out of the converged plan (no retries/focus) but still give them
             // one best-effort attempt per switch so they recover as soon as
             // the app starts honoring geometry writes again.
-            if quarantinedWindowIDs.contains(window.windowID) {
+            if quarantinedWindowIdentities.contains(window.identity) {
                 quarantined.append(BoundWindow(entry: entry, window: window))
                 continue
             }
@@ -162,6 +170,11 @@ public enum SpaceSwitchPlanner {
             focusCandidates: focusCandidates,
             focusTarget: focusCandidates.first,
             unresolvedSlots: unresolvedSlots,
+            unresolvedEntryIDs: resolution.unresolved.filter { entryID in
+                guard let entry = entryByID[entryID] else { return false }
+                return entry.origin == .layout
+                    || resolution.unresolvedReasons[entryID] != .exactOnlyMissing
+            },
             staleAdoptedEntryIDs: staleAdoptedEntryIDs,
             unassignedWindows: resolution.unassignedWindows
         )

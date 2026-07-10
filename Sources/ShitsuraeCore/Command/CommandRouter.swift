@@ -11,6 +11,8 @@ public struct CommandRequest: Codable, Sendable {
     public var reconcile: Bool?
     public var forceClearPending: Bool?
     public var windowID: UInt32?
+    public var pid: Int?
+    public var processStartTime: UInt64?
     public var bundleID: String?
     public var title: String?
     public var slot: Int?
@@ -25,7 +27,13 @@ public struct CommandRequest: Codable, Sendable {
     }
 
     public var selector: WindowTargetSelector {
-        WindowTargetSelector(windowID: windowID, bundleID: bundleID, title: title)
+        WindowTargetSelector(
+            windowID: windowID,
+            pid: pid,
+            processStartTime: processStartTime,
+            bundleID: bundleID,
+            title: title
+        )
     }
 }
 
@@ -62,6 +70,9 @@ public final class CommandRouter: Sendable {
         }
 
         do {
+            if Self.invalidatesPendingFocus(request) {
+                engine.invalidatePendingFocusEvents()
+            }
             return try await dispatch(request)
         } catch let error as ShitsuraeError {
             return Self.encodeError(error)
@@ -73,6 +84,21 @@ public final class CommandRouter: Sendable {
             )
         } catch {
             return Self.encodeError(ShitsuraeError(.validationError, String(describing: error)))
+        }
+    }
+
+    static func invalidatesPendingFocus(_ request: CommandRequest) -> Bool {
+        switch request.command {
+        case "arrange":
+            // state-only still replaces active layout/workspace state. A
+            // queued follow-focus continuation captured before that write
+            // must not run afterward against the new state.
+            return request.dryRun != true
+        case "spaceSwitch", "spaceRecover", "windowWorkspace", "windowMove",
+             "windowResize", "windowSet", "focus":
+            return true
+        default:
+            return false
         }
     }
 
@@ -188,7 +214,7 @@ public final class CommandRouter: Sendable {
             let spaceID = try require(request.spaceID, "spaceID")
             let config = try configManager.config()
             let result = try await engine.windowWorkspace(
-                selector: request.selector,
+                selector: try validatedSelector(request),
                 toSpaceID: spaceID,
                 config: config
             )
@@ -197,7 +223,7 @@ public final class CommandRouter: Sendable {
         case "windowMove":
             let config = try configManager.config()
             let result = try await engine.setWindowFrame(
-                selector: request.selector,
+                selector: try validatedSelector(request),
                 x: try lengthValue(request.x, "x"),
                 y: try lengthValue(request.y, "y"),
                 width: nil,
@@ -209,7 +235,7 @@ public final class CommandRouter: Sendable {
         case "windowResize":
             let config = try configManager.config()
             let result = try await engine.setWindowFrame(
-                selector: request.selector,
+                selector: try validatedSelector(request),
                 x: nil,
                 y: nil,
                 width: try lengthValue(request.width, "width"),
@@ -221,7 +247,7 @@ public final class CommandRouter: Sendable {
         case "windowSet":
             let config = try configManager.config()
             let result = try await engine.setWindowFrame(
-                selector: request.selector,
+                selector: try validatedSelector(request),
                 x: try lengthValue(request.x, "x"),
                 y: try lengthValue(request.y, "y"),
                 width: try lengthValue(request.width, "width"),
@@ -236,7 +262,10 @@ public final class CommandRouter: Sendable {
                 let result = try await engine.focusSlot(slot, config: config)
                 return Self.encodeSuccess(result)
             }
-            let result = try await engine.focusWindow(selector: request.selector, config: config)
+            let result = try await engine.focusWindow(
+                selector: try validatedSelector(request),
+                config: config
+            )
             return Self.encodeSuccess(result)
 
         case "switcherList":
@@ -252,6 +281,8 @@ public final class CommandRouter: Sendable {
                     id: candidate.id,
                     title: candidate.title,
                     bundleID: candidate.bundleID,
+                    pid: candidate.pid,
+                    processStartTime: candidate.processStartTime,
                     profile: candidate.profile,
                     spaceID: candidate.spaceID,
                     displayID: candidate.displayID,
@@ -272,6 +303,27 @@ public final class CommandRouter: Sendable {
         default:
             throw ShitsuraeError(.validationError, "unknown command: \(request.command)")
         }
+    }
+
+    private func validatedSelector(_ request: CommandRequest) throws -> WindowTargetSelector {
+        if request.windowID != nil,
+           request.pid == nil || request.processStartTime == nil || request.bundleID == nil
+        {
+            throw ShitsuraeError(
+                .validationError,
+                "windowID requires pid, processStartTime and bundleID for exact identity"
+            )
+        }
+        if request.pid != nil, request.bundleID == nil {
+            throw ShitsuraeError(.validationError, "pid requires bundleID")
+        }
+        if request.processStartTime != nil, request.pid == nil {
+            throw ShitsuraeError(.validationError, "processStartTime requires pid")
+        }
+        if request.title != nil, request.bundleID == nil {
+            throw ShitsuraeError(.validationError, "title requires bundleID")
+        }
+        return request.selector
     }
 
     public func diagnostics() async -> DiagnosticsJSON {

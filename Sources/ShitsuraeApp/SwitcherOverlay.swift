@@ -148,9 +148,9 @@ struct CandidateCard: View {
                         .padding(4)
                 }
             }
-            .task(id: candidate.windowID) {
-                guard showThumbnail, let windowID = candidate.windowID else { return }
-                thumbnail = await WindowThumbnailProvider.shared.thumbnail(windowID: windowID)
+            .task(id: candidate.identity) {
+                guard showThumbnail else { return }
+                thumbnail = await WindowThumbnailProvider.shared.thumbnail(identity: candidate.identity)
             }
 
             HStack(spacing: 5) {
@@ -175,12 +175,11 @@ struct CandidateCard: View {
     }
 
     private var appName: String {
-        candidate.bundleID.map(shortBundleID) ?? ""
+        shortBundleID(candidate.bundleID)
     }
 
     private var appIconImage: NSImage? {
-        guard let bundleID = candidate.bundleID,
-              let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: candidate.bundleID)
         else {
             return nil
         }
@@ -209,10 +208,21 @@ struct CandidateCard: View {
 final class WindowThumbnailProvider {
     static let shared = WindowThumbnailProvider()
 
-    private let cache = NSCache<NSNumber, NSImage>()
+    private let cache = NSCache<NSString, NSImage>()
 
-    func thumbnail(windowID: UInt32) async -> NSImage? {
-        if let cached = cache.object(forKey: NSNumber(value: windowID)) {
+    static func cacheKey(for identity: WindowIdentity) -> String {
+        "\(identity.pid):\(identity.processStartTime):\(identity.windowID):\(identity.bundleID)"
+    }
+
+    func thumbnail(identity: WindowIdentity) async -> NSImage? {
+        // An overlay candidate can outlive its process. Never serve a cached
+        // image, or capture a newly reused PID/window ID, for the old process
+        // generation.
+        guard ProcessGenerationResolver.startTime(pid: identity.pid) == identity.processStartTime else {
+            return nil
+        }
+        let cacheKey = Self.cacheKey(for: identity) as NSString
+        if let cached = cache.object(forKey: cacheKey) {
             return cached
         }
 
@@ -220,7 +230,12 @@ final class WindowThumbnailProvider {
             false,
             onScreenWindowsOnly: false
         ),
-            let scWindow = content.windows.first(where: { $0.windowID == CGWindowID(windowID) })
+            ProcessGenerationResolver.startTime(pid: identity.pid) == identity.processStartTime,
+            let scWindow = content.windows.first(where: {
+                $0.windowID == CGWindowID(identity.windowID)
+                    && Int($0.owningApplication?.processID ?? -1) == identity.pid
+                    && $0.owningApplication?.bundleIdentifier == identity.bundleID
+            })
         else {
             return nil
         }
@@ -236,12 +251,12 @@ final class WindowThumbnailProvider {
         guard let cgImage = try? await SCScreenshotManager.captureImage(
             contentFilter: filter,
             configuration: configuration
-        ) else {
+        ), ProcessGenerationResolver.startTime(pid: identity.pid) == identity.processStartTime else {
             return nil
         }
 
         let image = NSImage(cgImage: cgImage, size: .zero)
-        cache.setObject(image, forKey: NSNumber(value: windowID))
+        cache.setObject(image, forKey: cacheKey)
         return image
     }
 }

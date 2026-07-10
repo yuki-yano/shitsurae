@@ -46,6 +46,7 @@ public struct SlotEntry: Codable, Equatable, Sendable {
 
     // Runtime
     public var pid: Int?
+    public var processStartTime: UInt64?
     public var windowID: UInt32?
     public var lastKnownTitle: String?
     public var displayID: String?
@@ -78,6 +79,7 @@ public struct SlotEntry: Codable, Equatable, Sendable {
         matchIndex: Int? = nil,
         profile: String? = nil,
         pid: Int? = nil,
+        processStartTime: UInt64? = nil,
         windowID: UInt32? = nil,
         lastKnownTitle: String? = nil,
         displayID: String? = nil,
@@ -102,6 +104,7 @@ public struct SlotEntry: Codable, Equatable, Sendable {
         self.matchIndex = matchIndex
         self.profile = profile
         self.pid = pid
+        self.processStartTime = processStartTime
         self.windowID = windowID
         self.lastKnownTitle = lastKnownTitle
         self.displayID = displayID
@@ -139,7 +142,24 @@ public struct SlotEntry: Codable, Equatable, Sendable {
     }
 
     public var registryEntry: WindowRegistry.Entry {
-        WindowRegistry.Entry(id: id, rule: matchRule, windowID: windowID)
+        WindowRegistry.Entry(
+            id: id,
+            rule: matchRule,
+            pid: pid,
+            processStartTime: processStartTime,
+            windowID: windowID,
+            bindingPolicy: origin == .layout ? .exactThenRule : .exactOnly
+        )
+    }
+
+    public var boundIdentity: WindowIdentity? {
+        guard let pid, let processStartTime, let windowID else { return nil }
+        return WindowIdentity(
+            pid: pid,
+            processStartTime: processStartTime,
+            windowID: windowID,
+            bundleID: bundleID
+        )
     }
 
     /// Refreshes the runtime binding fields from a live window. Matcher and
@@ -148,6 +168,7 @@ public struct SlotEntry: Codable, Equatable, Sendable {
         var copy = self
         copy.windowID = window.windowID
         copy.pid = window.pid
+        copy.processStartTime = window.processStartTime
         copy.lastKnownTitle = window.title
         copy.displayID = window.displayID ?? displayID
         return copy
@@ -270,7 +291,7 @@ public struct ActiveSpace: Codable, Equatable, Sendable {
 }
 
 public struct RuntimeState: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 2
+    public static let currentSchemaVersion = 4
 
     public var schemaVersion: Int
     public var updatedAt: String
@@ -327,5 +348,31 @@ public struct RuntimeState: Codable, Equatable, Sendable {
 
     public var recoveryRequired: Bool {
         pendingVisibilityConvergence != nil || liveArrangeRecoveryRequired
+    }
+
+    /// Canonical in-memory and on-disk ordering. Only immutable layout
+    /// coordinates participate; the current workspace (`spaceID`) is mutable
+    /// and must never change rule-assignment priority after a move.
+    public func canonicalized() -> RuntimeState {
+        var copy = self
+        // The first element is the v2 primary-host accessor; preserve that
+        // semantic order. Sorting by display UUID silently changed which
+        // display primaryActiveSpaceID referred to in multi-display state.
+        copy.slots.sort { lhs, rhs in
+            if lhs.layoutName != rhs.layoutName { return lhs.layoutName < rhs.layoutName }
+            if lhs.origin != rhs.origin { return lhs.origin == .layout }
+
+            if lhs.origin == .layout {
+                let lhsLayoutSpace = lhs.layoutSpaceID ?? Int.min
+                let rhsLayoutSpace = rhs.layoutSpaceID ?? Int.min
+                if lhsLayoutSpace != rhsLayoutSpace { return lhsLayoutSpace < rhsLayoutSpace }
+                if lhs.slot != rhs.slot { return lhs.slot < rhs.slot }
+                if lhs.definitionFingerprint != rhs.definitionFingerprint {
+                    return lhs.definitionFingerprint < rhs.definitionFingerprint
+                }
+            }
+            return lhs.id < rhs.id
+        }
+        return copy
     }
 }

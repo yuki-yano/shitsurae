@@ -10,6 +10,9 @@ public enum WindowEligibility {
     public static let standardWindowSubrole = "AXStandardWindow"
 
     public static func isManageableForVirtualWorkspace(_ window: WindowSnapshot) -> Bool {
+        guard window.isAXBacked else {
+            return false
+        }
         guard window.role == "AXWindow" else {
             return false
         }

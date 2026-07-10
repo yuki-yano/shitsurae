@@ -27,9 +27,16 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     /// engine's early focus call.
     var stealFocusOnPositionAttempt: UInt32?
     private(set) var focusedWindowIDs: [UInt32] = []
+    private var focusedWindowIdentity: WindowIdentity?
     private(set) var activatedBundles: [String] = []
+    /// Every setWindowFrame/setWindowPosition attempt, successful or not —
+    /// lets tests assert that unmanageable windows are never even targeted.
+    private(set) var frameMutationAttemptWindowIDs: [UInt32] = []
+    private(set) var setFrameAttemptWindowIDs: [UInt32] = []
+    private(set) var setPositionAttemptWindowIDs: [UInt32] = []
     private(set) var launchedRequests: [ApplicationLaunchRequest] = []
     private(set) var sleptMilliseconds: [Int] = []
+    var onFrameMutationAttempt: (() -> Void)?
 
     init(windows: [WindowSnapshot], displays: [DisplayInfo]) {
         self.windowsByID = Dictionary(uniqueKeysWithValues: windows.map { ($0.windowID, $0) })
@@ -48,6 +55,18 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         return windowsByID[id]
     }
 
+    func setFocusedWindowID(_ id: UInt32?) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let id {
+            focusedWindowIDs.append(id)
+            focusedWindowIdentity = windowsByID[id]?.identity
+        } else {
+            focusedWindowIDs.removeAll()
+            focusedWindowIdentity = nil
+        }
+    }
+
     /// Simulates a window closing (app quit etc.).
     func removeWindow(_ id: UInt32) {
         lock.lock()
@@ -62,60 +81,147 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         windowsByID[window.windowID] = window
     }
 
-    /// When set, restricts what onScreenWindowIDs() reports (simulates
+    /// When set, restricts what onScreenWindowIdentities() reports (simulates
     /// windows on other native Spaces / invisible helper windows).
-    var onScreenWindowIDsOverride: Set<UInt32>?
+    var onScreenWindowIdentitiesOverride: Set<WindowIdentity>?
+    var windowInventoryAvailable = true
+    var liveWindowHandlesOverride: Set<WindowHandle>?
+    private(set) var listAllWindowsCallCount = 0
+
+    /// When non-empty, each listAllWindows() call consumes the next snapshot
+    /// (replacing the whole window state) — lets tests change the enumeration
+    /// result between successive engine passes to model AX dropouts and
+    /// windows closing mid-flow. The state set by the last consumed snapshot
+    /// persists once the queue is exhausted.
+    var windowListSequence: [[WindowSnapshot]] = []
 
     func listWindows() -> [WindowSnapshot] {
         currentWindows()
     }
 
     func listAllWindows() -> [WindowSnapshot] {
-        currentWindows()
-    }
-
-    func onScreenWindowIDs() -> Set<UInt32> {
         lock.lock()
         defer { lock.unlock() }
-        return onScreenWindowIDsOverride ?? Set(windowsByID.keys)
+        listAllWindowsCallCount += 1
+        if !windowListSequence.isEmpty {
+            let next = windowListSequence.removeFirst()
+            windowsByID = Dictionary(uniqueKeysWithValues: next.map { ($0.windowID, $0) })
+        }
+        return windowsByID.values.sorted { $0.windowID < $1.windowID }
+    }
+
+    func windowInventory() -> WindowInventory {
+        guard windowInventoryAvailable else { return .unavailable }
+        let windows = listAllWindows()
+        return .available(windows, liveWindowHandles: liveWindowHandlesOverride)
+    }
+
+    func focusedWindowObservation() -> WindowObservation {
+        lock.lock()
+        defer { lock.unlock() }
+        listAllWindowsCallCount += 1
+        if !windowListSequence.isEmpty {
+            let next = windowListSequence.removeFirst()
+            windowsByID = Dictionary(uniqueKeysWithValues: next.map { ($0.windowID, $0) })
+        }
+        let inventory: WindowInventory = windowInventoryAvailable
+            ? .available(
+                windowsByID.values.sorted { $0.windowID < $1.windowID },
+                liveWindowHandles: liveWindowHandlesOverride
+            )
+            : .unavailable
+        let focusedIdentity = focusedWindowIdentity.flatMap { identity in
+            windowsByID[identity.windowID]?.identity == identity ? identity : nil
+        }
+        return WindowObservation(inventory: inventory, focusedIdentity: focusedIdentity)
+    }
+
+    func onScreenWindowIdentities() -> Set<WindowIdentity> {
+        lock.lock()
+        defer { lock.unlock() }
+        let windows = windowsByID.values.filter { window in
+            if let identities = onScreenWindowIdentitiesOverride {
+                return identities.contains(window.identity)
+            }
+            return true
+        }
+        return Set(windows.map(\.identity))
     }
 
     func focusedWindow() -> WindowSnapshot? {
         lock.lock()
         defer { lock.unlock() }
-        guard let id = focusedWindowIDs.last else { return nil }
-        return windowsByID[id]
+        guard let identity = focusedWindowIdentity,
+              let window = windowsByID[identity.windowID],
+              window.identity == identity
+        else {
+            return nil
+        }
+        return window
     }
 
     func displays() -> [DisplayInfo] {
         displayList
     }
 
-    func setWindowFrame(windowID: UInt32, bundleID: String, frame: ResolvedFrame) -> Bool {
+    func setWindowFrame(
+        windowID: UInt32,
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String,
+        frame: ResolvedFrame
+    ) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        if let pinned = pinnedFrameWindowIDs[windowID], let window = windowsByID[windowID] {
+        frameMutationAttemptWindowIDs.append(windowID)
+        setFrameAttemptWindowIDs.append(windowID)
+        onFrameMutationAttempt?()
+        guard let window = windowsByID[windowID],
+              window.pid == pid,
+              window.processStartTime == processStartTime,
+              window.bundleID == bundleID
+        else {
+            return false
+        }
+        if let pinned = pinnedFrameWindowIDs[windowID] {
             windowsByID[windowID] = window.withFrame(pinned)
             return false
         }
-        guard !failFrameWindowIDs.contains(windowID), let window = windowsByID[windowID] else {
+        guard !failFrameWindowIDs.contains(windowID) else {
             return false
         }
         windowsByID[windowID] = window.withFrame(frame)
         return true
     }
 
-    func setWindowPosition(windowID: UInt32, bundleID: String, position: CGPoint) -> Bool {
+    func setWindowPosition(
+        windowID: UInt32,
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String,
+        position: CGPoint
+    ) -> Bool {
         lock.lock()
         defer { lock.unlock() }
+        frameMutationAttemptWindowIDs.append(windowID)
+        setPositionAttemptWindowIDs.append(windowID)
+        onFrameMutationAttempt?()
+        guard let window = windowsByID[windowID],
+              window.pid == pid,
+              window.processStartTime == processStartTime,
+              window.bundleID == bundleID
+        else {
+            return false
+        }
         if let thief = stealFocusOnPositionAttempt {
             focusedWindowIDs.append(thief)
+            focusedWindowIdentity = windowsByID[thief]?.identity
         }
-        if let pinned = pinnedFrameWindowIDs[windowID], let window = windowsByID[windowID] {
+        if let pinned = pinnedFrameWindowIDs[windowID] {
             windowsByID[windowID] = window.withFrame(pinned)
             return false
         }
-        guard !failPositionWindowIDs.contains(windowID), let window = windowsByID[windowID] else {
+        guard !failPositionWindowIDs.contains(windowID) else {
             return false
         }
         windowsByID[windowID] = window.withFrame(
@@ -124,10 +230,20 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         return true
     }
 
-    func setWindowMinimized(windowID: UInt32, bundleID: String, minimized: Bool) -> WindowInteractionResult {
+    func setWindowMinimized(
+        windowID: UInt32,
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String,
+        minimized: Bool
+    ) -> WindowInteractionResult {
         lock.lock()
         defer { lock.unlock() }
-        guard let window = windowsByID[windowID] else {
+        guard let window = windowsByID[windowID],
+              window.pid == pid,
+              window.processStartTime == processStartTime,
+              window.bundleID == bundleID
+        else {
             return .failed
         }
         if !minimized, failUnminimizeWindowIDs.contains(windowID) {
@@ -137,23 +253,43 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         return .success
     }
 
-    func focusWindow(windowID: UInt32, bundleID: String) -> WindowInteractionResult {
+    func focusWindow(
+        windowID: UInt32,
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String
+    ) -> WindowInteractionResult {
         lock.lock()
         defer { lock.unlock() }
+        guard let window = windowsByID[windowID],
+              window.pid == pid,
+              window.processStartTime == processStartTime,
+              window.bundleID == bundleID
+        else {
+            return .failed
+        }
         if let remaining = failFocusAttemptsRemainingByWindowID[windowID], remaining > 0 {
             failFocusAttemptsRemainingByWindowID[windowID] = remaining - 1
             return .failed
         }
-        guard !failFocusWindowIDs.contains(windowID), windowsByID[windowID] != nil else {
+        guard !failFocusWindowIDs.contains(windowID) else {
             return .failed
         }
         focusedWindowIDs.append(windowID)
+        focusedWindowIdentity = window.identity
         return .success
     }
 
-    func activateBundle(bundleID: String) -> Bool {
+    func activateApplication(pid: Int, processStartTime: UInt64, bundleID: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
+        guard windowsByID.values.contains(where: {
+            $0.pid == pid
+                && $0.processStartTime == processStartTime
+                && $0.bundleID == bundleID
+        }) else {
+            return false
+        }
         activatedBundles.append(bundleID)
         return true
     }
@@ -178,9 +314,11 @@ extension WindowSnapshot {
             windowID: windowID,
             bundleID: bundleID,
             pid: pid,
+            processStartTime: processStartTime,
             title: title,
             role: role,
             subrole: subrole,
+            isAXBacked: isAXBacked,
             minimized: minimized,
             hidden: hidden,
             frame: newFrame,
@@ -196,9 +334,11 @@ extension WindowSnapshot {
             windowID: windowID,
             bundleID: bundleID,
             pid: pid,
+            processStartTime: processStartTime,
             title: title,
             role: role,
             subrole: subrole,
+            isAXBacked: isAXBacked,
             minimized: newValue,
             hidden: hidden,
             frame: frame,
@@ -224,25 +364,32 @@ enum TestFixtures {
     static func window(
         id: UInt32,
         bundleID: String,
+        pid: Int? = nil,
+        processStartTime: UInt64? = nil,
         title: String = "win",
         frame: ResolvedFrame = ResolvedFrame(x: 10, y: 10, width: 700, height: 400),
         role: String = "AXWindow",
         subrole: String? = nil,
+        isAXBacked: Bool,
         minimized: Bool = false,
+        isFullscreen: Bool = false,
         frontIndex: Int = 0
     ) -> WindowSnapshot {
-        WindowSnapshot(
+        let resolvedPID = pid ?? Int(id) * 10
+        return WindowSnapshot(
             windowID: id,
             bundleID: bundleID,
-            pid: Int(id) * 10,
+            pid: resolvedPID,
+            processStartTime: processStartTime ?? UInt64(resolvedPID) * 1_000_000,
             title: title,
             role: role,
             subrole: subrole,
+            isAXBacked: isAXBacked,
             minimized: minimized,
             hidden: false,
             frame: frame,
             displayID: display.id,
-            isFullscreen: false,
+            isFullscreen: isFullscreen,
             frontIndex: frontIndex
         )
     }

@@ -25,9 +25,9 @@ struct ArrangeTests {
 
     private func standardWindows() -> [WindowSnapshot] {
         [
-            TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", frontIndex: 0),
-            TestFixtures.window(id: 2, bundleID: "com.apple.Terminal", frontIndex: 1),
-            TestFixtures.window(id: 3, bundleID: "com.apple.Notes", frontIndex: 2),
+            TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", isAXBacked: true, frontIndex: 0),
+            TestFixtures.window(id: 2, bundleID: "com.apple.Terminal", isAXBacked: true, frontIndex: 1),
+            TestFixtures.window(id: 3, bundleID: "com.apple.Notes", isAXBacked: true, frontIndex: 2),
         ]
     }
 
@@ -47,7 +47,7 @@ struct ArrangeTests {
 
     @Test func dryRunReportsMissingWindows() async throws {
         let (engine, _, url) = makeEngine(windows: [
-            TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit"),
+            TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", isAXBacked: true),
         ])
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
@@ -107,8 +107,8 @@ struct ArrangeTests {
     @Test func arrangeReportsPartialWhenWindowMissing() async throws {
         // Notes is not running and launch:false in the fixture layout.
         let (engine, _, url) = makeEngine(windows: [
-            TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit"),
-            TestFixtures.window(id: 2, bundleID: "com.apple.Terminal", frontIndex: 1),
+            TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", isAXBacked: true),
+            TestFixtures.window(id: 2, bundleID: "com.apple.Terminal", isAXBacked: true, frontIndex: 1),
         ])
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
@@ -167,6 +167,280 @@ struct ArrangeTests {
         }
     }
 
+    @Test func arrangeAbortsWhenHiddenExactBindingIsAXInvisible() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        _ = try await engine.switchSpace(to: 2, config: config)
+
+        let hiddenTextEdit = control.window(1)!
+        control.removeWindow(hiddenTextEdit.windowID)
+        control.addWindow(TestFixtures.window(
+            id: hiddenTextEdit.windowID,
+            bundleID: hiddenTextEdit.bundleID,
+            pid: hiddenTextEdit.pid,
+            frame: hiddenTextEdit.frame,
+            isAXBacked: false,
+            frontIndex: 1
+        ))
+        let sibling = TestFixtures.window(
+            id: 10,
+            bundleID: hiddenTextEdit.bundleID,
+            pid: 1000,
+            isAXBacked: true,
+            frontIndex: 0
+        )
+        control.addWindow(sibling)
+        let before = await engine.currentState
+
+        let result = try await engine.arrange(layoutName: "work", spaceID: nil, config: config)
+
+        #expect(result.result == "failed")
+        #expect(result.subcode == "restoreIncomplete")
+        #expect(await engine.currentState == before)
+        #expect(!control.frameMutationAttemptWindowIDs.contains(sibling.windowID))
+    }
+
+    @Test func arrangeAbortsWithoutChangingStateWhenInventoryIsUnavailable() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        _ = try await engine.switchSpace(to: 2, config: config)
+        let before = await engine.currentState
+        control.windowInventoryAvailable = false
+
+        let result = try await engine.arrange(layoutName: "work", spaceID: nil, config: config)
+
+        #expect(result.result == "failed")
+        #expect(result.subcode == "restoreIncomplete")
+        #expect(await engine.currentState == before)
+    }
+
+    @Test func arrangeSelectedSpaceDoesNotRestoreHiddenWindowOutsideScope() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        _ = try await engine.switchSpace(to: 2, config: config)
+
+        let hiddenTextEdit = control.window(1)!
+        control.removeWindow(hiddenTextEdit.windowID)
+        control.addWindow(TestFixtures.window(
+            id: hiddenTextEdit.windowID,
+            bundleID: hiddenTextEdit.bundleID,
+            pid: hiddenTextEdit.pid,
+            processStartTime: hiddenTextEdit.processStartTime,
+            frame: hiddenTextEdit.frame,
+            isAXBacked: false,
+            frontIndex: hiddenTextEdit.frontIndex
+        ))
+        let attemptsBeforeArrange = control.frameMutationAttemptWindowIDs.count
+
+        let result = try await engine.arrange(layoutName: "work", spaceID: 2, config: config)
+
+        #expect(result.result == "success")
+        #expect(result.subcode != "restoreIncomplete")
+        #expect(!control.frameMutationAttemptWindowIDs
+            .dropFirst(attemptsBeforeArrange)
+            .contains(hiddenTextEdit.windowID))
+    }
+
+    @Test func arrangeSelectedSpaceNeverStealsWindowOwnedByAnotherLayoutEntry() async throws {
+        let chromeRule = WindowMatchRule(bundleID: "com.google.Chrome")
+        let layout = LayoutDefinition(spaces: [
+            SpaceDefinition(spaceID: 1, windows: [
+                WindowDefinition(
+                    match: chromeRule,
+                    slot: 1,
+                    launch: false,
+                    frame: TestFixtures.frameDef("0%", "0%", "50%", "100%")
+                ),
+            ]),
+            SpaceDefinition(spaceID: 2, windows: [
+                WindowDefinition(
+                    match: chromeRule,
+                    slot: 1,
+                    launch: false,
+                    frame: TestFixtures.frameDef("50%", "0%", "50%", "100%")
+                ),
+            ]),
+        ])
+        let config = TestFixtures.loadedConfig(layouts: ["work": layout])
+        let chrome = TestFixtures.window(
+            id: 9,
+            bundleID: "com.google.Chrome",
+            isAXBacked: true
+        )
+        let (engine, _, url) = makeEngine(windows: [chrome])
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        var boundState = await engine.currentState
+        boundState.slots = boundState.slots.map { entry in
+            entry.layoutSpaceID == 1 ? entry.bound(to: chrome) : entry
+        }
+        try await engine.replaceState(boundState)
+
+        _ = try await engine.arrange(layoutName: "work", spaceID: 2, config: config)
+
+        let state = await engine.currentState
+        #expect(state.slots.filter { $0.boundIdentity == chrome.identity }.count == 1)
+        #expect(state.slots.first { $0.layoutSpaceID == 1 }?.boundIdentity == chrome.identity)
+        #expect(state.slots.first { $0.layoutSpaceID == 2 }?.boundIdentity == nil)
+    }
+
+    @Test func arrangeRestoreNeverMutatesWindowOwnedByOutOfScopeLayoutEntry() async throws {
+        let layout = LayoutDefinition(spaces: [
+            SpaceDefinition(spaceID: 1, windows: [
+                WindowDefinition(
+                    match: WindowMatchRule(bundleID: "com.google.Chrome"),
+                    slot: 1,
+                    launch: false,
+                    frame: TestFixtures.frameDef("0%", "0%", "50%", "100%")
+                ),
+            ]),
+            SpaceDefinition(spaceID: 2, windows: [
+                WindowDefinition(
+                    match: WindowMatchRule(
+                        bundleID: "com.google.Chrome",
+                        title: TitleMatcher(equals: "Owned")
+                    ),
+                    slot: 1,
+                    launch: false,
+                    frame: TestFixtures.frameDef("50%", "0%", "50%", "100%")
+                ),
+            ]),
+        ])
+        let config = TestFixtures.loadedConfig(layouts: ["work": layout])
+        let owned = TestFixtures.window(
+            id: 20,
+            bundleID: "com.google.Chrome",
+            title: "Owned",
+            isAXBacked: true
+        )
+        let vanished = TestFixtures.window(
+            id: 10,
+            bundleID: "com.google.Chrome",
+            pid: 2000,
+            title: "Vanished",
+            isAXBacked: true
+        )
+        let (engine, control, url) = makeEngine(windows: [owned])
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 2, config: config)
+        var state = await engine.currentState
+        state.slots = state.slots.map { entry in
+            var updated = entry.layoutSpaceID == 1
+                ? entry.bound(to: vanished)
+                : entry.bound(to: owned)
+            if entry.layoutSpaceID == 1 {
+                updated.visibilityState = .hiddenOffscreen
+                updated.lastVisibleFrame = vanished.frame
+            }
+            return updated
+        }
+        try await engine.replaceState(state)
+
+        let result = try await engine.arrange(layoutName: "work", spaceID: 1, config: config)
+
+        #expect(result.result == "partial")
+        // The final reconcile may intentionally park space 2, but the
+        // pre-arrange restore must never issue a show/frame write to B's
+        // exactly-owned window on behalf of stale entry A.
+        #expect(!control.setFrameAttemptWindowIDs.contains(owned.windowID))
+        let finalState = await engine.currentState
+        #expect(finalState.slots.first { $0.layoutSpaceID == 2 }?.boundIdentity == owned.identity)
+        #expect(finalState.slots.first { $0.layoutSpaceID == 1 }?.boundIdentity != owned.identity)
+    }
+
+    @Test func arrangePreferredBindingRequiresExactDefinitionFingerprint() async throws {
+        let oldLayout = LayoutDefinition(spaces: [
+            SpaceDefinition(spaceID: 1, windows: [
+                WindowDefinition(
+                    match: WindowMatchRule(
+                        bundleID: "com.google.Chrome",
+                        title: TitleMatcher(equals: "Old")
+                    ),
+                    slot: 1,
+                    launch: false,
+                    frame: TestFixtures.frameDef("0%", "0%", "50%", "100%")
+                ),
+            ]),
+        ])
+        let newLayout = LayoutDefinition(spaces: [
+            SpaceDefinition(spaceID: 1, windows: [
+                WindowDefinition(
+                    match: WindowMatchRule(
+                        bundleID: "com.google.Chrome",
+                        title: TitleMatcher(equals: "New")
+                    ),
+                    slot: 1,
+                    launch: false,
+                    frame: TestFixtures.frameDef("50%", "0%", "50%", "100%")
+                ),
+            ]),
+        ])
+        let oldConfig = TestFixtures.loadedConfig(layouts: ["work": oldLayout])
+        let newConfig = TestFixtures.loadedConfig(layouts: ["work": newLayout])
+        let oldWindow = TestFixtures.window(
+            id: 9,
+            bundleID: "com.google.Chrome",
+            title: "Old",
+            frame: ResolvedFrame(x: 20, y: 20, width: 600, height: 400),
+            isAXBacked: true
+        )
+        let newWindow = TestFixtures.window(
+            id: 10,
+            bundleID: "com.google.Chrome",
+            title: "New",
+            frame: ResolvedFrame(x: 30, y: 30, width: 600, height: 400),
+            isAXBacked: true,
+            frontIndex: 1
+        )
+        let (engine, control, url) = makeEngine(windows: [oldWindow, newWindow])
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: oldConfig)
+        var boundState = await engine.currentState
+        boundState.slots[0] = boundState.slots[0].bound(to: oldWindow)
+        try await engine.replaceState(boundState)
+
+        _ = try await engine.arrange(layoutName: "work", spaceID: 1, config: newConfig)
+
+        let state = await engine.currentState
+        #expect(state.slots.first { $0.origin == .layout }?.boundIdentity == newWindow.identity)
+        #expect(control.window(oldWindow.windowID)?.frame == oldWindow.frame)
+    }
+
+    @Test func arrangeTransfersClaimedAdoptedWindowToSingleLayoutEntry() async throws {
+        let baseLayout = LayoutDefinition(spaces: [SpaceDefinition(spaceID: 1, windows: [])])
+        let newLayout = LayoutDefinition(spaces: [
+            SpaceDefinition(spaceID: 1, windows: [
+                WindowDefinition(
+                    match: WindowMatchRule(bundleID: "com.apple.finder"),
+                    slot: 1,
+                    launch: false,
+                    frame: TestFixtures.frameDef("0%", "0%", "100%", "100%")
+                ),
+            ]),
+        ])
+        let baseConfig = TestFixtures.loadedConfig(layouts: ["work": baseLayout])
+        let newConfig = TestFixtures.loadedConfig(layouts: ["work": newLayout])
+        let finder = TestFixtures.window(
+            id: 9,
+            bundleID: "com.apple.finder",
+            isAXBacked: true
+        )
+        let (engine, _, url) = makeEngine(windows: [finder])
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: baseConfig)
+        #expect(try await engine.adoptWindowIntoActiveWorkspace(finder, config: baseConfig))
+
+        _ = try await engine.arrange(layoutName: "work", spaceID: 1, config: newConfig)
+
+        let state = await engine.currentState
+        let owners = state.slots.filter { $0.boundIdentity == finder.identity }
+        #expect(owners.count == 1)
+        #expect(owners.first?.origin == .layout)
+    }
+
     @Test func arrangePreservesRuntimeBindingAcrossRuns() async throws {
         let (engine, _, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -183,6 +457,67 @@ struct ArrangeTests {
 
         // Entry identity is stable across arranges (same fingerprints).
         #expect(firstIDs == secondIDs)
+    }
+
+    @Test func arrangePreferredBindingRejectsReusedIDFromAnotherProcess() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        _ = try await engine.arrange(layoutName: "work", spaceID: nil, config: config)
+
+        control.removeWindow(1)
+        let replacement = TestFixtures.window(
+            id: 1,
+            bundleID: "com.apple.finder",
+            pid: 999,
+            frame: ResolvedFrame(x: 90, y: 90, width: 400, height: 300),
+            isAXBacked: true,
+            frontIndex: 0
+        )
+        let actualTextEdit = TestFixtures.window(
+            id: 10,
+            bundleID: "com.apple.TextEdit",
+            pid: 1000,
+            isAXBacked: true,
+            frontIndex: 1
+        )
+        control.addWindow(replacement)
+        control.addWindow(actualTextEdit)
+
+        _ = try await engine.arrange(layoutName: "work", spaceID: nil, config: config)
+        #expect(control.window(replacement.windowID)?.frame == replacement.frame)
+        let state = await engine.currentState
+        #expect(state.slots.first { $0.bundleID == "com.apple.TextEdit" }?.boundIdentity
+            == actualTextEdit.identity)
+    }
+
+    @Test func arrangeKeepsExactBindingWhenPreferredWindowIsFullscreen() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        _ = try await engine.arrange(layoutName: "work", spaceID: nil, config: config)
+
+        let textEdit = control.window(1)!
+        let fullscreen = TestFixtures.window(
+            id: textEdit.windowID,
+            bundleID: textEdit.bundleID,
+            pid: textEdit.pid,
+            processStartTime: textEdit.processStartTime,
+            frame: ResolvedFrame(x: 0, y: 0, width: 1440, height: 900),
+            isAXBacked: true,
+            isFullscreen: true,
+            frontIndex: textEdit.frontIndex
+        )
+        control.removeWindow(textEdit.windowID)
+        control.addWindow(fullscreen)
+
+        let result = try await engine.arrange(layoutName: "work", spaceID: nil, config: config)
+
+        #expect(!result.softErrors.contains {
+            $0.code == ErrorCode.targetWindowNotFound.rawValue && $0.slot == 1 && $0.spaceID == 1
+        })
+        let state = await engine.currentState
+        #expect(state.slots.first { $0.bundleID == textEdit.bundleID }?.boundIdentity == textEdit.identity)
     }
 
     @Test func arrangeFallsBackWhenPreviousLayoutActiveSpaceIsInvalid() async throws {
@@ -250,8 +585,20 @@ struct ArrangeTests {
     // Codex指摘回帰: index:1 / index:2 が arrange で両方解決される
     @Test func arrangeResolvesMultipleIndexEntriesOfSameApp() async throws {
         let windows = [
-            TestFixtures.window(id: 1, bundleID: "com.apple.Terminal", title: "t1", frontIndex: 0),
-            TestFixtures.window(id: 2, bundleID: "com.apple.Terminal", title: "t2", frontIndex: 1),
+            TestFixtures.window(
+                id: 1,
+                bundleID: "com.apple.Terminal",
+                title: "t1",
+                isAXBacked: true,
+                frontIndex: 0
+            ),
+            TestFixtures.window(
+                id: 2,
+                bundleID: "com.apple.Terminal",
+                title: "t2",
+                isAXBacked: true,
+                frontIndex: 1
+            ),
         ]
         let layout = LayoutDefinition(spaces: [
             SpaceDefinition(spaceID: 1, windows: [

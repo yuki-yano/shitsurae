@@ -9,28 +9,61 @@ import Foundation
 /// candidate pool.
 ///
 /// Phases:
-/// 1. windowID exact matches (windows the user actually saw bound last time).
+/// 1. exact PID + process generation + windowID + bundleID matches.
 /// 2. `match.index` entries, selected against a stable snapshot of the
 ///    remaining pool — all index entries see the same ordering, so
 ///    index 1 / index 2 stay consistent regardless of resolution order.
 /// 3. Remaining entries via maximum matching (Kuhn's augmenting paths), so
 ///    a complete assignment is found whenever one exists.
 ///
-/// The write-side counterpart `lookup` is intentionally stricter
-/// (nil-fail-fast): it returns an entry only on windowID match or a unique
-/// rule match. v1's "fall back to the first entry" here corrupted slot state
-/// (windowID + lastActivatedAt written to the wrong entry).
+/// The write-side counterpart `assignedEntry(for:entries:windows:)` reuses
+/// this same global assignment, so single-window decisions always agree with
+/// bulk resolution. v1's "fall back to the first entry" corrupted slot state
+/// (windowID + lastActivatedAt written to the wrong entry); determinism now
+/// comes from `resolve` itself instead of a nil-fail-fast side matcher.
 public enum WindowRegistry {
+    public enum BindingPolicy: Equatable, Sendable {
+        /// Prefer the persisted concrete identity, then rebind from the
+        /// layout rule when the application was relaunched or the window was
+        /// recreated.
+        case exactThenRule
+        /// The persisted concrete identity is the only valid binding.
+        /// Runtime-adopted entries use this policy so a dead window can never
+        /// attach itself to a different window from the same application.
+        case exactOnly
+    }
+
     public struct Entry: Equatable, Sendable {
         public let id: String
         public let rule: WindowMatchRule
+        public let pid: Int?
+        public let processStartTime: UInt64?
         public let windowID: UInt32?
+        public let bindingPolicy: BindingPolicy
 
-        public init(id: String, rule: WindowMatchRule, windowID: UInt32? = nil) {
+        public init(
+            id: String,
+            rule: WindowMatchRule,
+            pid: Int? = nil,
+            processStartTime: UInt64? = nil,
+            windowID: UInt32? = nil,
+            bindingPolicy: BindingPolicy = .exactThenRule
+        ) {
             self.id = id
             self.rule = rule
+            self.pid = pid
+            self.processStartTime = processStartTime
             self.windowID = windowID
+            self.bindingPolicy = bindingPolicy
         }
+    }
+
+    public enum UnresolvedReason: Equatable, Sendable {
+        case reservedExactIdentity
+        case exactOnlyMissing
+        case indexOutOfBounds
+        case candidateConflict
+        case noCandidate
     }
 
     public struct Resolution: Equatable, Sendable {
@@ -39,24 +72,46 @@ public enum WindowRegistry {
         /// entry ids that could not be resolved (no candidate, ambiguous,
         /// or index out of bounds)
         public let unresolved: [String]
-        /// windows that no entry claimed
+        public let unresolvedReasons: [String: UnresolvedReason]
+        /// Windows that no entry claimed and are safe to auto-adopt.
         public let unassignedWindows: [WindowSnapshot]
+        /// Manageable windows matching a layout entry whose persisted exact
+        /// identity is still CG-alive (or whose full inventory is unknown).
+        /// Auto-adopting them would permanently block the layout entry's later
+        /// fallback, so callers must leave them unmanaged for this pass.
+        public let deferredWindows: [WindowSnapshot]
     }
 
     // MARK: - Bulk resolution (read side: space switch / arrange)
 
-    public static func resolve(entries: [Entry], windows: [WindowSnapshot]) -> Resolution {
+    public static func resolve(
+        entries: [Entry],
+        manageableWindows: [WindowSnapshot],
+        fullInventory: WindowInventory
+    ) -> Resolution {
         var assignments: [String: WindowSnapshot] = [:]
         var unresolved: [String] = []
-        var pool = windows
+        var unresolvedReasons: [String: UnresolvedReason] = [:]
+        var pool = manageableWindows
         var remaining: [Entry] = []
-
-        // Phase 1: windowID exact matches.
+        var reservedEntries: [Entry] = []
+        // Phase 1: concrete identity matches. A persisted CGWindowID can be
+        // reused after its owner exits, so windowID alone is insufficient:
+        // PID, process generation and the immutable bundle identity must agree.
         for entry in entries {
-            if let windowID = entry.windowID,
-               let index = pool.firstIndex(where: { $0.windowID == windowID })
-            {
+            if let index = pool.firstIndex(where: { exactIdentityMatches(entry: entry, window: $0) }) {
                 assignments[entry.id] = pool.remove(at: index)
+            } else if let identity = exactIdentity(of: entry),
+                      fullInventory.mayContain(identity)
+            {
+                unresolved.append(entry.id)
+                unresolvedReasons[entry.id] = .reservedExactIdentity
+                if entry.bindingPolicy == .exactThenRule {
+                    reservedEntries.append(entry)
+                }
+            } else if entry.bindingPolicy == .exactOnly {
+                unresolved.append(entry.id)
+                unresolvedReasons[entry.id] = .exactOnlyMissing
             } else {
                 remaining.append(entry)
             }
@@ -73,14 +128,17 @@ public enum WindowRegistry {
             let zeroBased = (entry.rule.index ?? 1) - 1
             guard zeroBased >= 0, zeroBased < candidates.count else {
                 unresolved.append(entry.id)
+                unresolvedReasons[entry.id] = .indexOutOfBounds
                 continue
             }
 
             let chosen = candidates[zeroBased]
-            guard let poolIndex = pool.firstIndex(where: { $0.windowID == chosen.windowID }) else {
+            let chosenIdentity = chosen.identity
+            guard let poolIndex = pool.firstIndex(where: { $0.identity == chosenIdentity }) else {
                 // Another index entry with an overlapping rule already took
                 // this window — ambiguous configuration; fail fast.
                 unresolved.append(entry.id)
+                unresolvedReasons[entry.id] = .candidateConflict
                 continue
             }
 
@@ -106,14 +164,15 @@ public enum WindowRegistry {
             (entry.id, sortedCandidates(rule: entry.rule, pool: pool))
         })
         let entryByID = Dictionary(uniqueKeysWithValues: ordered.map { ($0.id, $0) })
-        var entryIDByWindowID: [UInt32: String] = [:]
+        var entryIDByWindowIdentity: [WindowIdentity: String] = [:]
         var windowByEntryID: [String: WindowSnapshot] = [:]
 
-        func augment(_ entry: Entry, visited: inout Set<UInt32>) -> Bool {
+        func augment(_ entry: Entry, visited: inout Set<WindowIdentity>) -> Bool {
             for candidate in candidatesByEntry[entry.id] ?? [] {
-                guard visited.insert(candidate.windowID).inserted else { continue }
+                let identity = candidate.identity
+                guard visited.insert(identity).inserted else { continue }
 
-                if let holderID = entryIDByWindowID[candidate.windowID] {
+                if let holderID = entryIDByWindowIdentity[identity] {
                     guard let holder = entryByID[holderID],
                           augment(holder, visited: &visited)
                     else {
@@ -121,7 +180,7 @@ public enum WindowRegistry {
                     }
                 }
 
-                entryIDByWindowID[candidate.windowID] = entry.id
+                entryIDByWindowIdentity[identity] = entry.id
                 windowByEntryID[entry.id] = candidate
                 return true
             }
@@ -129,48 +188,150 @@ public enum WindowRegistry {
         }
 
         for entry in ordered {
-            var visited = Set<UInt32>()
+            var visited = Set<WindowIdentity>()
             if !augment(entry, visited: &visited) {
                 unresolved.append(entry.id)
+                unresolvedReasons[entry.id] = .noCandidate
             }
         }
 
         for (entryID, window) in windowByEntryID {
             assignments[entryID] = window
-            if let poolIndex = pool.firstIndex(where: { $0.windowID == window.windowID }) {
+            let identity = window.identity
+            if let poolIndex = pool.firstIndex(where: { $0.identity == identity }) {
                 pool.remove(at: poolIndex)
             }
         }
 
+        // Reserve the minimum *jointly assignable* candidate set needed for
+        // future layout fallback. Index N needs its first N candidates kept
+        // out of exact-only adoption so the rank cannot collapse. Plain and
+        // overlapping rules use maximum matching so two reserved clone slots
+        // reserve two distinct siblings rather than both pointing at the same
+        // best candidate.
+        var deferredIdentities = Set<WindowIdentity>()
+        let reservedIndexEntries = reservedEntries.filter { $0.rule.index != nil }
+        for entry in reservedIndexEntries {
+            let candidates = sortedCandidates(rule: entry.rule, pool: pool)
+            let requiredCount = max(1, entry.rule.index!)
+            deferredIdentities.formUnion(candidates.prefix(requiredCount).map(\.identity))
+        }
+
+        let plainPool = pool.filter { !deferredIdentities.contains($0.identity) }
+        let reservedPlainEntries = reservedEntries.enumerated()
+            .filter { $0.element.rule.index == nil }
+            .sorted { lhs, rhs in
+                let lhsScore = specificity(of: lhs.element.rule)
+                let rhsScore = specificity(of: rhs.element.rule)
+                if lhsScore != rhsScore { return lhsScore > rhsScore }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element)
+        let reservedCandidates = Dictionary(uniqueKeysWithValues: reservedPlainEntries.map { entry in
+            (entry.id, sortedCandidates(rule: entry.rule, pool: plainPool))
+        })
+        let reservedByID = Dictionary(uniqueKeysWithValues: reservedPlainEntries.map { ($0.id, $0) })
+        var reservedHolderByIdentity: [WindowIdentity: String] = [:]
+        var reservedWindowByEntryID: [String: WindowSnapshot] = [:]
+
+        func reserve(_ entry: Entry, visited: inout Set<WindowIdentity>) -> Bool {
+            for candidate in reservedCandidates[entry.id] ?? [] {
+                let identity = candidate.identity
+                guard visited.insert(identity).inserted else { continue }
+                if let holderID = reservedHolderByIdentity[identity] {
+                    guard let holder = reservedByID[holderID],
+                          reserve(holder, visited: &visited)
+                    else {
+                        continue
+                    }
+                }
+                reservedHolderByIdentity[identity] = entry.id
+                reservedWindowByEntryID[entry.id] = candidate
+                return true
+            }
+            return false
+        }
+
+        for entry in reservedPlainEntries {
+            var visited = Set<WindowIdentity>()
+            _ = reserve(entry, visited: &visited)
+        }
+        deferredIdentities.formUnion(reservedWindowByEntryID.values.map(\.identity))
+        let deferredWindows = pool.filter { deferredIdentities.contains($0.identity) }
+        let adoptableWindows = pool.filter { !deferredIdentities.contains($0.identity) }
+
         return Resolution(
             assignments: assignments,
             unresolved: unresolved,
-            unassignedWindows: pool
+            unresolvedReasons: unresolvedReasons,
+            unassignedWindows: adoptableWindows,
+            deferredWindows: deferredWindows
         )
     }
 
     // MARK: - Single-window lookup (write side: MRU marking / workspace move)
 
-    /// Finds the entry a concrete window belongs to. Strict by design:
-    /// returns nil unless the match is unambiguous. Callers must treat nil as
-    /// "do not write anything".
-    public static func lookup(window: WindowSnapshot, entries: [Entry]) -> Entry? {
-        if let exact = entries.first(where: { $0.windowID == window.windowID }) {
-            return exact
-        }
-
-        let matching = entries.filter { entry in
-            entry.windowID == nil && ruleMatches(rule: entry.rule, window: window, ignoreIndex: true)
-        }
-
-        guard matching.count == 1 else {
+    /// Finds the entry a concrete window belongs to by computing the same
+    /// global assignment `resolve` would produce for the given pool.
+    ///
+    /// Per-window decisions (focus follow, activation tracking, adoption
+    /// checks, workspace moves) must never disagree with the next bulk
+    /// resolution — a stricter standalone matcher here once refused to
+    /// re-associate a relaunched app's new window with its layout entry,
+    /// which made the focus path adopt the window into a duplicate entry.
+    public static func assignedEntry(
+        for window: WindowSnapshot,
+        entries: [Entry],
+        manageableWindows: [WindowSnapshot],
+        fullInventory: WindowInventory
+    ) -> Entry? {
+        let resolution = resolve(
+            entries: entries,
+            manageableWindows: manageableWindows,
+            fullInventory: fullInventory
+        )
+        guard let match = resolution.assignments.first(where: {
+            $0.value.identity == window.identity
+        }) else {
             return nil
         }
-
-        return matching[0]
+        return entries.first { $0.id == match.key }
     }
 
     // MARK: - Rule evaluation
+
+    static func exactIdentityMatches(entry: Entry, window: WindowSnapshot) -> Bool {
+        guard let pid = entry.pid,
+              let processStartTime = entry.processStartTime,
+              let windowID = entry.windowID,
+              pid == window.pid,
+              processStartTime == window.processStartTime,
+              windowID == window.windowID
+        else {
+            return false
+        }
+
+        // Only the bundle identity backs up PID + generation + windowID against handle
+        // reuse — it cannot change under a live pid. The rule's other fields
+        // (title matchers, subrole) are volatile at runtime; re-checking them
+        // here would unbind a live window whenever its title drifts.
+        return window.bundleID == entry.rule.bundleID
+    }
+
+    static func exactIdentity(of entry: Entry) -> WindowIdentity? {
+        guard let pid = entry.pid,
+              let processStartTime = entry.processStartTime,
+              let windowID = entry.windowID
+        else {
+            return nil
+        }
+        return WindowIdentity(
+            pid: pid,
+            processStartTime: processStartTime,
+            windowID: windowID,
+            bundleID: entry.rule.bundleID
+        )
+    }
 
     static func ruleMatches(rule: WindowMatchRule, window: WindowSnapshot, ignoreIndex: Bool = false) -> Bool {
         guard window.bundleID == rule.bundleID else { return false }
@@ -231,7 +392,8 @@ public enum WindowRegistry {
                 }
 
                 if lhs.frontIndex != rhs.frontIndex { return lhs.frontIndex < rhs.frontIndex }
-                return lhs.windowID < rhs.windowID
+                if lhs.windowID != rhs.windowID { return lhs.windowID < rhs.windowID }
+                return lhs.pid < rhs.pid
             }
     }
 

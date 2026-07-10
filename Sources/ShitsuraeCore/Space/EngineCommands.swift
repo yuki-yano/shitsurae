@@ -1,5 +1,16 @@
 import Foundation
 
+/// Result of processing one AX focus event. `spaceID` is the workspace the
+/// window belongs to *after* processing (binding refresh or adoption already
+/// applied); nil means the window stays unmanaged (focus-ignored).
+public struct FocusEventOutcome: Equatable, Sendable {
+    public let sequence: UInt64
+    public let identity: WindowIdentity
+    public let spaceID: Int?
+    public let activeSpaceID: Int?
+    public let didAdopt: Bool
+}
+
 /// Query and single-window command surface of the engine, used by the CLI
 /// router and the GUI alike.
 public extension VirtualSpaceEngine {
@@ -8,13 +19,30 @@ public extension VirtualSpaceEngine {
     /// Resolves a CLI selector to a live window. Empty selector = focused.
     func resolveTargetWindow(selector: WindowTargetSelector) -> WindowSnapshot? {
         if selector.isEmpty {
-            return control.focusedWindow()
+            guard let focused = control.focusedWindow(),
+                  WindowEligibility.isManageableForVirtualWorkspace(focused)
+            else {
+                return nil
+            }
+            return focused
         }
 
-        let windows = control.listAllWindows()
+        let windows = control.listAllWindows().filter(WindowEligibility.isManageableForVirtualWorkspace)
 
         if let windowID = selector.windowID {
-            return windows.first(where: { $0.windowID == windowID })
+            guard let pid = selector.pid,
+                  let processStartTime = selector.processStartTime,
+                  let bundleID = selector.bundleID
+            else {
+                return nil
+            }
+            let identity = WindowIdentity(
+                pid: pid,
+                processStartTime: processStartTime,
+                windowID: windowID,
+                bundleID: bundleID
+            )
+            return windows.first(where: { $0.identity == identity })
         }
 
         guard let bundleID = selector.bundleID else {
@@ -25,7 +53,93 @@ public extension VirtualSpaceEngine {
             bundleID: bundleID,
             title: selector.title.map { TitleMatcher(contains: $0) }
         )
-        return WindowRegistry.sortedCandidates(rule: rule, pool: windows).first
+        let processPool = selector.pid.map { pid in
+            windows.filter {
+                $0.pid == pid
+                    && (selector.processStartTime == nil || $0.processStartTime == selector.processStartTime)
+            }
+        } ?? windows
+        return WindowRegistry.sortedCandidates(rule: rule, pool: processPool).first
+    }
+
+    // MARK: - Focus event processing
+
+    /// Handles one AX focus event on a single live snapshot: one enumeration
+    /// feeds target resolution, the global assignment, the binding/MRU
+    /// update, and — for unassigned windows — the adoption decision. Nothing
+    /// is decided from an earlier snapshot, so an AX dropout or window close
+    /// between enumerations can never leave a duplicate adopted entry.
+    /// Returns nil when the event must be ignored (identity not present and
+    /// manageable in the current snapshot, or no active layout).
+    func processFocusEvent(
+        sequence: UInt64,
+        windowID: UInt32,
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String,
+        config: LoadedConfig
+    ) -> FocusEventOutcome? {
+        guard focusEventGate.accept(sequence) else { return nil }
+        guard sequence > latestFocusEventSequence else { return nil }
+        latestFocusEventSequence = sequence
+        let identity = WindowIdentity(
+            pid: pid,
+            processStartTime: processStartTime,
+            windowID: windowID,
+            bundleID: bundleID
+        )
+        let observation = control.focusedWindowObservation()
+        guard observation.focusedIdentity == identity else { return nil }
+        // A frontmost AX identity can transiently refer to a window that still
+        // lives on another native macOS Space. Focus notifications must never
+        // rebind or adopt such an off-screen window into the current virtual
+        // workspace; wait for an on-screen event or the normal bulk-adoption
+        // pass after it actually arrives.
+        guard control.onScreenWindowIdentities().contains(identity) else { return nil }
+
+        guard let result = try? trackWindow(
+            windowID: windowID,
+            pid: pid,
+            processStartTime: processStartTime,
+            expectedBundleID: bundleID,
+            config: config,
+            respectFocusIgnoreRules: true,
+            updateMRU: true,
+            inventory: observation.inventory
+        ), result.window != nil else {
+            return nil
+        }
+        return FocusEventOutcome(
+            sequence: sequence,
+            identity: identity,
+            spaceID: result.entry?.spaceID,
+            activeSpaceID: currentState.primaryActiveSpaceID,
+            didAdopt: result.didAdopt
+        )
+    }
+
+    /// Applies follow-focus only if this is still the latest event and the OS
+    /// still reports the same exact frontmost focused window immediately
+    /// before the switch. A stale continuation can never move workspaces.
+    func switchSpaceForFocusEvent(
+        sequence: UInt64,
+        identity: WindowIdentity,
+        to targetSpaceID: Int,
+        config: LoadedConfig
+    ) throws -> SpaceSwitchOutcome? {
+        guard sequence == latestFocusEventSequence,
+              focusEventGate.isCurrent(sequence)
+        else {
+            return nil
+        }
+        let observation = control.focusedWindowObservation()
+        guard observation.focusedIdentity == identity else { return nil }
+        return try switchSpace(to: targetSpaceID, config: config)
+    }
+
+    func invalidateFocusEvents(upTo sequence: UInt64) {
+        focusEventGate.invalidate(with: sequence)
+        latestFocusEventSequence = max(latestFocusEventSequence, sequence)
     }
 
     // MARK: - window current
@@ -41,6 +155,7 @@ public extension VirtualSpaceEngine {
             windowID: window.windowID,
             bundleID: window.bundleID,
             pid: window.pid,
+            processStartTime: window.processStartTime,
             title: window.title,
             profile: window.profileDirectory,
             spaceID: entry?.spaceID,
@@ -72,10 +187,12 @@ public extension VirtualSpaceEngine {
             throw VirtualSpaceEngineError.windowNotTracked
         }
 
-        let windows = control.listAllWindows()
+        let inventory = control.windowInventory()
+        let windows = inventory.windows.filter(WindowEligibility.isManageableForVirtualWorkspace)
         let resolution = WindowRegistry.resolve(
             entries: entries.map(\.registryEntry),
-            windows: windows
+            manageableWindows: windows,
+            fullInventory: inventory
         )
         guard let (entryID, window) = resolution.assignments.first else {
             throw VirtualSpaceEngineError.windowNotTracked
@@ -128,9 +245,53 @@ public extension VirtualSpaceEngine {
         )
     }
 
+    /// Internal UI selection path. Unlike the CLI's windowID selector, an
+    /// overlay candidate may outlive its original CGWindowID; accept it only
+    /// while the complete identity is still live and manageable.
+    func focusWindow(identity: WindowIdentity, config: LoadedConfig) throws -> FocusJSON {
+        try ensureAccessibility()
+        let inventory = control.windowInventory()
+        guard let window = inventory.windows.first(where: {
+            $0.identity == identity && WindowEligibility.isManageableForVirtualWorkspace($0)
+        }) else {
+            throw VirtualSpaceEngineError.windowNotTracked
+        }
+
+        var didSwitchSpace = false
+        let entry = assignedEntry(for: window)
+        if let entry,
+           let activeSpaceID = currentState.primaryActiveSpaceID,
+           entry.spaceID != activeSpaceID
+        {
+            _ = try switchSpace(to: entry.spaceID, config: config)
+            didSwitchSpace = true
+        }
+
+        try applyFocus(window: window)
+        markActivated(window: window)
+        return FocusJSON(
+            windowID: window.windowID,
+            bundleID: window.bundleID,
+            slot: entry.flatMap { $0.slot > 0 ? $0.slot : nil },
+            spaceID: entry?.spaceID,
+            didSwitchSpace: didSwitchSpace
+        )
+    }
+
     private func applyFocus(window: WindowSnapshot) throws {
-        let result = control.focusWindow(windowID: window.windowID, bundleID: window.bundleID)
-        if !result.isSuccess, !control.activateBundle(bundleID: window.bundleID) {
+        let result = control.focusWindow(
+            windowID: window.windowID,
+            pid: window.pid,
+            processStartTime: window.processStartTime,
+            bundleID: window.bundleID
+        )
+        if !result.isSuccess,
+           !control.activateApplication(
+               pid: window.pid,
+               processStartTime: window.processStartTime,
+               bundleID: window.bundleID
+           )
+        {
             throw VirtualSpaceEngineError.stateError("focus failed for window \(window.windowID)")
         }
     }
@@ -177,7 +338,13 @@ public extension VirtualSpaceEngine {
             }()
         )
 
-        guard control.setWindowFrame(windowID: window.windowID, bundleID: window.bundleID, frame: frame) else {
+        guard control.setWindowFrame(
+            windowID: window.windowID,
+            pid: window.pid,
+            processStartTime: window.processStartTime,
+            bundleID: window.bundleID,
+            frame: frame
+        ) else {
             throw VirtualSpaceEngineError.stateError("failed to set window frame")
         }
 
@@ -213,7 +380,13 @@ public extension VirtualSpaceEngine {
         let basis = VisibilityPlanner.coordinateRect(display.visibleFrame, displays: displays)
         let frame = SnapPresetResolver.frame(for: preset, basis: basis)
 
-        guard control.setWindowFrame(windowID: window.windowID, bundleID: window.bundleID, frame: frame) else {
+        guard control.setWindowFrame(
+            windowID: window.windowID,
+            pid: window.pid,
+            processStartTime: window.processStartTime,
+            bundleID: window.bundleID,
+            frame: frame
+        ) else {
             throw VirtualSpaceEngineError.stateError("failed to snap window")
         }
 
@@ -245,25 +418,42 @@ public extension VirtualSpaceEngine {
             throw VirtualSpaceEngineError.windowNotTracked
         }
 
-        var didCreateTrackingEntry = false
-        if trackedEntry(for: window) == nil {
-            try adoptWindow(window, config: config)
-            didCreateTrackingEntry = true
+        // Re-validate on a fresh snapshot before creating any tracking
+        // entry: binding refresh and adoption happen on the same enumeration
+        // (explicit user command, so focus ignore rules do not apply here).
+        let tracking = try trackWindow(
+            windowID: window.windowID,
+            pid: window.pid,
+            processStartTime: window.processStartTime,
+            expectedBundleID: window.bundleID,
+            config: config,
+            respectFocusIgnoreRules: false,
+            updateMRU: false,
+            persistChanges: false
+        )
+        guard let freshWindow = tracking.window, let trackedEntry = tracking.entry else {
+            throw VirtualSpaceEngineError.windowNotTracked
         }
+        let didCreateTrackingEntry = tracking.didAdopt
 
-        let outcome = try moveWindowToWorkspace(window: window, toSpaceID: toSpaceID, config: config)
-        let entry = trackedEntry(for: window)
+        let outcome = try moveResolvedWindowToWorkspace(
+            window: freshWindow,
+            trackedEntry: trackedEntry,
+            toSpaceID: toSpaceID,
+            config: config
+        )
+        let finalEntry = currentState.slots.first { $0.id == trackedEntry.id }
 
         return WindowWorkspaceJSON(
             requestID: UUID().uuidString.lowercased(),
-            windowID: window.windowID,
-            bundleID: window.bundleID,
-            slot: entry.map(\.slot) ?? 0,
+            windowID: freshWindow.windowID,
+            bundleID: freshWindow.bundleID,
+            slot: finalEntry.map(\.slot) ?? 0,
             previousSpaceID: outcome.fromSpaceID,
             spaceID: outcome.toSpaceID,
             didChangeSpace: outcome.fromSpaceID != outcome.toSpaceID,
             didCreateTrackingEntry: didCreateTrackingEntry,
-            visibilityAction: toSpaceID == currentState.primaryActiveSpaceID ? "shown" : "hiddenOffscreen"
+            visibilityAction: outcome.visibilityAction
         )
     }
 
@@ -271,7 +461,11 @@ public extension VirtualSpaceEngine {
 
     /// Pulls untracked on-screen windows of the host display into the active
     /// workspace so cycle/switcher can reach them.
-    func adoptUntrackedWindows(config: LoadedConfig, persistChanges: Bool = true) throws -> Int {
+    func adoptUntrackedWindows(
+        config: LoadedConfig,
+        persistChanges: Bool = true,
+        inventory suppliedInventory: WindowInventory? = nil
+    ) throws -> Int {
         guard let layoutName = currentState.activeLayoutName,
               let activeSpaceID = currentState.primaryActiveSpaceID,
               let layout = config.config.layouts[layoutName]
@@ -288,11 +482,15 @@ public extension VirtualSpaceEngine {
             return 0
         }
 
-        let allWindows = control.listAllWindows()
+        let inventory = suppliedInventory ?? control.windowInventory()
+        guard inventory.isAuthoritative else { return 0 }
+        let allWindows = inventory.windows
         let ineligibleAdoptedIDs = ineligibleAdoptedEntryIDs(layoutName: layoutName, windows: allWindows)
         let layoutSlots = currentState.slots(layoutName: layoutName)
-        let windows = control.listWindows().filter { window in
-            window.displayID == hostDisplay.id
+        let onScreenIdentities = control.onScreenWindowIdentities()
+        let windows = allWindows.filter { window in
+            onScreenIdentities.contains(window.identity)
+                && window.displayID == hostDisplay.id
                 && !window.minimized
                 && WindowEligibility.isManageableForVirtualWorkspace(window)
                 && !PolicyEngine.matchesIgnoreRule(window: window, rules: config.config.ignore?.focus)
@@ -300,7 +498,8 @@ public extension VirtualSpaceEngine {
 
         let resolution = WindowRegistry.resolve(
             entries: layoutSlots.map(\.registryEntry),
-            windows: windows
+            manageableWindows: windows,
+            fullInventory: inventory
         )
 
         guard !resolution.unassignedWindows.isEmpty || !ineligibleAdoptedIDs.isEmpty else {
@@ -311,22 +510,11 @@ public extension VirtualSpaceEngine {
         newState.slots.removeAll { ineligibleAdoptedIDs.contains($0.id) }
         var adoptedCount = 0
         for window in resolution.unassignedWindows {
-            let entry = SlotEntry(
+            newState.slots.append(Self.makeAdoptedEntry(
+                window: window,
                 layoutName: layoutName,
-                spaceID: activeSpaceID,
-                slot: 0,
-                origin: .adopted,
-                definitionFingerprint: "adopted\u{0}\(window.bundleID)\u{0}\(window.windowID)",
-                bundleID: window.bundleID,
-                profile: window.profileDirectory,
-                pid: window.pid,
-                windowID: window.windowID,
-                lastKnownTitle: window.title,
-                displayID: window.displayID,
-                lastVisibleFrame: window.frame,
-                visibilityState: .visible
-            )
-            newState.slots.append(entry)
+                spaceID: activeSpaceID
+            ))
             adoptedCount += 1
         }
 
@@ -339,49 +527,137 @@ public extension VirtualSpaceEngine {
     }
 
     /// Adopts one exact focused window into the currently active workspace.
-    /// AX focus events use this path so a newly-created window is bound to the
-    /// workspace where it appeared, instead of waiting for the next bulk adopt.
+    /// The passed snapshot is only an identity hint: the decision runs on a
+    /// fresh enumeration via `trackWindow`, so a window that dropped out of
+    /// AX visibility or closed since the snapshot was taken is never adopted.
     func adoptWindowIntoActiveWorkspace(_ window: WindowSnapshot, config: LoadedConfig) throws -> Bool {
-        if trackedEntry(for: window) != nil {
-            return false
-        }
-        if !WindowEligibility.isManageableForVirtualWorkspace(window) {
-            return false
-        }
-        if PolicyEngine.matchesIgnoreRule(window: window, rules: config.config.ignore?.focus) {
-            return false
-        }
-
-        try adoptWindow(window, config: config)
-        return true
+        let result = try trackWindow(
+            windowID: window.windowID,
+            pid: window.pid,
+            processStartTime: window.processStartTime,
+            expectedBundleID: window.bundleID,
+            config: config,
+            respectFocusIgnoreRules: true,
+            updateMRU: false
+        )
+        return result.didAdopt
     }
 
-    private func adoptWindow(_ window: WindowSnapshot, config: LoadedConfig) throws {
+    struct WindowTrackingResult {
+        /// Entry owning the window after processing (nil = unmanaged).
+        let entry: SlotEntry?
+        /// The window as seen by the fresh enumeration (nil = not present
+        /// and manageable in the current snapshot; the caller must ignore
+        /// the event instead of acting on stale data).
+        let window: WindowSnapshot?
+        let didAdopt: Bool
+    }
+
+    /// Single-snapshot tracking core: ONE `listAllWindows()` feeds the
+    /// target lookup, the global assignment, the binding/MRU write, and the
+    /// adoption decision. Adoption only ever uses the window snapshot from
+    /// this same enumeration — a caller-supplied snapshot is never trusted —
+    /// so "resolve succeeded, later enumeration failed, adopt from stale
+    /// data" is impossible by construction.
+    func trackWindow(
+        windowID: UInt32,
+        pid: Int,
+        processStartTime: UInt64,
+        expectedBundleID: String,
+        config: LoadedConfig,
+        respectFocusIgnoreRules: Bool,
+        updateMRU: Bool,
+        inventory suppliedInventory: WindowInventory? = nil,
+        persistChanges: Bool = true
+    ) throws -> WindowTrackingResult {
         guard let layoutName = currentState.activeLayoutName,
               let activeSpaceID = currentState.primaryActiveSpaceID
         else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
 
-        var newState = currentState
-        newState.slots.append(
-            SlotEntry(
-                layoutName: layoutName,
-                spaceID: activeSpaceID,
-                slot: 0,
-                origin: .adopted,
-                definitionFingerprint: "adopted\u{0}\(window.bundleID)\u{0}\(window.windowID)",
-                bundleID: window.bundleID,
-                profile: window.profileDirectory,
-                pid: window.pid,
-                windowID: window.windowID,
-                lastKnownTitle: window.title,
-                displayID: window.displayID,
-                lastVisibleFrame: window.frame,
-                visibilityState: .visible
-            )
+        let inventory = suppliedInventory ?? control.windowInventory()
+        let manageable = inventory.windows.filter(WindowEligibility.isManageableForVirtualWorkspace)
+        guard let window = manageable.first(where: {
+            $0.windowID == windowID
+                && $0.pid == pid
+                && $0.processStartTime == processStartTime
+                && $0.bundleID == expectedBundleID
+        }) else {
+            return WindowTrackingResult(entry: nil, window: nil, didAdopt: false)
+        }
+
+        let slots = currentState.slots(layoutName: layoutName)
+        let resolution = WindowRegistry.resolve(
+            entries: slots.map(\.registryEntry),
+            manageableWindows: manageable,
+            fullInventory: inventory
         )
-        try replaceState(newState)
+
+        if let assignment = resolution.assignments.first(where: {
+            $0.value.identity == window.identity
+        }), let entry = slots.first(where: { $0.id == assignment.key }) {
+            var updated = entry.bound(to: window)
+            if updateMRU {
+                updated.lastActivatedAt = Date.rfc3339UTC()
+            }
+            var newState = currentState
+            newState.slots = newState.slots.map { $0.id == updated.id ? updated : $0 }
+            if persistChanges {
+                try replaceState(newState)
+            }
+            return WindowTrackingResult(entry: updated, window: window, didAdopt: false)
+        }
+
+        if resolution.deferredWindows.contains(where: { $0.identity == window.identity }) {
+            return WindowTrackingResult(entry: nil, window: window, didAdopt: false)
+        }
+
+        if respectFocusIgnoreRules,
+           PolicyEngine.matchesIgnoreRule(window: window, rules: config.config.ignore?.focus)
+        {
+            return WindowTrackingResult(entry: nil, window: window, didAdopt: false)
+        }
+
+        var entry = Self.makeAdoptedEntry(
+            window: window,
+            layoutName: layoutName,
+            spaceID: activeSpaceID
+        )
+        if updateMRU {
+            entry.lastActivatedAt = Date.rfc3339UTC()
+        }
+        var newState = currentState
+        newState.slots.append(entry)
+        if persistChanges {
+            try replaceState(newState)
+        }
+        return WindowTrackingResult(entry: entry, window: window, didAdopt: true)
+    }
+
+    internal static func makeAdoptedEntry(
+        window: WindowSnapshot,
+        layoutName: String,
+        spaceID: Int
+    ) -> SlotEntry {
+        SlotEntry(
+            layoutName: layoutName,
+            spaceID: spaceID,
+            slot: 0,
+            origin: .adopted,
+            definitionFingerprint: "adopted\u{0}\(window.bundleID)\u{0}\(window.windowID)",
+            bundleID: window.bundleID,
+            profile: window.profileDirectory,
+            pid: window.pid,
+            processStartTime: window.processStartTime,
+            windowID: window.windowID,
+            lastKnownTitle: window.title,
+            displayID: window.displayID,
+            // Native fullscreen reports the display rectangle, not the
+            // windowed frame macOS should restore after leaving fullscreen.
+            lastVisibleFrame: window.isFullscreen ? nil : window.frame,
+            visibilityState: .visible
+        )
     }
 
     // MARK: - Switcher / cycle candidates
@@ -403,10 +679,13 @@ public extension VirtualSpaceEngine {
             .filter { includeAllSpaces || $0.spaceID == activeSpaceID }
             .filter { !excludedApps.contains($0.bundleID) }
 
-        let windows = control.listAllWindows()
+        let inventory = control.windowInventory()
+        guard inventory.isAuthoritative else { return [] }
+        let windows = inventory.windows.filter(WindowEligibility.isManageableForVirtualWorkspace)
         let resolution = WindowRegistry.resolve(
             entries: layoutSlots.map(\.registryEntry),
-            windows: windows
+            manageableWindows: windows,
+            fullInventory: inventory
         )
 
         let bound = presentableBoundWindows(
@@ -435,6 +714,8 @@ public extension VirtualSpaceEngine {
                 id: item.entry.id,
                 title: item.window.title.isEmpty ? item.entry.title : item.window.title,
                 bundleID: item.window.bundleID,
+                pid: item.window.pid,
+                processStartTime: item.window.processStartTime,
                 profile: item.window.profileDirectory,
                 spaceID: item.entry.spaceID,
                 displayID: item.window.displayID,
@@ -458,10 +739,13 @@ public extension VirtualSpaceEngine {
             .filter { $0.spaceID == activeSpaceID }
             .filter { !excludedApps.contains($0.bundleID) }
 
-        let windows = control.listAllWindows()
+        let inventory = control.windowInventory()
+        guard inventory.isAuthoritative else { return [] }
+        let windows = inventory.windows.filter(WindowEligibility.isManageableForVirtualWorkspace)
         let resolution = WindowRegistry.resolve(
             entries: layoutSlots.map(\.registryEntry),
-            windows: windows
+            manageableWindows: windows,
+            fullInventory: inventory
         )
 
         let bound = presentableBoundWindows(
@@ -481,6 +765,8 @@ public extension VirtualSpaceEngine {
                 id: item.entry.id,
                 title: item.window.title.isEmpty ? item.entry.title : item.window.title,
                 bundleID: item.window.bundleID,
+                pid: item.window.pid,
+                processStartTime: item.window.processStartTime,
                 profile: item.window.profileDirectory,
                 spaceID: item.entry.spaceID,
                 displayID: item.window.displayID,
@@ -501,7 +787,7 @@ public extension VirtualSpaceEngine {
         }
 
         let activeSpaceID = currentState.primaryActiveSpaceID
-        let focusedWindowID = control.focusedWindow()?.windowID
+        let focusedIdentity = control.focusedWindow()?.identity
         let layoutSlots = currentState.slots(layoutName: layoutName)
         let hostDisplayID = currentState.activeSpaces.first?.displayID
 
@@ -509,11 +795,14 @@ public extension VirtualSpaceEngine {
             let trackedWindowIDs = layoutSlots
                 .filter { $0.spaceID == spaceID }
                 .compactMap(\.windowID)
+            let trackedIdentities = Set(layoutSlots
+                .filter { $0.spaceID == spaceID }
+                .compactMap(\.boundIdentity))
             return SpaceSummaryJSON(
                 spaceID: spaceID,
                 displayID: hostDisplayID,
                 isActive: spaceID == activeSpaceID,
-                hasFocus: focusedWindowID.map { trackedWindowIDs.contains($0) } ?? false,
+                hasFocus: focusedIdentity.map { trackedIdentities.contains($0) } ?? false,
                 trackedWindowIDs: trackedWindowIDs.sorted()
             )
         }
@@ -541,12 +830,12 @@ public extension VirtualSpaceEngine {
         entries: [SlotEntry],
         assignments: [String: WindowSnapshot]
     ) -> [BoundWindow] {
-        let onScreenIDs = control.onScreenWindowIDs()
+        let onScreenIdentities = control.onScreenWindowIdentities()
 
         return entries.compactMap { entry -> BoundWindow? in
             guard let window = assignments[entry.id] else { return nil }
             guard !window.minimized, !window.hidden else { return nil }
-            guard onScreenIDs.contains(window.windowID)
+            guard onScreenIdentities.contains(window.identity)
                 || entry.visibilityState == .hiddenOffscreen
             else {
                 return nil
@@ -556,14 +845,6 @@ public extension VirtualSpaceEngine {
     }
 
     private func trackedEntry(for window: WindowSnapshot) -> SlotEntry? {
-        guard let layoutName = currentState.activeLayoutName else { return nil }
-        let layoutSlots = currentState.slots(layoutName: layoutName)
-        guard let matched = WindowRegistry.lookup(
-            window: window,
-            entries: layoutSlots.map(\.registryEntry)
-        ) else {
-            return nil
-        }
-        return layoutSlots.first(where: { $0.id == matched.id })
+        assignedEntry(for: window)
     }
 }

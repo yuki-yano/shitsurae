@@ -16,24 +16,36 @@ public struct ConvergenceOutcome: Equatable, Sendable {
     public let hasPending: Bool
     public let retryCount: Int
     public let verifyCount: Int
-    /// Window IDs that never reached their effective state within the retry
+    /// Identities whose final state could not be verified authoritatively.
+    /// They remain pending, but are neither rolled back nor counted toward
+    /// quarantine because absence from a failed/partial inventory is unknown.
+    public let unverifiedWindowIdentities: [WindowIdentity]
+    /// Identities that did not reach the requested visibility, even when an
+    /// authoritative snapshot proves they safely remained at the original
+    /// state. Normal switching counts these failures toward quarantine.
+    public let desiredUnresolvedWindowIdentities: [WindowIdentity]
+    /// Exact window identities that never reached their effective state within the retry
     /// budget. Callers use this to quarantine windows an app refuses to move
     /// (e.g. Chrome remote-debug popups) so one stuck window can't keep every
     /// space switch unconverged.
-    public let unconvergedWindowIDs: [UInt32]
+    public let unconvergedWindowIdentities: [WindowIdentity]
 
     public init(
         changes: [AppliedVisibilityChange],
         hasPending: Bool,
         retryCount: Int,
         verifyCount: Int,
-        unconvergedWindowIDs: [UInt32] = []
+        unverifiedWindowIdentities: [WindowIdentity] = [],
+        desiredUnresolvedWindowIdentities: [WindowIdentity] = [],
+        unconvergedWindowIdentities: [WindowIdentity] = []
     ) {
         self.changes = changes
         self.hasPending = hasPending
         self.retryCount = retryCount
         self.verifyCount = verifyCount
-        self.unconvergedWindowIDs = unconvergedWindowIDs
+        self.unverifiedWindowIdentities = unverifiedWindowIdentities
+        self.desiredUnresolvedWindowIdentities = desiredUnresolvedWindowIdentities
+        self.unconvergedWindowIdentities = unconvergedWindowIdentities
     }
 }
 
@@ -72,6 +84,8 @@ public enum VisibilityApplier {
         if plan.restoreFromMinimized,
            !control.setWindowMinimized(
                windowID: plan.window.windowID,
+               pid: plan.window.pid,
+               processStartTime: plan.window.processStartTime,
                bundleID: plan.window.bundleID,
                minimized: false
            ).isSuccess
@@ -101,7 +115,13 @@ public enum VisibilityApplier {
             {
                 return true
             }
-            guard control.setWindowFrame(windowID: plan.window.windowID, bundleID: plan.window.bundleID, frame: frame) else {
+            guard control.setWindowFrame(
+                windowID: plan.window.windowID,
+                pid: plan.window.pid,
+                processStartTime: plan.window.processStartTime,
+                bundleID: plan.window.bundleID,
+                frame: frame
+            ) else {
                 logger.error(
                     event: "visibility.apply.setFrameFailed",
                     fields: [
@@ -121,7 +141,13 @@ public enum VisibilityApplier {
             {
                 return true
             }
-            guard control.setWindowPosition(windowID: plan.window.windowID, bundleID: plan.window.bundleID, position: position) else {
+            guard control.setWindowPosition(
+                windowID: plan.window.windowID,
+                pid: plan.window.pid,
+                processStartTime: plan.window.processStartTime,
+                bundleID: plan.window.bundleID,
+                position: position
+            ) else {
                 logger.error(
                     event: "visibility.apply.setPositionFailed",
                     fields: [
@@ -149,30 +175,44 @@ public enum VisibilityApplier {
             return ConvergenceOutcome(changes: [], hasPending: false, retryCount: 0, verifyCount: 0)
         }
 
-        var latestWindows = control.listAllWindows()
+        var latestInventory = control.windowInventory()
         var verifyCount = 1
         var retryCount = 0
-        var pending = changes.filter { !matchesDesiredState(change: $0, windows: latestWindows) }
+        var verification = desiredStateVerification(changes: changes, inventory: latestInventory)
 
-        for delayMS in retryDelaysMS where !pending.isEmpty {
-            retryCount += 1
-            retry(changes: pending, control: control, logger: logger)
+        for delayMS in retryDelaysMS where verification.values.contains(where: { $0 != .desired }) {
+            let retryable = changes.filter { verification[$0.window.identity] == .notDesired }
+            if !retryable.isEmpty {
+                retryCount += 1
+                retry(changes: retryable, control: control, logger: logger)
+            }
             control.sleep(milliseconds: delayMS)
-            latestWindows = control.listAllWindows()
+            latestInventory = control.windowInventory()
             verifyCount += 1
-            pending = changes.filter { !matchesDesiredState(change: $0, windows: latestWindows) }
+            verification = desiredStateVerification(changes: changes, inventory: latestInventory)
         }
 
-        let desiredUnresolvedWindowIDs = Set(pending.map(\.window.windowID))
+        let desiredUnresolvedWindowIdentities = Set(verification.compactMap { identity, result in
+            result == .notDesired ? identity : nil
+        })
+        let unverifiedWindowIdentities = Set(verification.compactMap { identity, result in
+            result == .unknown ? identity : nil
+        })
         let resolved = changes.map { change in
             var copy = change
-            copy.effectiveEntry = desiredUnresolvedWindowIDs.contains(change.window.windowID)
-                ? change.originalEntry
-                : change.desiredEntry
+            if desiredUnresolvedWindowIdentities.contains(change.window.identity) {
+                copy.effectiveEntry = change.originalEntry
+            } else if !unverifiedWindowIdentities.contains(change.window.identity) {
+                copy.effectiveEntry = change.desiredEntry
+            }
+            // Unknown means the inventory could not prove the physical state.
+            // Preserve apply()'s best-known effective entry; manufacturing a
+            // rollback here corrupts a successful mutation's write-ahead state.
             return copy
         }
         let effectivePending = resolved.filter {
-            !matchesEffectiveState(change: $0, windows: latestWindows)
+            !unverifiedWindowIdentities.contains($0.window.identity)
+                && !matchesEffectiveState(change: $0, windows: latestInventory.windows)
         }
 
         // [diagnostic] convergence-failure investigation — remove after root
@@ -183,7 +223,8 @@ public enum VisibilityApplier {
         // special windows) from a real placement bug.
         if !effectivePending.isEmpty {
             let entries = effectivePending.map { change -> String in
-                let actual = latestWindows.first(where: { $0.windowID == change.window.windowID })
+                let identity = change.window.identity
+                let actual = latestInventory.windows.first(where: { $0.identity == identity })
                 let desired = String(describing: change.desiredEntry.visibilityState)
                 let expected: String
                 switch change.desiredEntry.visibilityState {
@@ -209,20 +250,69 @@ public enum VisibilityApplier {
             )
         }
 
+        if !unverifiedWindowIdentities.isEmpty {
+            logger.log(
+                level: "warn",
+                event: "visibility.converge.unverified",
+                fields: [
+                    "count": unverifiedWindowIdentities.count,
+                    "windows": unverifiedWindowIdentities
+                        .sorted { lhs, rhs in
+                            if lhs.pid != rhs.pid { return lhs.pid < rhs.pid }
+                            return lhs.windowID < rhs.windowID
+                        }
+                        .map { "\($0.bundleID)#\($0.pid):\($0.windowID)" }
+                        .joined(separator: ";"),
+                ]
+            )
+        }
+
         return ConvergenceOutcome(
             changes: resolved,
-            hasPending: !effectivePending.isEmpty,
+            hasPending: !desiredUnresolvedWindowIdentities.isEmpty || !unverifiedWindowIdentities.isEmpty,
             retryCount: retryCount,
             verifyCount: verifyCount,
-            unconvergedWindowIDs: effectivePending.map(\.window.windowID)
+            unverifiedWindowIdentities: Array(unverifiedWindowIdentities),
+            desiredUnresolvedWindowIdentities: Array(desiredUnresolvedWindowIdentities),
+            unconvergedWindowIdentities: effectivePending.map(\.window.identity)
         )
+    }
+
+    private enum DesiredStateVerification: Equatable {
+        case desired
+        case notDesired
+        case unknown
+    }
+
+    private static func desiredStateVerification(
+        changes: [AppliedVisibilityChange],
+        inventory: WindowInventory
+    ) -> [WindowIdentity: DesiredStateVerification] {
+        Dictionary(uniqueKeysWithValues: changes.map { change in
+            let identity = change.window.identity
+            guard inventory.isAuthoritative else {
+                return (identity, .unknown)
+            }
+            guard inventory.windows.contains(where: { $0.identity == identity }) else {
+                // A raw CG handle that could still be this identity is not an
+                // authoritative disappearance (snapshot assembly can fail).
+                return (identity, inventory.mayContain(identity) ? .unknown : .notDesired)
+            }
+            return (
+                identity,
+                matchesDesiredState(change: change, windows: inventory.windows)
+                    ? .desired
+                    : .notDesired
+            )
+        })
     }
 
     static func matchesDesiredState(
         change: AppliedVisibilityChange,
         windows: [WindowSnapshot]
     ) -> Bool {
-        guard let actual = windows.first(where: { $0.windowID == change.window.windowID }) else {
+        let identity = change.window.identity
+        guard let actual = windows.first(where: { $0.identity == identity }) else {
             return false
         }
 
@@ -233,7 +323,8 @@ public enum VisibilityApplier {
         change: AppliedVisibilityChange,
         windows: [WindowSnapshot]
     ) -> Bool {
-        guard let actual = windows.first(where: { $0.windowID == change.window.windowID }) else {
+        let identity = change.window.identity
+        guard let actual = windows.first(where: { $0.identity == identity }) else {
             return false
         }
 
@@ -259,7 +350,7 @@ public enum VisibilityApplier {
             }
             return true
         case .hiddenOffscreen:
-            if actual.minimized || actual.isFullscreen {
+            if actual.minimized {
                 return true
             }
             guard let expectedFrame = entry.lastHiddenFrame else {
@@ -283,11 +374,19 @@ public enum VisibilityApplier {
                 if change.restoredFromMinimized {
                     _ = control.setWindowMinimized(
                         windowID: change.window.windowID,
+                        pid: change.window.pid,
+                        processStartTime: change.window.processStartTime,
                         bundleID: change.window.bundleID,
                         minimized: false
                     )
                 }
-                if !control.setWindowFrame(windowID: change.window.windowID, bundleID: change.window.bundleID, frame: frame) {
+                if !control.setWindowFrame(
+                    windowID: change.window.windowID,
+                    pid: change.window.pid,
+                    processStartTime: change.window.processStartTime,
+                    bundleID: change.window.bundleID,
+                    frame: frame
+                ) {
                     logger.log(
                         level: "warn",
                         event: "visibility.retry.failed",
@@ -304,6 +403,8 @@ public enum VisibilityApplier {
                 }
                 if !control.setWindowPosition(
                     windowID: change.window.windowID,
+                    pid: change.window.pid,
+                    processStartTime: change.window.processStartTime,
                     bundleID: change.window.bundleID,
                     position: CGPoint(x: frame.x, y: frame.y)
                 ) {

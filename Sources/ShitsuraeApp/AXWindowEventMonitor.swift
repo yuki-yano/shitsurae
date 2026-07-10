@@ -2,25 +2,41 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
+import ShitsuraeCore
 
 @_silgen_name("_AXUIElementGetWindow")
 private func AppAXUIElementGetWindowID(_ element: AXUIElement, _ idOut: UnsafeMutablePointer<CGWindowID>) -> AXError
 
 final class AXWindowEventMonitor {
     enum Event: Sendable, Equatable {
-        case windowCreated(bundleID: String, pid: pid_t, windowID: UInt32?)
-        case focusedWindowChanged(bundleID: String, pid: pid_t, windowID: UInt32?)
+        case focusedWindowChanged(
+            sequence: UInt64,
+            bundleID: String,
+            pid: pid_t,
+            processStartTime: UInt64,
+            windowID: UInt32?
+        )
     }
 
     private final class CallbackContext {
         weak var monitor: AXWindowEventMonitor?
         let pid: pid_t
         let bundleID: String
+        let processStartTime: UInt64
+        let launchDate: Date?
 
-        init(monitor: AXWindowEventMonitor, pid: pid_t, bundleID: String) {
+        init(
+            monitor: AXWindowEventMonitor,
+            pid: pid_t,
+            bundleID: String,
+            processStartTime: UInt64,
+            launchDate: Date?
+        ) {
             self.monitor = monitor
             self.pid = pid
             self.bundleID = bundleID
+            self.processStartTime = processStartTime
+            self.launchDate = launchDate
         }
     }
 
@@ -32,6 +48,15 @@ final class AXWindowEventMonitor {
 
     private var observers: [pid_t: ObserverRecord] = [:]
     private var handler: (@Sendable (Event) -> Void)?
+    private static let sequenceLock = NSLock()
+    private nonisolated(unsafe) static var sourceSequence: UInt64 = 0
+
+    static func nextSequence() -> UInt64 {
+        Self.sequenceLock.lock()
+        defer { Self.sequenceLock.unlock() }
+        Self.sourceSequence &+= 1
+        return Self.sourceSequence
+    }
 
     func start(handler: @escaping @Sendable (Event) -> Void) {
         self.handler = handler
@@ -57,17 +82,37 @@ final class AXWindowEventMonitor {
     }
 
     func register(application: NSRunningApplication) {
+        let pid = application.processIdentifier
         guard AXIsProcessTrusted(),
-              let bundleID = application.bundleIdentifier,
-              !bundleID.hasPrefix("com.yuki-yano.shitsurae"),
-              bundleID != Bundle.main.bundleIdentifier
+              !application.isTerminated,
+              let suppliedBundleID = application.bundleIdentifier,
+              let currentApplication = NSRunningApplication(processIdentifier: pid),
+              !currentApplication.isTerminated,
+              currentApplication.bundleIdentifier == suppliedBundleID,
+              currentApplication.launchDate == application.launchDate,
+              let processStartTime = ProcessGenerationResolver.startTime(
+                  pid: Int(pid)
+              ),
+              !suppliedBundleID.hasPrefix("com.yuki-yano.shitsurae"),
+              suppliedBundleID != Bundle.main.bundleIdentifier
         else {
             return
         }
+        let bundleID = suppliedBundleID
 
-        let pid = application.processIdentifier
-        guard observers[pid] == nil else {
-            return
+        if let existing = observers[pid] {
+            if existing.context.processStartTime == processStartTime,
+               existing.context.bundleID == bundleID,
+               existing.context.launchDate == currentApplication.launchDate
+            {
+                return
+            }
+            CFRunLoopRemoveSource(
+                CFRunLoopGetMain(),
+                AXObserverGetRunLoopSource(existing.observer),
+                .commonModes
+            )
+            observers.removeValue(forKey: pid)
         }
 
         var observerRef: AXObserver?
@@ -78,20 +123,29 @@ final class AXWindowEventMonitor {
         }
 
         let appElement = AXUIElementCreateApplication(pid)
-        let context = CallbackContext(monitor: self, pid: pid, bundleID: bundleID)
+        let context = CallbackContext(
+            monitor: self,
+            pid: pid,
+            bundleID: bundleID,
+            processStartTime: processStartTime,
+            launchDate: currentApplication.launchDate
+        )
         let refcon = UnsafeMutableRawPointer(Unmanaged.passUnretained(context).toOpaque())
 
-        let notifications = [
-            kAXWindowCreatedNotification,
-            kAXFocusedWindowChangedNotification,
-        ]
+        let notifications = [kAXFocusedWindowChangedNotification]
 
+        var registeredNotification = false
         for notification in notifications {
             let result = AXObserverAddNotification(observer, appElement, notification as CFString, refcon)
-            guard result == .success || result == .notificationAlreadyRegistered else {
-                continue
+            if result == .success || result == .notificationAlreadyRegistered {
+                registeredNotification = true
             }
         }
+
+        // Do not cache an inert observer. A later activation/refresh must be
+        // able to retry when Chrome was temporarily unavailable to AX during
+        // launch or automation startup.
+        guard registeredNotification else { return }
 
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
         observers[pid] = ObserverRecord(observer: observer, appElement: appElement, context: context)
@@ -104,10 +158,22 @@ final class AXWindowEventMonitor {
         return Self.windowID(from: AXUIElementCreateApplication(application.processIdentifier))
     }
 
-    func unregister(pid: pid_t) {
-        guard let record = observers.removeValue(forKey: pid) else {
-            return
+    func unregister(application: NSRunningApplication) {
+        let pid = application.processIdentifier
+        guard let record = observers[pid] else { return }
+        if let terminatedLaunchDate = application.launchDate,
+           let observedLaunchDate = record.context.launchDate
+        {
+            guard terminatedLaunchDate == observedLaunchDate else { return }
+        } else {
+            // Some non-LaunchServices applications have no launchDate. Only
+            // remove their record once the kernel confirms no process owns
+            // this PID. If the PID has already been reused, register() will
+            // compare process generations and replace the stale observer;
+            // an old terminate notification must never remove the new one.
+            guard ProcessGenerationResolver.startTime(pid: Int(pid)) == nil else { return }
         }
+        observers.removeValue(forKey: pid)
         CFRunLoopRemoveSource(
             CFRunLoopGetMain(),
             AXObserverGetRunLoopSource(record.observer),
@@ -115,16 +181,29 @@ final class AXWindowEventMonitor {
         )
     }
 
-    private func handle(notification: CFString, element: AXUIElement, pid: pid_t, bundleID: String) {
-        guard let handler else {
-            return
-        }
+    private func handle(
+        notification: CFString,
+        element: AXUIElement,
+        pid: pid_t,
+        bundleID: String,
+        processStartTime: UInt64
+    ) {
+        // A queued callback from a terminated process can arrive after macOS
+        // has reused its PID. Reject it before sequence allocation so it
+        // cannot supersede a valid focus event from the new process instance.
+        guard ProcessGenerationResolver.startTime(pid: Int(pid)) == processStartTime,
+              let handler
+        else { return }
 
         let windowID = Self.windowID(from: element)
-        if CFEqual(notification, kAXWindowCreatedNotification as CFString) {
-            handler(.windowCreated(bundleID: bundleID, pid: pid, windowID: windowID))
-        } else if CFEqual(notification, kAXFocusedWindowChangedNotification as CFString) {
-            handler(.focusedWindowChanged(bundleID: bundleID, pid: pid, windowID: windowID))
+        if CFEqual(notification, kAXFocusedWindowChangedNotification as CFString) {
+            handler(.focusedWindowChanged(
+                sequence: Self.nextSequence(),
+                bundleID: bundleID,
+                pid: pid,
+                processStartTime: processStartTime,
+                windowID: windowID
+            ))
         }
     }
 
@@ -137,7 +216,8 @@ final class AXWindowEventMonitor {
             notification: notification,
             element: element,
             pid: context.pid,
-            bundleID: context.bundleID
+            bundleID: context.bundleID,
+            processStartTime: context.processStartTime
         )
     }
 
@@ -146,20 +226,19 @@ final class AXWindowEventMonitor {
             return direct
         }
 
-        for attribute in [kAXFocusedWindowAttribute as CFString, kAXMainWindowAttribute as CFString] {
-            var ref: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(element, attribute, &ref) == .success,
-                  let ref
-            else {
-                continue
-            }
-
-            if let resolved = windowID(of: ref as! AXUIElement) {
-                return resolved
-            }
+        // Main window is not a focus fallback: Chrome can keep a different
+        // main window while DevTools automation changes the focused window.
+        // Returning it would consume the activation retry with a stale sibling
+        // (the engine rejects it later, but the real focus event is then lost).
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXFocusedWindowAttribute as CFString,
+            &focusedRef
+        ) == .success, let focusedRef else {
+            return nil
         }
-
-        return nil
+        return windowID(of: focusedRef as! AXUIElement)
     }
 
     private static func windowID(of element: AXUIElement) -> UInt32? {

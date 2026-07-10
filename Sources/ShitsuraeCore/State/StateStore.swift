@@ -32,7 +32,7 @@ public struct RuntimeStateWriteExpectation: Equatable, Sendable {
 /// revision/configGeneration expectation is kept as a tripwire against
 /// external modification, not as a cross-process lock.
 ///
-/// v1 state files (no schemaVersion / schemaVersion != 2) are moved aside and
+/// Pre-v4 state files (no schemaVersion / schemaVersion != 4) are moved aside and
 /// replaced with a fresh state on first load — re-bootstrap with
 /// `shitsurae arrange <layout> --state-only --space <id>` afterwards.
 public final class RuntimeStateStore: @unchecked Sendable {
@@ -76,14 +76,14 @@ public final class RuntimeStateStore: @unchecked Sendable {
         guard let probe = try? JSONDecoder().decode(SchemaProbe.self, from: data),
               probe.schemaVersion == RuntimeState.currentSchemaVersion
         else {
-            // v1 (or unknown) state: discard and start fresh, keeping the old
+            // Pre-v4 (or unknown) state: discard and start fresh, keeping the old
             // file as a timestamped backup.
             _ = backupStateFile(label: "discarded")
             return RuntimeState()
         }
 
         do {
-            return try JSONDecoder().decode(RuntimeState.self, from: data)
+            return try JSONDecoder().decode(RuntimeState.self, from: data).canonicalized()
         } catch {
             let backupURL = backupStateFile(label: "corrupt")
             throw RuntimeStateStoreError.corrupted(fileURL: fileURL, backupURL: backupURL)
@@ -94,14 +94,14 @@ public final class RuntimeStateStore: @unchecked Sendable {
         (try? loadStrict()) ?? RuntimeState()
     }
 
+    @discardableResult
     public func saveStrict(
         state: RuntimeState,
         expecting expectation: RuntimeStateWriteExpectation? = nil
-    ) throws {
-        var normalized = state
+    ) throws -> RuntimeState {
+        var normalized = state.canonicalized()
         normalized.schemaVersion = RuntimeState.currentSchemaVersion
         normalized.updatedAt = Date.rfc3339UTC()
-        normalized.slots = Self.sortedSlots(state.slots)
 
         let data: Data
         do {
@@ -142,10 +142,11 @@ public final class RuntimeStateStore: @unchecked Sendable {
             }
             throw RuntimeStateStoreError.writeFailed(fileURL: fileURL, reason: error.localizedDescription)
         }
+        return normalized
     }
 
     public func save(state: RuntimeState) {
-        try? saveStrict(state: state, expecting: nil)
+        _ = try? saveStrict(state: state, expecting: nil)
     }
 
     /// Delete the runtime state file so the next load returns a fresh state.
@@ -154,12 +155,7 @@ public final class RuntimeStateStore: @unchecked Sendable {
     }
 
     static func sortedSlots(_ slots: [SlotEntry]) -> [SlotEntry] {
-        slots.sorted { lhs, rhs in
-            if lhs.layoutName != rhs.layoutName { return lhs.layoutName < rhs.layoutName }
-            if lhs.spaceID != rhs.spaceID { return lhs.spaceID < rhs.spaceID }
-            if lhs.slot != rhs.slot { return lhs.slot < rhs.slot }
-            return lhs.id < rhs.id
-        }
+        RuntimeState(slots: slots).canonicalized().slots
     }
 
     private func backupStateFile(label: String) -> URL? {
