@@ -113,7 +113,7 @@ shitsurae switcher list --json
 shitsurae switcher list --json --include-all-spaces true
 ```
 
-`window workspace` / `window move` / `window resize` / `window set` target the focused window when no selector is given. Selectors: `--window-id`, `--bundle-id`, `--title` (with `--bundle-id`).
+`window workspace` / `window move` / `window resize` / `window set` target the focused window when no selector is given. Exact selector: `--window-id` + `--pid` + `--process-start-time` + `--bundle-id`. Rule selector: `--bundle-id`, optionally with `--pid` / `--title`.
 
 ### 8. Multi-display support
 
@@ -364,7 +364,7 @@ shortcuts:
 1. **Config**: delete these keys (they are load errors now):
    - `mode.space` (always virtual; `mode.followFocus` still works)
    - `executionPolicy` (whole section)
-2. **Runtime state**: v1 state files are discarded automatically on first launch (backed up as `runtime-state.discarded-*.json`). Re-bootstrap with `shitsurae arrange <layout> --state-only --space <id>`.
+2. **Runtime state**: pre-v4 state files are discarded automatically on first launch (backed up as `runtime-state.discarded-*.json`). Re-bootstrap with `shitsurae arrange <layout> --state-only --space <id>`.
 3. **Same app in multiple slots**: each slot now needs a `title` / `profile` / `index` discriminator.
 4. **ShitsuraeAgent is gone**: you can delete `~/Library/LaunchAgents/com.yuki-yano.shitsurae.agent.plist` if it remains.
 
