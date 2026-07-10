@@ -22,6 +22,35 @@ struct VirtualSpaceEngineTests {
         TestFixtures.loadedConfig(layouts: ["work": TestFixtures.twoSpaceLayout()])
     }
 
+    private var threeSpaceConfig: LoadedConfig {
+        let fullFrame = TestFixtures.frameDef("0%", "0%", "100%", "100%")
+        return TestFixtures.loadedConfig(layouts: [
+            "work": LayoutDefinition(spaces: [
+                SpaceDefinition(spaceID: 1, windows: [
+                    WindowDefinition(
+                        match: WindowMatchRule(bundleID: "com.apple.TextEdit"),
+                        slot: 1,
+                        frame: fullFrame
+                    ),
+                ]),
+                SpaceDefinition(spaceID: 2, windows: [
+                    WindowDefinition(
+                        match: WindowMatchRule(bundleID: "com.apple.Notes"),
+                        slot: 1,
+                        frame: fullFrame
+                    ),
+                ]),
+                SpaceDefinition(spaceID: 3, windows: [
+                    WindowDefinition(
+                        match: WindowMatchRule(bundleID: "com.apple.Terminal"),
+                        slot: 1,
+                        frame: fullFrame
+                    ),
+                ]),
+            ]),
+        ])
+    }
+
     private func standardWindows() -> [WindowSnapshot] {
         [
             TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", isAXBacked: true, frontIndex: 0),
@@ -659,14 +688,26 @@ struct VirtualSpaceEngineTests {
             TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", isAXBacked: true, frontIndex: 0),
             TestFixtures.window(id: 2, bundleID: "com.apple.Terminal", isAXBacked: true, frontIndex: 1),
         ]
-        let (engine, _, url) = makeEngine(windows: windows)
+        let (engine, control, url) = makeEngine(windows: windows)
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
         try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
         let outcome = try await engine.switchSpace(to: 2, config: config)
 
         #expect(outcome.unresolvedSlots == [PendingUnresolvedSlot(slot: 1, spaceID: 2, reason: "windowUnresolved")])
+        #expect(outcome.shownCount == 0)
+        #expect(outcome.hiddenCount == 2)
+        #expect(!outcome.converged)
+        #expect(VisibilityPlanner.isHiddenWindowFrame(
+            frame: control.window(1)!.frame,
+            displays: [TestFixtures.display]
+        ))
+        #expect(VisibilityPlanner.isHiddenWindowFrame(
+            frame: control.window(2)!.frame,
+            displays: [TestFixtures.display]
+        ))
         let state = await engine.currentState
+        #expect(state.primaryActiveSpaceID == 2)
         #expect(state.pendingVisibilityConvergence != nil)
         #expect(state.recoveryRequired)
     }
@@ -1022,6 +1063,160 @@ struct VirtualSpaceEngineTests {
         #expect(after.slots.first { $0.bundleID == "com.apple.TextEdit" }?.boundIdentity
             == before.slots.first { $0.bundleID == "com.apple.TextEdit" }?.boundIdentity)
         #expect(!after.slots.contains { $0.origin == .adopted })
+    }
+
+    @Test func authoritativeCGWithAllExactBindingsAXInvisibleRejectsWithoutAdvancingState() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        _ = try await engine.switchSpace(to: 2, config: config)
+        _ = try await engine.switchSpace(to: 1, config: config)
+
+        let before = await engine.currentState
+        let framesBefore = Dictionary(uniqueKeysWithValues: control.currentWindows().map { ($0.identity, $0.frame) })
+        let mutationAttemptsBefore = control.frameMutationAttemptWindowIDs.count
+        let focusAttemptsBefore = control.focusedWindowIDs.count
+        for window in control.currentWindows() {
+            control.addWindow(window.withAXBacked(false))
+        }
+        let untracked = TestFixtures.window(
+            id: 99,
+            bundleID: "com.apple.finder",
+            isAXBacked: true,
+            frontIndex: 9
+        )
+        control.addWindow(untracked)
+
+        await #expect(throws: VirtualSpaceEngineError.self) {
+            _ = try await engine.switchSpace(to: 2, config: self.config)
+        }
+
+        let after = await engine.currentState
+        #expect(after == before)
+        #expect(control.frameMutationAttemptWindowIDs.count == mutationAttemptsBefore)
+        #expect(control.focusedWindowIDs.count == focusAttemptsBefore)
+        #expect(!after.slots.contains { $0.origin == .adopted })
+        for window in control.currentWindows() where window.windowID != untracked.windowID {
+            #expect(window.frame == framesBefore[window.identity])
+        }
+    }
+
+    @Test func targetReservedExactBindingRejectsBeforeHidingCurrentWorkspace() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        _ = try await engine.switchSpace(to: 2, config: config)
+        _ = try await engine.switchSpace(to: 1, config: config)
+
+        let before = await engine.currentState
+        let framesBefore = Dictionary(uniqueKeysWithValues: control.currentWindows().map { ($0.identity, $0.frame) })
+        let mutationAttemptsBefore = control.frameMutationAttemptWindowIDs.count
+        let focusAttemptsBefore = control.focusedWindowIDs.count
+        control.addWindow(control.window(3)!.withAXBacked(false))
+
+        await #expect(throws: VirtualSpaceEngineError.self) {
+            _ = try await engine.switchSpace(to: 2, config: self.config)
+        }
+
+        let after = await engine.currentState
+        #expect(after == before)
+        #expect(control.frameMutationAttemptWindowIDs.count == mutationAttemptsBefore)
+        #expect(control.focusedWindowIDs.count == focusAttemptsBefore)
+        for window in control.currentWindows() {
+            #expect(window.frame == framesBefore[window.identity])
+        }
+    }
+
+    @Test func oneAssignedTargetAndOneReservedTargetAllowsPartialSwitch() async throws {
+        let windows = [
+            TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", isAXBacked: true, frontIndex: 0),
+            TestFixtures.window(id: 3, bundleID: "com.apple.Notes", isAXBacked: true, frontIndex: 1),
+            TestFixtures.window(id: 4, bundleID: "com.apple.Safari", isAXBacked: true, frontIndex: 2),
+        ]
+        let layout = LayoutDefinition(spaces: [
+            SpaceDefinition(spaceID: 1, windows: [
+                WindowDefinition(
+                    match: WindowMatchRule(bundleID: "com.apple.TextEdit"),
+                    slot: 1,
+                    frame: TestFixtures.frameDef("0%", "0%", "100%", "100%")
+                ),
+            ]),
+            SpaceDefinition(spaceID: 2, windows: [
+                WindowDefinition(
+                    match: WindowMatchRule(bundleID: "com.apple.Notes"),
+                    slot: 1,
+                    frame: TestFixtures.frameDef("0%", "0%", "50%", "100%")
+                ),
+                WindowDefinition(
+                    match: WindowMatchRule(bundleID: "com.apple.Safari"),
+                    slot: 2,
+                    frame: TestFixtures.frameDef("50%", "0%", "50%", "100%")
+                ),
+            ]),
+        ])
+        let localConfig = TestFixtures.loadedConfig(layouts: ["work": layout])
+        let (engine, control, url) = makeEngine(windows: windows)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: localConfig)
+        _ = try await engine.switchSpace(to: 2, config: localConfig)
+        _ = try await engine.switchSpace(to: 1, config: localConfig)
+
+        let safariFrame = control.window(4)!.frame
+        let mutationAttemptsBefore = control.frameMutationAttemptWindowIDs.count
+        control.addWindow(control.window(4)!.withAXBacked(false))
+        let outcome = try await engine.switchSpace(to: 2, config: localConfig)
+
+        #expect(outcome.didChangeSpace)
+        #expect(!outcome.converged)
+        #expect(outcome.focusedWindowID == 3)
+        let state = await engine.currentState
+        #expect(state.primaryActiveSpaceID == 2)
+        #expect(state.pendingVisibilityConvergence != nil)
+        #expect(control.window(4)?.frame == safariFrame)
+        #expect(!control.frameMutationAttemptWindowIDs.dropFirst(mutationAttemptsBefore).contains(4))
+    }
+
+    @Test func unrelatedWorkspaceAssignmentDoesNotMaskCurrentAXDropout() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: threeSpaceConfig)
+        _ = try await engine.switchSpace(to: 3, config: threeSpaceConfig)
+        _ = try await engine.switchSpace(to: 1, config: threeSpaceConfig)
+
+        let before = await engine.currentState
+        let mutationAttemptsBefore = control.frameMutationAttemptWindowIDs.count
+        control.addWindow(control.window(1)!.withAXBacked(false))
+        control.removeWindow(3)
+
+        await #expect(throws: VirtualSpaceEngineError.self) {
+            _ = try await engine.switchSpace(to: 2, config: self.threeSpaceConfig)
+        }
+
+        let after = await engine.currentState
+        #expect(after == before)
+        #expect(control.frameMutationAttemptWindowIDs.count == mutationAttemptsBefore)
+    }
+
+    @Test func unrelatedWorkspaceReservationDoesNotRejectValidSwitch() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: threeSpaceConfig)
+        _ = try await engine.switchSpace(to: 3, config: threeSpaceConfig)
+        _ = try await engine.switchSpace(to: 1, config: threeSpaceConfig)
+
+        let terminalFrame = control.window(2)!.frame
+        let mutationAttemptsBefore = control.frameMutationAttemptWindowIDs.count
+        control.addWindow(control.window(2)!.withAXBacked(false))
+
+        let outcome = try await engine.switchSpace(to: 2, config: threeSpaceConfig)
+
+        #expect(outcome.didChangeSpace)
+        #expect(!outcome.converged)
+        #expect(outcome.focusedWindowID == 3)
+        let state = await engine.currentState
+        #expect(state.primaryActiveSpaceID == 2)
+        #expect(control.window(2)?.frame == terminalFrame)
+        #expect(!control.frameMutationAttemptWindowIDs.dropFirst(mutationAttemptsBefore).contains(2))
     }
 
     @Test func staleSnapshotNeverCreatesAdoptedEntry() async throws {
@@ -2216,6 +2411,37 @@ struct VirtualSpaceEngineTests {
             "com.apple.TextEdit", "com.apple.Terminal", "com.apple.Notes",
         ])
         control.onScreenWindowIdentitiesOverride = nil
+    }
+
+    @Test func synchronousInteractiveInvalidationPreventsStaleFollowFocusRollback() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        _ = try await engine.switchSpace(to: 2, config: config)
+
+        control.setFocusedWindowID(1)
+        let pending = await engine.processFocusEvent(
+            sequence: 1,
+            windowID: 1,
+            pid: control.window(1)!.pid,
+            processStartTime: control.window(1)!.processStartTime,
+            bundleID: control.window(1)!.bundleID,
+            config: config
+        )
+        #expect(pending?.spaceID == 1)
+
+        engine.invalidatePendingFocusEvents()
+        _ = try await engine.switchSpace(to: 2, config: config)
+        let stale = try await engine.switchSpaceForFocusEvent(
+            sequence: 1,
+            identity: control.window(1)!.identity,
+            to: 1,
+            config: config
+        )
+
+        #expect(stale == nil)
+        let state = await engine.currentState
+        #expect(state.primaryActiveSpaceID == 2)
     }
 
     @Test func switchToSameSpaceIsIdempotent() async throws {

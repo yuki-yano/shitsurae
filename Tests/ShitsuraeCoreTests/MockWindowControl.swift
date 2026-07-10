@@ -309,6 +309,26 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
 }
 
 extension WindowSnapshot {
+    func withAXBacked(_ newValue: Bool) -> WindowSnapshot {
+        WindowSnapshot(
+            windowID: windowID,
+            bundleID: bundleID,
+            pid: pid,
+            processStartTime: processStartTime,
+            title: title,
+            role: role,
+            subrole: subrole,
+            isAXBacked: newValue,
+            minimized: minimized,
+            hidden: hidden,
+            frame: frame,
+            displayID: displayID,
+            profileDirectory: profileDirectory,
+            isFullscreen: isFullscreen,
+            frontIndex: frontIndex
+        )
+    }
+
     func withFrame(_ newFrame: ResolvedFrame) -> WindowSnapshot {
         WindowSnapshot(
             windowID: windowID,

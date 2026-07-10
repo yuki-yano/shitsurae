@@ -43,8 +43,40 @@ enum HotkeyFastPathAction: Equatable, Sendable {
     }
 }
 
+enum SpaceSwitchCompletion {
+    static func incompleteMessage(
+        converged: Bool,
+        unresolvedSlotCount: Int
+    ) -> String? {
+        guard !converged else { return nil }
+        return unresolvedSlotCount == 0
+            ? "space switch did not converge"
+            : "space switch incomplete: \(unresolvedSlotCount) unresolved slots"
+    }
+}
+
+enum HotkeyFastPathPreparation {
+    static func perform(
+        invalidateFocusEvents: () -> Void,
+        onStart: () -> Void
+    ) {
+        invalidateFocusEvents()
+        onStart()
+    }
+}
+
+enum HotkeyEventRouting {
+    static func shouldUseMainFallback(
+        eventType: CGEventType,
+        overlaySessionActive: Bool
+    ) -> Bool {
+        eventType != .flagsChanged || overlaySessionActive
+    }
+}
+
 enum HotkeyFastPathExecutionResult: Sendable {
     case success(SpaceSwitchOutcome)
+    case partial(SpaceSwitchOutcome, String)
     case failure(String)
 }
 
@@ -99,6 +131,12 @@ private final class HotkeyFastPathState: @unchecked Sendable {
         lock.lock()
         snapshot.overlaySessionActive = active
         lock.unlock()
+    }
+
+    func isOverlaySessionActive() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return snapshot.overlaySessionActive
     }
 
     func action(event: HotkeyEventSnapshot) -> HotkeyFastPathAction? {
@@ -163,7 +201,10 @@ private final class HotkeyFastPathExecutor: @unchecked Sendable {
 
         let engine = engine
         let logger = logger
-        onStart(label)
+        HotkeyFastPathPreparation.perform(
+            invalidateFocusEvents: { engine.invalidatePendingFocusEvents() },
+            onStart: { onStart(label) }
+        )
         Task.detached(priority: .high) {
             let activity = ProcessInfo.processInfo.beginActivity(
                 options: [.userInitiated, .latencyCritical],
@@ -175,7 +216,24 @@ private final class HotkeyFastPathExecutor: @unchecked Sendable {
 
             do {
                 let outcome = try await engine.switchSpace(to: spaceID, config: config)
-                self.onFinish(label, .success(outcome))
+                if let message = SpaceSwitchCompletion.incompleteMessage(
+                    converged: outcome.converged,
+                    unresolvedSlotCount: outcome.unresolvedSlots.count
+                ) {
+                    logger.log(
+                        level: "warn",
+                        event: "app.action.partial",
+                        fields: [
+                            "label": label,
+                            "error": message,
+                            "targetSpace": outcome.targetSpaceID,
+                            "unresolvedSlots": outcome.unresolvedSlots.count,
+                        ]
+                    )
+                    self.onFinish(label, .partial(outcome, message))
+                } else {
+                    self.onFinish(label, .success(outcome))
+                }
             } catch {
                 let message = (error as? VirtualSpaceEngineError).map {
                     CommandRouter.mapEngineError($0).message
@@ -191,6 +249,7 @@ private final class HotkeyEventTapController: @unchecked Sendable {
     private let lock = NSLock()
     private let fastPathState: HotkeyFastPathState
     private let fastPathExecutor: HotkeyFastPathExecutor
+    private let logger: ShitsuraeLogger
     private let fallback: (HotkeyEventSnapshot) -> Bool
     private var thread: Thread?
     private var runLoop: CFRunLoop?
@@ -200,10 +259,12 @@ private final class HotkeyEventTapController: @unchecked Sendable {
     init(
         fastPathState: HotkeyFastPathState,
         fastPathExecutor: HotkeyFastPathExecutor,
+        logger: ShitsuraeLogger,
         fallback: @escaping (HotkeyEventSnapshot) -> Bool
     ) {
         self.fastPathState = fastPathState
         self.fastPathExecutor = fastPathExecutor
+        self.logger = logger
         self.fallback = fallback
     }
 
@@ -308,6 +369,13 @@ private final class HotkeyEventTapController: @unchecked Sendable {
             if let tap {
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
+            logger.log(
+                level: "warn",
+                event: "hotkey.tapDisabled",
+                fields: [
+                    "reason": type == .tapDisabledByTimeout ? "timeout" : "userInput",
+                ]
+            )
             return false
         }
 
@@ -315,6 +383,13 @@ private final class HotkeyEventTapController: @unchecked Sendable {
         if let action = fastPathState.action(event: snapshot) {
             fastPathExecutor.execute(action)
             return true
+        }
+
+        guard HotkeyEventRouting.shouldUseMainFallback(
+            eventType: type,
+            overlaySessionActive: fastPathState.isOverlaySessionActive()
+        ) else {
+            return false
         }
 
         return DispatchQueue.main.sync {
@@ -362,12 +437,15 @@ final class HotkeyManager {
             configManager: model.configManager,
             logger: model.logger,
             onStart: { [weak model] label in
-                Task { @MainActor [weak model] in
+                // Both lifecycle notifications use the same serial queue so
+                // an immediate preflight failure cannot overtake start and
+                // leave the UI stuck in `.running`.
+                DispatchQueue.main.async { [weak model] in
                     model?.handleFastPathActionStarted(label)
                 }
             },
             onFinish: { [weak model] label, result in
-                Task { @MainActor [weak model] in
+                DispatchQueue.main.async { [weak model] in
                     model?.handleFastPathSwitchFinished(label: label, result: result)
                 }
             }
@@ -375,9 +453,11 @@ final class HotkeyManager {
     }
 
     func start() {
+        guard let model else { return }
         let controller = HotkeyEventTapController(
             fastPathState: fastPathState,
-            fastPathExecutor: fastPathExecutor
+            fastPathExecutor: fastPathExecutor,
+            logger: model.logger
         ) { [weak self] event in
             MainActor.assumeIsolated {
                 self?.handle(event) ?? false
@@ -385,14 +465,14 @@ final class HotkeyManager {
         }
 
         guard controller.start() else {
-            model?.logger.error(event: "hotkey.tapCreateFailed")
+            model.logger.error(event: "hotkey.tapCreateFailed")
             return
         }
 
         eventTapController = controller
         updateFastPathPolicy(
             frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
-            frontmostBelongsToActiveWorkspace: model?.frontmostBelongsToActiveWorkspaceForShortcutPolicy() ?? true
+            frontmostBelongsToActiveWorkspace: model.frontmostBelongsToActiveWorkspaceForShortcutPolicy()
         )
     }
 

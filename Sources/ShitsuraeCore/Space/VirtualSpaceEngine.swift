@@ -179,6 +179,72 @@ public actor VirtualSpaceEngine {
             throw VirtualSpaceEngineError.stateError("window inventory unavailable")
         }
 
+        let allWindows = inventory.windows
+        let windows = allWindows.filter(WindowEligibility.isManageableForVirtualWorkspace)
+
+        // A CG inventory can be authoritative about liveness while the AX
+        // view needed for safe mutations is temporarily incomplete. Resolve
+        // before adoption or any other state change so an all-AX-dropout pass
+        // cannot commit a logical space switch with zero physical work. Raw
+        // CG identities are used only to reject the pass; they never become
+        // mutation candidates.
+        let preflightExcludedEntryIDs = Set(
+            ineligibleAdoptedEntryIDs(layoutName: layoutName, windows: allWindows)
+        )
+        let preflightEntries = state.slots(layoutName: layoutName).filter {
+            !preflightExcludedEntryIDs.contains($0.id)
+        }
+        let preflightResolution = WindowRegistry.resolve(
+            entries: preflightEntries.map(\.registryEntry),
+            manageableWindows: windows,
+            fullInventory: inventory
+        )
+        let reservedExactEntryIDs = Set(preflightResolution.unresolved.compactMap { entryID in
+            preflightResolution.unresolvedReasons[entryID] == .reservedExactIdentity
+                ? entryID
+                : nil
+        })
+        let targetEntryIDs = Set(
+            preflightEntries.filter { $0.spaceID == targetSpaceID }.map(\.id)
+        )
+        let previousEntryIDs = Set(
+            preflightEntries.filter { $0.spaceID == previousSpaceID }.map(\.id)
+        )
+        let targetReservedCount = reservedExactEntryIDs.intersection(targetEntryIDs).count
+        let previousReservedCount = reservedExactEntryIDs.intersection(previousEntryIDs).count
+        let targetAssignmentCount = preflightResolution.assignments.keys.reduce(into: 0) { count, entryID in
+            if targetEntryIDs.contains(entryID) {
+                count += 1
+            }
+        }
+        let previousAssignmentCount = preflightResolution.assignments.keys.reduce(into: 0) { count, entryID in
+            if previousEntryIDs.contains(entryID) {
+                count += 1
+            }
+        }
+        let rejectedPrevious = previousReservedCount > 0 && previousAssignmentCount == 0
+        let rejectedTarget = targetReservedCount > 0 && targetAssignmentCount == 0
+        if rejectedPrevious || rejectedTarget {
+            logger.log(
+                level: "warn",
+                event: "space.switch.preflightRejected",
+                fields: [
+                    "from": previousSpaceID ?? -1,
+                    "to": targetSpaceID,
+                    "manageable": windows.count,
+                    "assignments": preflightResolution.assignments.count,
+                    "reservedExact": reservedExactEntryIDs.count,
+                    "previousReserved": previousReservedCount,
+                    "previousAssignments": previousAssignmentCount,
+                    "targetReserved": targetReservedCount,
+                    "targetAssignments": targetAssignmentCount,
+                ]
+            )
+            throw VirtualSpaceEngineError.stateError(
+                "window inventory temporarily lacks manageable bindings"
+            )
+        }
+
         // Untracked visible windows belong to the workspace the user sees
         // them on — adopt them into the *pre-switch* workspace so they hide
         // together with it instead of drifting to wherever the switcher is
@@ -189,9 +255,7 @@ public actor VirtualSpaceEngine {
             inventory: inventory
         )
 
-        let allWindows = inventory.windows
         pruneIneligibleAdoptedEntriesInMemory(layoutName: layoutName, windows: allWindows)
-        let windows = allWindows.filter(WindowEligibility.isManageableForVirtualWorkspace)
         // Drop quarantine bookkeeping for windows that no longer exist so a
         // freshly opened window (new windowID) always gets a clean slate.
         convergenceFailureCounts = convergenceFailureCounts.filter { inventory.mayContain($0.key) }
@@ -386,8 +450,8 @@ public actor VirtualSpaceEngine {
         // result is merged, while unknown/unsettled results keep the
         // conservative WAL entry above. They must not pin global recovery;
         // shutdown can still restore every WAL-hidden entry.
-        newState.pendingVisibilityConvergence = convergence.hasPending
-            || !plan.unresolvedEntryIDs.isEmpty
+        let requiresRecovery = convergence.hasPending || !plan.unresolvedEntryIDs.isEmpty
+        newState.pendingVisibilityConvergence = requiresRecovery
             ? PendingVisibilityConvergence(
                 requestID: UUID().uuidString.lowercased(),
                 startedAt: Date.rfc3339UTC(),
@@ -399,13 +463,11 @@ public actor VirtualSpaceEngine {
 
         try persist(newState)
 
-        // [diagnostic] focus-recovery investigation — remove after root cause confirmed.
-        // Records what we *wanted* to focus (intendedTop = MRU #1 of the target
-        // workspace), what focusTarget *claimed* succeeded (focused), and what the
-        // system *actually* reports as focused at the end of the switch
-        // (actualFocused). Divergence pinpoints (A) stolen-after-success vs
-        // (B) never-landed.
+        // Record intended, reported, and actual focus together with the same
+        // convergence value returned to callers. This distinguishes a focus
+        // steal from a partial visibility plan without misleading the GUI.
         let diagnosticActualFocused = control.focusedWindow()
+        let converged = !requiresRecovery
         logger.log(
             event: "space.switch",
             fields: [
@@ -414,8 +476,9 @@ public actor VirtualSpaceEngine {
                 "to": targetSpaceID,
                 "shown": plan.shows.count,
                 "hidden": plan.hides.count,
-                "unresolved": plan.unresolvedSlots.count,
-                "converged": !convergence.hasPending,
+                "unresolved": plan.unresolvedEntryIDs.count,
+                "unresolvedSlots": plan.unresolvedSlots.count,
+                "converged": converged,
                 "intendedTop": plan.focusCandidates.first.map { Int($0.window.windowID) } ?? -1,
                 "intendedTopBundle": plan.focusCandidates.first?.window.bundleID ?? "",
                 "focused": focusedIdentity.map { Int($0.windowID) } ?? -1,
@@ -433,7 +496,7 @@ public actor VirtualSpaceEngine {
             hiddenCount: plan.hides.count,
             focusedWindowID: focusedIdentity?.windowID,
             unresolvedSlots: plan.unresolvedSlots,
-            converged: !convergence.hasPending && plan.unresolvedEntryIDs.isEmpty
+            converged: converged
         )
     }
 

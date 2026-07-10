@@ -280,6 +280,12 @@ final class AppModel: ObservableObject {
                 self?.lastActiveSpaceChangeAt = Date()
                 self?.frontmostWindowBelongsToActiveWorkspace = outcome.focusedWindowID != nil || !outcome.didChangeSpace
             }
+            if let message = SpaceSwitchCompletion.incompleteMessage(
+                converged: outcome.converged,
+                unresolvedSlotCount: outcome.unresolvedSlots.count
+            ) {
+                throw VirtualSpaceEngineError.stateError(message)
+            }
         }
     }
 
@@ -400,6 +406,14 @@ final class AppModel: ObservableObject {
             markInteractiveActivation()
             lastActionMessage = "\(label): ok"
             actionStatus = .success(label)
+            lastActiveSpaceChangeAt = Date()
+            frontmostWindowBelongsToActiveWorkspace = outcome.focusedWindowID != nil || !outcome.didChangeSpace
+            refreshStatus()
+
+        case let .partial(outcome, message):
+            markInteractiveActivation()
+            lastActionMessage = "\(label): \(message)"
+            actionStatus = .failed(label, message)
             lastActiveSpaceChangeAt = Date()
             frontmostWindowBelongsToActiveWorkspace = outcome.focusedWindowID != nil || !outcome.didChangeSpace
             refreshStatus()

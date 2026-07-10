@@ -138,4 +138,50 @@ struct HotkeyManagerTests {
             ) == nil
         )
     }
+
+    @Test func fastPathPreparationInvalidatesFocusBeforePublishingStart() {
+        var calls: [String] = []
+
+        HotkeyFastPathPreparation.perform(
+            invalidateFocusEvents: { calls.append("invalidate") },
+            onStart: { calls.append("start") }
+        )
+
+        #expect(calls == ["invalidate", "start"])
+    }
+
+    @Test func fastPathCompletionClassifiesNonconvergedSwitchAsPartial() {
+        #expect(
+            SpaceSwitchCompletion.incompleteMessage(converged: true, unresolvedSlotCount: 0) == nil
+        )
+        #expect(
+            SpaceSwitchCompletion.incompleteMessage(converged: false, unresolvedSlotCount: 0)
+                == "space switch did not converge"
+        )
+        #expect(
+            SpaceSwitchCompletion.incompleteMessage(converged: false, unresolvedSlotCount: 2)
+                == "space switch incomplete: 2 unresolved slots"
+        )
+    }
+
+    @Test func inactiveOverlayFlagsChangedBypassesMainActorFallback() {
+        #expect(
+            !HotkeyEventRouting.shouldUseMainFallback(
+                eventType: .flagsChanged,
+                overlaySessionActive: false
+            )
+        )
+        #expect(
+            HotkeyEventRouting.shouldUseMainFallback(
+                eventType: .flagsChanged,
+                overlaySessionActive: true
+            )
+        )
+        #expect(
+            HotkeyEventRouting.shouldUseMainFallback(
+                eventType: .keyDown,
+                overlaySessionActive: false
+            )
+        )
+    }
 }
