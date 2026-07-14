@@ -73,48 +73,65 @@ public struct LiveWindowControl: WindowControl {
 
             Self.prepareForTargetedWindowInteraction(running)
 
+            if Self.geometryBlockedAtMutationTime(windowID: windowID, appElement: appElement) {
+                return .failed
+            }
+
             guard let windowElement = Self.matchingWindowElement(windowID: windowID, appElement: appElement) else {
                 return .failed
             }
 
-            func applySize() -> AXError {
-                var size = CGSize(width: frame.width, height: frame.height)
+            var sizeSettable = DarwinBoolean(false)
+            var positionSettable = DarwinBoolean(false)
+            guard AXUIElementIsAttributeSettable(
+                windowElement,
+                kAXSizeAttribute as CFString,
+                &sizeSettable
+            ) == .success,
+                sizeSettable.boolValue,
+                AXUIElementIsAttributeSettable(
+                    windowElement,
+                    kAXPositionAttribute as CFString,
+                    &positionSettable
+                ) == .success,
+                positionSettable.boolValue,
+                let initial = Self.frame(of: windowElement)
+            else {
+                return .failed
+            }
+
+            func applySize(_ target: CGSize) -> Bool {
+                var size = target
                 guard let sizeValue = AXValueCreate(.cgSize, &size) else {
-                    return .failure
+                    return false
                 }
-                return AXUIElementSetAttributeValue(windowElement, kAXSizeAttribute as CFString, sizeValue)
+                return AXUIElementSetAttributeValue(
+                    windowElement,
+                    kAXSizeAttribute as CFString,
+                    sizeValue
+                ) == .success
             }
 
-            func applyPosition() -> AXError {
-                var point = CGPoint(x: frame.x, y: frame.y)
+            func applyPosition(_ target: CGPoint) -> Bool {
+                var point = target
                 guard let pointValue = AXValueCreate(.cgPoint, &point) else {
-                    return .failure
+                    return false
                 }
-                return AXUIElementSetAttributeValue(windowElement, kAXPositionAttribute as CFString, pointValue)
+                return AXUIElementSetAttributeValue(
+                    windowElement,
+                    kAXPositionAttribute as CFString,
+                    pointValue
+                ) == .success
             }
 
-            let sizeBefore = Self.interactionResult(for: applySize())
-            guard sizeBefore.isSuccess else { return sizeBefore }
-
-            let position = Self.interactionResult(for: applyPosition())
-            guard position.isSuccess else { return position }
-
-            let sizeAfter = Self.interactionResult(for: applySize())
-            guard sizeAfter.isSuccess else { return sizeAfter }
-
-            if let actual = Self.frame(of: windowElement) {
-                let actualFrame = ResolvedFrame(
-                    x: actual.origin.x,
-                    y: actual.origin.y,
-                    width: actual.width,
-                    height: actual.height
-                )
-                if !WindowEnumerator.roughlySame(frame: actualFrame, expectedFrame: frame) {
-                    return .failed
-                }
-            }
-
-            return .success
+            let outcome = GeometryTransaction.applyFrame(
+                initial: initial,
+                requested: frame,
+                setSize: applySize,
+                setPosition: applyPosition,
+                readFrame: { Self.frame(of: windowElement) }
+            )
+            return outcome == .applied ? .success : .failed
         }
         return result.isSuccess
     }
@@ -143,26 +160,65 @@ public struct LiveWindowControl: WindowControl {
 
             Self.prepareForTargetedWindowInteraction(running)
 
+            if Self.geometryBlockedAtMutationTime(windowID: windowID, appElement: appElement) {
+                return .failed
+            }
+
             guard let windowElement = Self.matchingWindowElement(windowID: windowID, appElement: appElement) else {
                 return .failed
             }
 
-            var point = position
-            guard let pointValue = AXValueCreate(.cgPoint, &point) else {
+            var positionSettable = DarwinBoolean(false)
+            var sizeSettable = DarwinBoolean(false)
+            guard AXUIElementIsAttributeSettable(
+                windowElement,
+                kAXPositionAttribute as CFString,
+                &positionSettable
+            ) == .success,
+                positionSettable.boolValue,
+                AXUIElementIsAttributeSettable(
+                    windowElement,
+                    kAXSizeAttribute as CFString,
+                    &sizeSettable
+                ) == .success,
+                sizeSettable.boolValue,
+                let initial = Self.frame(of: windowElement)
+            else {
                 return .failed
             }
-            let applied = Self.interactionResult(
-                for: AXUIElementSetAttributeValue(windowElement, kAXPositionAttribute as CFString, pointValue)
+
+            func applyPosition(_ target: CGPoint) -> Bool {
+                var point = target
+                guard let pointValue = AXValueCreate(.cgPoint, &point) else {
+                    return false
+                }
+                return AXUIElementSetAttributeValue(
+                    windowElement,
+                    kAXPositionAttribute as CFString,
+                    pointValue
+                ) == .success
+            }
+
+            func applySize(_ target: CGSize) -> Bool {
+                var size = target
+                guard let sizeValue = AXValueCreate(.cgSize, &size) else {
+                    return false
+                }
+                return AXUIElementSetAttributeValue(
+                    windowElement,
+                    kAXSizeAttribute as CFString,
+                    sizeValue
+                ) == .success
+            }
+
+            let outcome = GeometryTransaction.applyPosition(
+                initial: initial,
+                requested: position,
+                setPosition: applyPosition,
+                setSize: applySize,
+                readFrame: { Self.frame(of: windowElement) }
             )
-            guard applied.isSuccess else { return applied }
-
-            if let actual = Self.frame(of: windowElement),
-               !WindowEnumerator.roughlySame(position: actual.origin, expectedPosition: position)
-            {
-                return .failed
-            }
-
-            return .success
+            return outcome == .applied ? .success : .failed
         }
         return result.isSuccess
     }
@@ -294,6 +350,42 @@ public struct LiveWindowControl: WindowControl {
         if running.isHidden {
             _ = running.unhide()
         }
+    }
+
+    /// Final fail-closed check immediately before a geometry transaction.
+    /// Enumeration and mutation are necessarily separate AX operations; a
+    /// Chrome confirmation sheet can appear between them.
+    static func geometryBlockedAtMutationTime(windowID: UInt32, appElement: AXUIElement) -> Bool {
+        func resolvedWindowID(attribute: CFString) -> UInt32? {
+            var ref: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(appElement, attribute, &ref) == .success,
+                  let ref
+            else {
+                return nil
+            }
+            var resolved: CGWindowID = 0
+            guard AXUIElementGetWindowID(ref as! AXUIElement, &resolved) == .success else {
+                return nil
+            }
+            return UInt32(resolved)
+        }
+
+        let focusedWindowID = resolvedWindowID(attribute: kAXFocusedWindowAttribute as CFString)
+        let mainWindowID = resolvedWindowID(attribute: kAXMainWindowAttribute as CFString)
+        return geometryBlockedAtMutationTime(
+            windowID: windowID,
+            focusedWindowID: focusedWindowID,
+            mainWindowID: mainWindowID
+        )
+    }
+
+    static func geometryBlockedAtMutationTime(
+        windowID: UInt32,
+        focusedWindowID: UInt32?,
+        mainWindowID: UInt32?
+    ) -> Bool {
+        guard mainWindowID == windowID else { return false }
+        return focusedWindowID != mainWindowID
     }
 
     static func matchingWindowElement(windowID: UInt32, appElement: AXUIElement) -> AXUIElement? {
@@ -461,5 +553,88 @@ public struct LiveWindowControl: WindowControl {
             return .success
         }
         return .failed
+    }
+}
+
+enum GeometryTransactionOutcome: Equatable, Sendable {
+    case applied
+    case rejectedAndRestored
+    case failedToRestore
+}
+
+/// Compensating geometry transaction shared by the live AX implementation
+/// and deterministic tests. AX setters can return an error after changing the
+/// physical window, so every rejected or mismatched operation restores and
+/// verifies the starting frame before reporting failure.
+enum GeometryTransaction {
+    static func applyFrame(
+        initial: CGRect,
+        requested: ResolvedFrame,
+        setSize: (CGSize) -> Bool,
+        setPosition: (CGPoint) -> Bool,
+        readFrame: () -> CGRect?
+    ) -> GeometryTransactionOutcome {
+        let requestedRect = CGRect(
+            x: requested.x,
+            y: requested.y,
+            width: requested.width,
+            height: requested.height
+        )
+        if roughlySame(initial, requestedRect) {
+            return .applied
+        }
+
+        let accepted = setSize(requestedRect.size)
+            && setPosition(requestedRect.origin)
+            && setSize(requestedRect.size)
+        if accepted, let actual = readFrame(), roughlySame(actual, requestedRect) {
+            return .applied
+        }
+
+        _ = setSize(initial.size)
+        _ = setPosition(initial.origin)
+        _ = setSize(initial.size)
+        guard let restored = readFrame(), roughlySame(restored, initial) else {
+            return .failedToRestore
+        }
+        return .rejectedAndRestored
+    }
+
+    static func applyPosition(
+        initial: CGRect,
+        requested: CGPoint,
+        setPosition: (CGPoint) -> Bool,
+        setSize: (CGSize) -> Bool,
+        readFrame: () -> CGRect?
+    ) -> GeometryTransactionOutcome {
+        let requestedRect = CGRect(origin: requested, size: initial.size)
+        if roughlySame(initial, requestedRect) {
+            return .applied
+        }
+
+        if setPosition(requested),
+           let actual = readFrame(),
+           roughlySame(actual, requestedRect)
+        {
+            return .applied
+        }
+
+        _ = setSize(initial.size)
+        _ = setPosition(initial.origin)
+        _ = setSize(initial.size)
+        guard let restored = readFrame(), roughlySame(restored, initial) else {
+            return .failedToRestore
+        }
+        return .rejectedAndRestored
+    }
+
+    private static func roughlySame(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        roughlySame(lhs.origin, rhs.origin)
+            && abs(lhs.width - rhs.width) <= 2
+            && abs(lhs.height - rhs.height) <= 2
+    }
+
+    private static func roughlySame(_ lhs: CGPoint, _ rhs: CGPoint) -> Bool {
+        abs(lhs.x - rhs.x) <= 2 && abs(lhs.y - rhs.y) <= 2
     }
 }

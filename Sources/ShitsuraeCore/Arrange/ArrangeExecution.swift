@@ -14,6 +14,7 @@ public extension VirtualSpaceEngine {
             config: config
         )
 
+        let observation = control.focusedWindowObservation()
         let plan = ArrangePlanner.buildPlan(
             layoutName: layoutName,
             layout: layout,
@@ -21,7 +22,7 @@ public extension VirtualSpaceEngine {
             config: config.config,
             hostDisplay: hostDisplay,
             displays: displays,
-            currentWindows: control.listAllWindows().filter(WindowEligibility.isManageableForVirtualWorkspace)
+            currentWindows: WindowEligibility.geometryCandidates(in: observation)
         )
 
         return ArrangeDryRunJSON(
@@ -218,7 +219,7 @@ public extension VirtualSpaceEngine {
                 continue
             }
 
-            if !setFrameWithRetry(window: window, frame: step.resolvedFrame) {
+            if !setFrame(window: window, frame: step.resolvedFrame) {
                 softErrors.append(
                     ErrorItem(
                         code: ErrorCode.operationTimedOut.rawValue,
@@ -380,9 +381,10 @@ public extension VirtualSpaceEngine {
             return true
         }
 
-        let inventory = control.windowInventory()
+        let observation = control.focusedWindowObservation()
+        let inventory = observation.inventory
         guard inventory.isAuthoritative else { return false }
-        let windows = inventory.windows.filter(WindowEligibility.isManageableForVirtualWorkspace)
+        let windows = WindowEligibility.geometryCandidates(in: observation)
         // Restore participates in the same global ownership assignment as
         // wait/place. Resolving only the selected hidden entries lets a stale
         // binding borrow a live window that an out-of-scope layout entry owns
@@ -525,14 +527,15 @@ public extension VirtualSpaceEngine {
             // window shifts the index positions and breaks index:2 after
             // index:1 has bound (same bug class as v1's switch path).
             // alreadyBound is enforced after selection instead.
-            let inventory = control.windowInventory()
+            let observation = control.focusedWindowObservation()
+            let inventory = observation.inventory
             guard inventory.isAuthoritative else {
                 let remainingMS = Int(deadline.timeIntervalSinceNow * 1000)
                 if remainingMS <= 0 { break }
                 control.sleep(milliseconds: min(100, remainingMS))
                 continue
             }
-            let manageable = inventory.windows.filter(WindowEligibility.isManageableForVirtualWorkspace)
+            let manageable = WindowEligibility.geometryCandidates(in: observation)
             let entries = registryEntries.map { item -> WindowRegistry.Entry in
                 guard let bound = provisionalBindings[item.fingerprint] else {
                     return item.entry
@@ -596,7 +599,7 @@ public extension VirtualSpaceEngine {
                 // Never steal a sibling while the exact binding is alive. If
                 // the only reason the exact window was excluded is native
                 // fullscreen, return that same identity at the deadline and
-                // let setFrameWithRetry report whether macOS accepts arrange.
+                // let setFrame report whether macOS accepts arrange.
                 if let preferredFullscreenWindow {
                     return preferredFullscreenWindow
                 }
@@ -694,22 +697,13 @@ public extension VirtualSpaceEngine {
         return matched.first(where: { !alreadyBound.contains($0.identity) })
     }
 
-    private func setFrameWithRetry(window: WindowSnapshot, frame: ResolvedFrame) -> Bool {
-        let attempts = 2
-        for current in 0 ..< attempts {
-            if control.setWindowFrame(
-                windowID: window.windowID,
-                pid: window.pid,
-                processStartTime: window.processStartTime,
-                bundleID: window.bundleID,
-                frame: frame
-            ) {
-                return true
-            }
-            if current < attempts - 1 {
-                control.sleep(milliseconds: 100)
-            }
-        }
-        return false
+    private func setFrame(window: WindowSnapshot, frame: ResolvedFrame) -> Bool {
+        control.setWindowFrame(
+            windowID: window.windowID,
+            pid: window.pid,
+            processStartTime: window.processStartTime,
+            bundleID: window.bundleID,
+            frame: frame
+        )
     }
 }

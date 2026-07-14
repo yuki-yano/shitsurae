@@ -119,10 +119,18 @@ public struct WindowInventory: Equatable, Sendable {
 public struct WindowObservation: Equatable, Sendable {
     public let inventory: WindowInventory
     public let focusedIdentity: WindowIdentity?
+    /// Exact kAXMainWindow identity of the focused process. This is distinct
+    /// from focusedIdentity while a sheet or confirmation surface has focus.
+    public let mainIdentity: WindowIdentity?
 
-    public init(inventory: WindowInventory, focusedIdentity: WindowIdentity?) {
+    public init(
+        inventory: WindowInventory,
+        focusedIdentity: WindowIdentity?,
+        mainIdentity: WindowIdentity?
+    ) {
         self.inventory = inventory
         self.focusedIdentity = focusedIdentity
+        self.mainIdentity = mainIdentity
     }
 }
 
@@ -143,8 +151,17 @@ public struct WindowSnapshot: Equatable, Sendable {
     public let pid: Int
     public let processStartTime: UInt64
     public let title: String
-    public let role: String
+    /// Raw AX role. nil means the attribute could not be observed in this
+    /// pass; it must not be replaced with an assumed AXWindow value.
+    public let role: String?
     public let subrole: String?
+    /// Raw kAXModalAttribute. nil means the attribute could not be observed;
+    /// absence is not equivalent to a known non-modal window.
+    public let modal: Bool?
+    /// True when this exact AX main window is protected by a concurrently
+    /// focused companion/unknown surface in the same process. It remains
+    /// state-trackable but must not be a geometry or workspace-move target.
+    public let geometryBlocked: Bool
     /// Whether this CG window has a matching entry in its owning process's
     /// `kAXWindowsAttribute`. CG can expose auxiliary surfaces that are not
     /// actual AX windows; those surfaces must never be managed.
@@ -173,8 +190,10 @@ public struct WindowSnapshot: Equatable, Sendable {
         pid: Int,
         processStartTime: UInt64,
         title: String,
-        role: String = "AXWindow",
-        subrole: String? = nil,
+        role: String?,
+        subrole: String?,
+        modal: Bool?,
+        geometryBlocked: Bool,
         isAXBacked: Bool,
         minimized: Bool,
         hidden: Bool,
@@ -191,6 +210,8 @@ public struct WindowSnapshot: Equatable, Sendable {
         self.title = title
         self.role = role
         self.subrole = subrole
+        self.modal = modal
+        self.geometryBlocked = geometryBlocked
         self.isAXBacked = isAXBacked
         self.minimized = minimized
         self.hidden = hidden
@@ -212,6 +233,28 @@ public struct WindowSnapshot: Equatable, Sendable {
 
     public var handle: WindowHandle {
         WindowHandle(pid: pid, processStartTime: processStartTime, windowID: windowID)
+    }
+
+    func withGeometryBlocked(_ newValue: Bool) -> WindowSnapshot {
+        WindowSnapshot(
+            windowID: windowID,
+            bundleID: bundleID,
+            pid: pid,
+            processStartTime: processStartTime,
+            title: title,
+            role: role,
+            subrole: subrole,
+            modal: modal,
+            geometryBlocked: newValue,
+            isAXBacked: isAXBacked,
+            minimized: minimized,
+            hidden: hidden,
+            frame: frame,
+            displayID: displayID,
+            profileDirectory: profileDirectory,
+            isFullscreen: isFullscreen,
+            frontIndex: frontIndex
+        )
     }
 }
 

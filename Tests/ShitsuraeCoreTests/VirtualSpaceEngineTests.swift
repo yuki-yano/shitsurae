@@ -232,7 +232,7 @@ struct VirtualSpaceEngineTests {
         // mutation, and each such mutation steals key focus to a *sibling* of
         // the target workspace (win2). The early focus on win1 thus gets
         // clobbered after it already succeeded.
-        control.failPositionWindowIDs = [3]
+        control.acceptedButPinnedFrameWindowIDs = [3: control.window(3)!.frame]
         control.stealFocusOnPositionAttempt = 2
 
         let outcome = try await engine.switchSpace(to: 1, config: config)
@@ -257,7 +257,7 @@ struct VirtualSpaceEngineTests {
         // focusing another app while the switch is still settling). Only an OS
         // steal *within* the target workspace should trigger re-focus, so the
         // engine must leave the user's out-of-workspace choice alone.
-        control.failPositionWindowIDs = [3]
+        control.acceptedButPinnedFrameWindowIDs = [3: control.window(3)!.frame]
         control.stealFocusOnPositionAttempt = 3
 
         _ = try await engine.switchSpace(to: 1, config: config)
@@ -439,7 +439,7 @@ struct VirtualSpaceEngineTests {
         #expect(VisibilityPlanner.isHiddenWindowFrame(frame: control.window(1)!.frame, displays: [TestFixtures.display]))
     }
 
-    @Test func quarantineReleasesOnceAppAcceptsMovesAgain() async throws {
+    @Test func quarantinedWindowRemainsHardNoOpWhenAppStartsAcceptingMoves() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
@@ -452,22 +452,27 @@ struct VirtualSpaceEngineTests {
         _ = try await engine.switchSpace(to: 2, config: config)
         _ = try await engine.switchSpace(to: 1, config: config)
 
-        // The app starts honoring geometry writes again (e.g. Chrome's
-        // remote-debug session ended) while the window stays open. The next
-        // switch's best-effort attempt must land AND release the quarantine —
-        // the window cannot stay stuck on every space until Chrome restarts.
+        // The app starts honoring geometry writes again while the window stays
+        // open. Quarantine remains a strict no-op because even a setter that
+        // reports failure may already have moved a Chrome companion surface.
         control.pinnedFrameWindowIDs = [:]
+        let attemptsBefore = control.frameMutationAttemptWindowIDs.filter { $0 == 1 }.count
         let release = try await engine.switchSpace(to: 2, config: config)
         #expect(release.converged)
-        #expect(VisibilityPlanner.isHiddenWindowFrame(frame: control.window(1)!.frame, displays: [TestFixtures.display]))
+        #expect(control.frameMutationAttemptWindowIDs.filter { $0 == 1 }.count == attemptsBefore)
+        #expect(!VisibilityPlanner.isHiddenWindowFrame(
+            frame: control.window(1)!.frame,
+            displays: [TestFixtures.display]
+        ))
 
-        // Fully managed again afterwards: switching back shows it normally.
+        // Ordinary space switches never probe the quarantined identity.
         let back = try await engine.switchSpace(to: 1, config: config)
         #expect(back.converged)
+        #expect(control.frameMutationAttemptWindowIDs.filter { $0 == 1 }.count == attemptsBefore)
         #expect(!VisibilityPlanner.isHiddenWindowFrame(frame: control.window(1)!.frame, displays: [TestFixtures.display]))
     }
 
-    @Test func bestEffortUnknownKeepsConservativeStateAndQuarantine() async throws {
+    @Test func quarantinedWindowDoesNotAttemptGeometryDuringInventoryChanges() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
@@ -476,29 +481,23 @@ struct VirtualSpaceEngineTests {
         _ = try await engine.switchSpace(to: 1, config: config)
         _ = try await engine.switchSpace(to: 2, config: config)
         _ = try await engine.switchSpace(to: 1, config: config)
-        _ = try await engine.switchSpace(to: 2, config: config)
-
         control.pinnedFrameWindowIDs = [:]
+        let attemptsBefore = control.frameMutationAttemptWindowIDs.filter { $0 == 1 }.count
         control.onFrameMutationAttempt = {
             if control.frameMutationAttemptWindowIDs.last == 1 {
                 control.windowInventoryAvailable = false
             }
         }
-        _ = try await engine.switchSpace(to: 1, config: config)
+        _ = try await engine.switchSpace(to: 2, config: config)
 
-        var state = await engine.currentState
+        let state = await engine.currentState
         #expect(state.slots.first { $0.windowID == 1 }?.visibilityState == .hiddenOffscreen)
+        #expect(control.frameMutationAttemptWindowIDs.filter { $0 == 1 }.count == attemptsBefore)
+        #expect(control.windowInventoryAvailable)
 
         control.onFrameMutationAttempt = nil
-        control.windowInventoryAvailable = true
-        _ = try await engine.switchSpace(to: 2, config: config)
         _ = try await engine.switchSpace(to: 1, config: config)
-        state = await engine.currentState
-        #expect(state.slots.first { $0.windowID == 1 }?.visibilityState == .visible)
-        #expect(!VisibilityPlanner.isHiddenWindowFrame(
-            frame: control.window(1)!.frame,
-            displays: [TestFixtures.display]
-        ))
+        #expect(control.frameMutationAttemptWindowIDs.filter { $0 == 1 }.count == attemptsBefore)
     }
 
     @Test func rawOnlyInventoryGapDoesNotReleaseExistingQuarantine() async throws {
@@ -524,7 +523,7 @@ struct VirtualSpaceEngineTests {
         let windowOneAttempts = control.frameMutationAttemptWindowIDs
             .dropFirst(attemptsBefore)
             .filter { $0 == 1 }
-        #expect(windowOneAttempts.count == 1)
+        #expect(windowOneAttempts.isEmpty)
     }
 
     @Test func movingQuarantinedWindowToWorkspaceClearsQuarantine() async throws {
@@ -829,6 +828,281 @@ struct VirtualSpaceEngineTests {
         #expect(textEditEntries.first?.windowID == 21)
         #expect(textEditEntries.first?.spaceID == 1)
         #expect(textEditEntries.first?.lastActivatedAt != nil)
+    }
+
+    @Test func modalFocusDoesNotRebindExistingLayoutEntry() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        await engine.markActivated(window: control.window(1)!)
+        _ = try await engine.switchSpace(to: 2, config: config)
+        let before = await engine.currentState
+        let oldEntry = try #require(before.slots.first { $0.bundleID == "com.apple.TextEdit" })
+        #expect(oldEntry.lastVisibleFrame != nil)
+
+        control.removeWindow(1)
+        let relaunchedMain = TestFixtures.window(
+            id: 21,
+            bundleID: "com.apple.TextEdit",
+            pid: 210,
+            processStartTime: 210_000_000,
+            frame: ResolvedFrame(x: 350, y: 220, width: 780, height: 510),
+            isAXBacked: true
+        )
+        let sheet = TestFixtures.window(
+            id: 22,
+            bundleID: "com.apple.TextEdit",
+            pid: 210,
+            processStartTime: 210_000_000,
+            subrole: "AXSheet",
+            modal: true,
+            isAXBacked: true,
+            frontIndex: 0
+        )
+        control.addWindow(relaunchedMain)
+        control.addWindow(sheet)
+        control.setFocusedWindowID(sheet.windowID)
+        control.setMainWindowID(relaunchedMain.windowID)
+        let attemptsBefore = control.frameMutationAttemptWindowIDs.count
+
+        let outcome = try #require(await engine.processFocusEvent(
+            sequence: 1,
+            windowID: sheet.windowID,
+            pid: sheet.pid,
+            processStartTime: sheet.processStartTime,
+            bundleID: sheet.bundleID,
+            config: config
+        ))
+
+        #expect(outcome.identity == sheet.identity)
+        #expect(outcome.spaceID == nil)
+        #expect(!outcome.didAdopt)
+        #expect(control.frameMutationAttemptWindowIDs.count == attemptsBefore)
+        let after = await engine.currentState
+        let entries = after.slots.filter { $0.bundleID == "com.apple.TextEdit" }
+        #expect(entries.count == 1)
+        #expect(entries.first?.id == oldEntry.id)
+        #expect(entries.first?.boundIdentity == oldEntry.boundIdentity)
+        #expect(entries.first?.spaceID == 1)
+        #expect(entries.first?.visibilityState == oldEntry.visibilityState)
+        #expect(entries.first?.lastVisibleFrame == oldEntry.lastVisibleFrame)
+        #expect(entries.first?.lastHiddenFrame == oldEntry.lastHiddenFrame)
+        #expect(entries.first?.lastActivatedAt == oldEntry.lastActivatedAt)
+    }
+
+    @Test func focusedCompanionProjectsTrackingToExactMainAndBlocksGeometryChanges() async throws {
+        let main = TestFixtures.window(
+            id: 9,
+            bundleID: "com.google.Chrome",
+            pid: 90,
+            processStartTime: 90_000_000,
+            title: "Main",
+            isAXBacked: true,
+            frontIndex: 2
+        )
+        let otherOrdinaryWindow = TestFixtures.window(
+            id: 8,
+            bundleID: "com.google.Chrome",
+            pid: 90,
+            processStartTime: 90_000_000,
+            title: "Other",
+            isAXBacked: true,
+            frontIndex: 1
+        )
+        let confirmationSheet = TestFixtures.window(
+            id: 10,
+            bundleID: "com.google.Chrome",
+            pid: 90,
+            processStartTime: 90_000_000,
+            title: "Confirm",
+            subrole: "AXSheet",
+            modal: true,
+            isAXBacked: true,
+            frontIndex: 0
+        )
+        let (engine, control, url) = makeEngine(
+            windows: standardWindows() + [main, otherOrdinaryWindow, confirmationSheet]
+        )
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+
+        // The main Chrome window already belongs to the current virtual
+        // workspace before the DevTools confirmation sheet appears.
+        control.setFocusedWindowID(main.windowID)
+        control.setMainWindowID(main.windowID)
+        let initial = try #require(await engine.processFocusEvent(
+            sequence: 1,
+            windowID: main.windowID,
+            pid: main.pid,
+            processStartTime: main.processStartTime,
+            bundleID: main.bundleID,
+            config: config
+        ))
+        #expect(initial.didAdopt)
+
+        control.setFocusedWindowID(confirmationSheet.windowID)
+        control.setMainWindowID(main.windowID)
+        let outcome = try #require(await engine.processFocusEvent(
+            sequence: 2,
+            windowID: confirmationSheet.windowID,
+            pid: confirmationSheet.pid,
+            processStartTime: confirmationSheet.processStartTime,
+            bundleID: confirmationSheet.bundleID,
+            config: config
+        ))
+
+        #expect(outcome.identity == confirmationSheet.identity)
+        #expect(outcome.spaceID == 1)
+        #expect(!outcome.didAdopt)
+        var state = await engine.currentState
+        let chromeEntries = state.slots.filter { $0.bundleID == "com.google.Chrome" }
+        #expect(chromeEntries.count == 1)
+        #expect(chromeEntries.first?.boundIdentity == main.identity)
+        #expect(chromeEntries.first?.lastActivatedAt != nil)
+
+        // Freshness always compares the real focused sheet, not its projected
+        // main. A continuation carrying the main identity is stale.
+        #expect(try await engine.switchSpaceForFocusEvent(
+            sequence: 2,
+            identity: main.identity,
+            to: 2,
+            config: config
+        ) == nil)
+
+        let attemptsBefore = control.frameMutationAttemptWindowIDs.count
+        var switchWasBlocked = false
+        do {
+            _ = try await engine.switchSpaceForFocusEvent(
+                sequence: 2,
+                identity: confirmationSheet.identity,
+                to: 2,
+                config: config
+            )
+        } catch {
+            switchWasBlocked = true
+        }
+        #expect(switchWasBlocked)
+
+        var moveWasBlocked = false
+        do {
+            _ = try await engine.moveWindowToWorkspace(window: main, toSpaceID: 2, config: config)
+        } catch {
+            moveWasBlocked = true
+        }
+        #expect(moveWasBlocked)
+        #expect(control.frameMutationAttemptWindowIDs.count == attemptsBefore)
+
+        state = await engine.currentState
+        #expect(state.primaryActiveSpaceID == 1)
+        #expect(state.slots.first { $0.boundIdentity == main.identity }?.spaceID == 1)
+        #expect(!state.slots.contains { $0.boundIdentity == otherOrdinaryWindow.identity })
+    }
+
+    @Test func focusedUnknownBlocksExactMainWithoutTrackingMutation() async throws {
+        let main = TestFixtures.window(
+            id: 9,
+            bundleID: "com.google.Chrome",
+            pid: 90,
+            processStartTime: 90_000_000,
+            isAXBacked: true
+        )
+        let unknown = TestFixtures.window(
+            id: 10,
+            bundleID: "com.google.Chrome",
+            pid: 90,
+            processStartTime: 90_000_000,
+            role: nil,
+            subrole: nil,
+            modal: nil,
+            isAXBacked: true,
+            frontIndex: 0
+        )
+        let (engine, control, url) = makeEngine(windows: standardWindows() + [main, unknown])
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+
+        control.setFocusedWindowID(unknown.windowID)
+        control.setMainWindowID(main.windowID)
+        #expect(await engine.processFocusEvent(
+            sequence: 1,
+            windowID: unknown.windowID,
+            pid: unknown.pid,
+            processStartTime: unknown.processStartTime,
+            bundleID: unknown.bundleID,
+            config: config
+        ) == nil)
+
+        let state = await engine.currentState
+        #expect(!state.slots.contains { $0.bundleID == "com.google.Chrome" })
+        #expect(await engine.resolveTargetWindow(selector: WindowTargetSelector(
+            windowID: main.windowID,
+            pid: main.pid,
+            processStartTime: main.processStartTime,
+            bundleID: main.bundleID
+        )) == nil)
+    }
+
+    @Test func untrackedCompanionBlocksSwitchUntilItClosesThenAdoptsExactMain() async throws {
+        let main = TestFixtures.window(
+            id: 9,
+            bundleID: "com.google.Chrome",
+            pid: 90,
+            processStartTime: 90_000_000,
+            title: "New Chrome window",
+            isAXBacked: true
+        )
+        let sheet = TestFixtures.window(
+            id: 10,
+            bundleID: "com.google.Chrome",
+            pid: 90,
+            processStartTime: 90_000_000,
+            title: "DevTools confirmation",
+            subrole: "AXSheet",
+            modal: true,
+            isAXBacked: true,
+            frontIndex: 0
+        )
+        let (engine, control, url) = makeEngine(windows: standardWindows() + [main, sheet])
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+
+        control.setFocusedWindowID(sheet.windowID)
+        control.setMainWindowID(main.windowID)
+        let focusOutcome = try #require(await engine.processFocusEvent(
+            sequence: 1,
+            windowID: sheet.windowID,
+            pid: sheet.pid,
+            processStartTime: sheet.processStartTime,
+            bundleID: sheet.bundleID,
+            config: config
+        ))
+        #expect(focusOutcome.spaceID == nil)
+        #expect(!focusOutcome.didAdopt)
+        #expect(!(await engine.currentState).slots.contains { $0.bundleID == main.bundleID })
+
+        let attemptsBefore = control.frameMutationAttemptWindowIDs.count
+        await #expect(throws: VirtualSpaceEngineError.self) {
+            _ = try await engine.switchSpace(to: 2, config: config)
+        }
+        #expect(control.frameMutationAttemptWindowIDs.count == attemptsBefore)
+        #expect((await engine.currentState).primaryActiveSpaceID == 1)
+
+        control.removeWindow(sheet.windowID)
+        control.setFocusedWindowID(main.windowID)
+        control.setMainWindowID(main.windowID)
+        let resumed = try #require(await engine.processFocusEvent(
+            sequence: 2,
+            windowID: main.windowID,
+            pid: main.pid,
+            processStartTime: main.processStartTime,
+            bundleID: main.bundleID,
+            config: config
+        ))
+        #expect(resumed.didAdopt)
+        #expect(resumed.spaceID == 1)
+        #expect(try await engine.switchSpace(to: 2, config: config).didChangeSpace)
+        #expect((await engine.currentState).primaryActiveSpaceID == 2)
     }
 
     @Test func focusEventRejectsBackgroundOrStaleIdentityBeforeStateMutation() async throws {
@@ -1323,6 +1597,7 @@ struct VirtualSpaceEngineTests {
         control.windowListSequence = [
             tail + [backed], // selector
             tail + [backed], // tracking and assignment
+            tail + [backed], // final companion-safety preflight
             tail + [invisible], // convergence after the move started
         ]
 

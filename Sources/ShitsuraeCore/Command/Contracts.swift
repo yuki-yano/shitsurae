@@ -14,8 +14,9 @@ public struct WindowCurrentJSON: Codable, Equatable, Sendable {
     public let spaceID: Int?
     public let activeSpaceID: Int?
     public let displayID: String
-    public let role: String
+    public let role: String?
     public let subrole: String?
+    public let isModal: Bool?
     public let isMinimized: Bool
     public let frame: ResolvedFrame
     public let slot: Int?
@@ -30,8 +31,9 @@ public struct WindowCurrentJSON: Codable, Equatable, Sendable {
         spaceID: Int?,
         activeSpaceID: Int?,
         displayID: String,
-        role: String,
+        role: String?,
         subrole: String?,
+        isModal: Bool?,
         isMinimized: Bool,
         frame: ResolvedFrame,
         slot: Int?
@@ -48,6 +50,7 @@ public struct WindowCurrentJSON: Codable, Equatable, Sendable {
         self.displayID = displayID
         self.role = role
         self.subrole = subrole
+        self.isModal = isModal
         self.isMinimized = isMinimized
         self.frame = frame
         self.slot = slot

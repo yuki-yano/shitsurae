@@ -18,11 +18,6 @@ public struct SpaceSwitchPlan: Equatable, Sendable {
     public let shows: [VisibilityPlan]
     /// Hide plans for windows of other workspaces on the host display.
     public let hides: [VisibilityPlan]
-    /// Single-attempt plans for quarantined windows: applied once per switch
-    /// with no retries and no convergence accounting, so a stuck window keeps
-    /// getting a cheap chance to land (and leave quarantine) without pinning
-    /// convergence or slowing the switch.
-    public let bestEffort: [VisibilityPlan]
     /// Windows to try focusing after switching, in MRU fallback order.
     public let focusCandidates: [BoundWindow]
     /// The window to focus after switching (MRU within the target workspace).
@@ -73,15 +68,12 @@ public enum SpaceSwitchPlanner {
 
         var targets: [BoundWindow] = []
         var others: [BoundWindow] = []
-        var quarantined: [BoundWindow] = []
         for (entryID, window) in resolution.assignments {
             guard let entry = entryByID[entryID] else { continue }
-            // Quarantined windows are ones an app refused to move; keep them
-            // out of the converged plan (no retries/focus) but still give them
-            // one best-effort attempt per switch so they recover as soon as
-            // the app starts honoring geometry writes again.
+            // Quarantined windows are ones an app refused to move. Keep them
+            // out of geometry and focus planning until an explicit user move
+            // clears quarantine or the exact identity disappears.
             if quarantinedWindowIdentities.contains(window.identity) {
-                quarantined.append(BoundWindow(entry: entry, window: window))
                 continue
             }
             if entry.spaceID == targetSpaceID {
@@ -124,23 +116,6 @@ public enum SpaceSwitchPlanner {
                 )
             }
 
-        let bestEffort = quarantined
-            .filter { bound in
-                bound.entry.spaceID == targetSpaceID
-                    || (bound.window.displayID ?? bound.entry.displayID) == hostDisplay.id
-            }
-            .sorted(by: switchOrdering)
-            .compactMap { bound in
-                VisibilityPlanner.plan(
-                    entry: bound.entry,
-                    window: bound.window,
-                    transition: bound.entry.spaceID == targetSpaceID ? .show : .hide,
-                    layout: layout,
-                    hostDisplay: hostDisplay,
-                    displays: displays
-                )
-            }
-
         let unresolvedEntries = resolution.unresolved.compactMap { entryByID[$0] }
         let unresolvedSlots = unresolvedEntries
             .filter { $0.origin == .layout }
@@ -166,7 +141,6 @@ public enum SpaceSwitchPlanner {
             targetSpaceID: targetSpaceID,
             shows: shows,
             hides: hides,
-            bestEffort: bestEffort,
             focusCandidates: focusCandidates,
             focusTarget: focusCandidates.first,
             unresolvedSlots: unresolvedSlots,

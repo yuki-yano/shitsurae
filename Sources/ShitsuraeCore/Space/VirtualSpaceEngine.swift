@@ -49,14 +49,12 @@ public actor VirtualSpaceEngine {
     var latestFocusEventSequence: UInt64 = 0
     private static let focusVerificationDelaysMS = [20, 40, 80]
 
-    /// Windows an app refuses to move (Chrome remote-debug popups, dialogs).
+    /// Windows an app refuses to move.
     /// Tracked in memory only — a per-window count of consecutive switches
     /// that left the window unconverged; once it reaches the threshold the
     /// window is quarantined so it stops pinning convergence and dragging
-    /// every switch through the retry budget. Quarantined windows still get
-    /// one best-effort attempt per switch; the first accepted write releases
-    /// the quarantine, so a window stuck only transiently (e.g. Chrome under
-    /// remote-debug automation) is managed again without an app restart.
+    /// every switch through the retry budget. A quarantined window is a hard
+    /// no-op until an explicit user move clears it or the exact window closes.
     private var convergenceFailureCounts: [WindowIdentity: Int] = [:]
     private var quarantinedWindowIdentities: Set<WindowIdentity> = []
     private static let quarantineThreshold = 3
@@ -174,13 +172,26 @@ public actor VirtualSpaceEngine {
             )
         }
 
-        let inventory = control.windowInventory()
+        let observation = control.focusedWindowObservation()
+        let inventory = observation.inventory
         guard inventory.isAuthoritative else {
             throw VirtualSpaceEngineError.stateError("window inventory unavailable")
         }
 
         let allWindows = inventory.windows
-        let windows = allWindows.filter(WindowEligibility.isManageableForVirtualWorkspace)
+        let windows = WindowEligibility.geometryCandidates(in: observation)
+        let blockedIdentities = WindowEligibility.geometryBlockedIdentities(in: observation)
+        let affectedSpaceIDs = Set([previousSpaceID, targetSpaceID].compactMap { $0 })
+        let hasBlockedTrackedWindow = state.slots(layoutName: layoutName).contains { entry in
+            affectedSpaceIDs.contains(entry.spaceID)
+                && entry.boundIdentity.map(blockedIdentities.contains) == true
+        }
+        let focusedMainIsBlocked = observation.mainIdentity.map(blockedIdentities.contains) == true
+        if hasBlockedTrackedWindow || focusedMainIsBlocked {
+            throw VirtualSpaceEngineError.stateError(
+                "a tracked window has a focused companion surface"
+            )
+        }
 
         // A CG inventory can be authoritative about liveness while the AX
         // view needed for safe mutations is temporarily incomplete. Resolve
@@ -272,7 +283,7 @@ public actor VirtualSpaceEngine {
             quarantinedWindowIdentities: quarantinedWindowIdentities
         )
 
-        let allVisibilityPlans = plan.shows + plan.hides + plan.bestEffort
+        let allVisibilityPlans = plan.shows + plan.hides
         let hasPhysicalMutation = allVisibilityPlans.contains { $0.mutation != .none }
         if hasPhysicalMutation {
             // Persist the desired visibility and exact bindings before the
@@ -319,10 +330,9 @@ public actor VirtualSpaceEngine {
             try persist(intentState)
         }
 
-        let standardPlans = plan.shows + plan.hides
         let mutationFreePlans = allVisibilityPlans.filter { $0.mutation == .none }
         let applied = VisibilityApplier.apply(
-            plans: standardPlans.filter { $0.mutation != .none },
+            plans: allVisibilityPlans.filter { $0.mutation != .none },
             control: control,
             logger: logger
         )
@@ -339,24 +349,6 @@ public actor VirtualSpaceEngine {
             retryDelaysMS: retryDelaysMS
         )
         updateQuarantine(plannedChanges: applied, convergence: convergence)
-
-        // Quarantined windows: one attempt, no retries, no convergence
-        // accounting — and after the early focus so a slow AX call can't delay
-        // keyboard focus. An accepted write means the app honors geometry
-        // again (e.g. Chrome's remote-debug session ended): release the
-        // quarantine so the window is fully managed from the next switch.
-        let bestEffortApplied = VisibilityApplier.apply(
-            plans: plan.bestEffort.filter { $0.mutation != .none },
-            control: control,
-            logger: logger
-        )
-        let bestEffortConvergence = VisibilityApplier.converge(
-            changes: bestEffortApplied,
-            control: control,
-            logger: logger,
-            retryDelaysMS: []
-        )
-        releaseQuarantine(bestEffortConvergence: bestEffortConvergence)
 
         // The early focus can fail while the window is still settling, or it
         // can succeed and then be clobbered: convergence (and the OS settling
@@ -381,10 +373,7 @@ public actor VirtualSpaceEngine {
         }
 
         // Persist: merge effective entries back by id, update active space,
-        // record pending convergence when not fully converged. Best-effort
-        // changes carry the desired entry on an accepted write and the
-        // original on a refused one, so merging them can never make the
-        // persisted state lie about a window the app kept pinned.
+        // and record pending convergence when not fully converged.
         var newState = state
         var slotsByID = Dictionary(uniqueKeysWithValues: newState.slots.map { ($0.id, $0) })
         // `.none` is an intentional no-op (currently a manually minimized
@@ -396,16 +385,7 @@ public actor VirtualSpaceEngine {
         let unsafeToMerge = Set(
             convergence.unverifiedWindowIdentities + convergence.unconvergedWindowIdentities
         )
-        let unsafeBestEffortToMerge = Set(
-            bestEffortConvergence.unverifiedWindowIdentities
-                + bestEffortConvergence.unconvergedWindowIdentities
-        )
         for change in convergence.changes where !unsafeToMerge.contains(change.window.identity) {
-            slotsByID[change.effectiveEntry.id] = change.effectiveEntry
-        }
-        for change in bestEffortConvergence.changes
-            where !unsafeBestEffortToMerge.contains(change.window.identity)
-        {
             slotsByID[change.effectiveEntry.id] = change.effectiveEntry
         }
         if let focusedIdentity,
@@ -592,11 +572,12 @@ public actor VirtualSpaceEngine {
         guard let layoutName = state.activeLayoutName else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
-        let inventory = control.windowInventory()
+        let observation = control.focusedWindowObservation()
+        let inventory = observation.inventory
         guard inventory.isAuthoritative else {
             throw VirtualSpaceEngineError.stateError("window inventory unavailable")
         }
-        let manageable = inventory.windows.filter(WindowEligibility.isManageableForVirtualWorkspace)
+        let manageable = WindowEligibility.geometryCandidates(in: observation)
         guard let freshWindow = manageable.first(where: { $0.identity == window.identity }) else {
             throw VirtualSpaceEngineError.windowNotTracked
         }
@@ -620,8 +601,8 @@ public actor VirtualSpaceEngine {
     }
 
     /// Transactional move primitive. `trackedEntry` and `window` must come
-    /// from the same inventory resolution. It never re-enumerates; physical
-    /// moves use a write-ahead persist followed by a converged final persist.
+    /// from the same inventory resolution. It performs one final companion-
+    /// safety observation before the write-ahead persist and physical move.
     func moveResolvedWindowToWorkspace(
         window: WindowSnapshot,
         trackedEntry: SlotEntry,
@@ -629,6 +610,14 @@ public actor VirtualSpaceEngine {
         config: LoadedConfig
     ) throws -> WorkspaceMoveOutcome {
         try ensureAccessibility()
+        let observation = control.focusedWindowObservation()
+        guard observation.inventory.isAuthoritative,
+              WindowEligibility.geometryCandidates(in: observation).contains(where: {
+                  $0.identity == window.identity
+              })
+        else {
+            throw VirtualSpaceEngineError.windowNotTracked
+        }
         guard let layoutName = state.activeLayoutName else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
@@ -1008,15 +997,12 @@ public actor VirtualSpaceEngine {
             else {
                 return nil
             }
-            // Only an AX-backed window can be judged ineligible with
-            // authority (helper-UI policy, subrole). A CG-alive window that
-            // is missing from its process's AX list is unknown — transient
-            // AX failure, another native Space, a minimized state the app
-            // stops reporting — and must never cost the entry its membership.
-            guard window.isAXBacked else {
-                return nil
-            }
-            return WindowEligibility.isManageableForVirtualWorkspace(window) ? nil : entry.id
+            // Only a definite companion can invalidate an adopted entry.
+            // Missing AX backing or any missing classification attribute is
+            // unknown and must preserve existing workspace membership.
+            return WindowEligibility.classification(of: window) == .companion
+                ? entry.id
+                : nil
         })
     }
 
@@ -1033,10 +1019,8 @@ public actor VirtualSpaceEngine {
 
     /// Counts consecutive unconverged switches per window and quarantines a
     /// window once it crosses the threshold. A window that converges resets its
-    /// count; quarantined windows leave the converged plan and only reappear
-    /// here after a best-effort attempt succeeds (releaseQuarantine), an
-    /// explicit workspace move clears them, or they close (pruned by windowID
-    /// in switchSpace).
+    /// count; quarantined windows leave geometry planning until an explicit
+    /// workspace move clears them or they close.
     private func updateQuarantine(
         plannedChanges: [AppliedVisibilityChange],
         convergence: ConvergenceOutcome
@@ -1065,32 +1049,6 @@ public actor VirtualSpaceEngine {
                     ]
                 )
             }
-        }
-    }
-
-    /// Releases the quarantine for windows whose best-effort attempt was
-    /// accepted (effective == desired): the app honors geometry writes again,
-    /// so the window goes back to normal planning from the next switch.
-    private func releaseQuarantine(bestEffortConvergence: ConvergenceOutcome) {
-        let unverified = Set(bestEffortConvergence.unverifiedWindowIdentities)
-        let unresolved = Set(bestEffortConvergence.desiredUnresolvedWindowIdentities)
-        let unconverged = Set(bestEffortConvergence.unconvergedWindowIdentities)
-        for change in bestEffortConvergence.changes
-            where change.effectiveEntry == change.desiredEntry
-                && !unverified.contains(change.window.identity)
-                && !unresolved.contains(change.window.identity)
-                && !unconverged.contains(change.window.identity)
-        {
-            let identity = change.window.identity
-            guard quarantinedWindowIdentities.remove(identity) != nil else { continue }
-            convergenceFailureCounts[identity] = 0
-            logger.log(
-                event: "visibility.quarantine.released",
-                fields: [
-                    "windowID": Int(identity.windowID),
-                    "bundleID": change.window.bundleID,
-                ]
-            )
         }
     }
 

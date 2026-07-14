@@ -18,6 +18,9 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     /// can never match the desired *or* the rolled-back state — it stays
     /// unconverged forever.
     var pinnedFrameWindowIDs: [UInt32: ResolvedFrame] = [:]
+    /// Models an accepted asynchronous write that has not physically landed
+    /// yet. Convergence may retry it, which is useful for focus-settling races.
+    var acceptedButPinnedFrameWindowIDs: [UInt32: ResolvedFrame] = [:]
     var failUnminimizeWindowIDs: Set<UInt32> = []
     var failFocusWindowIDs: Set<UInt32> = []
     var failFocusAttemptsRemainingByWindowID: [UInt32: Int] = [:]
@@ -28,6 +31,7 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     var stealFocusOnPositionAttempt: UInt32?
     private(set) var focusedWindowIDs: [UInt32] = []
     private var focusedWindowIdentity: WindowIdentity?
+    private var mainWindowIdentity: WindowIdentity?
     private(set) var activatedBundles: [String] = []
     /// Every setWindowFrame/setWindowPosition attempt, successful or not —
     /// lets tests assert that unmanageable windows are never even targeted.
@@ -61,10 +65,18 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         if let id {
             focusedWindowIDs.append(id)
             focusedWindowIdentity = windowsByID[id]?.identity
+            mainWindowIdentity = focusedWindowIdentity
         } else {
             focusedWindowIDs.removeAll()
             focusedWindowIdentity = nil
+            mainWindowIdentity = nil
         }
+    }
+
+    func setMainWindowID(_ id: UInt32?) {
+        lock.lock()
+        defer { lock.unlock() }
+        mainWindowIdentity = id.flatMap { windowsByID[$0]?.identity }
     }
 
     /// Simulates a window closing (app quit etc.).
@@ -133,7 +145,14 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         let focusedIdentity = focusedWindowIdentity.flatMap { identity in
             windowsByID[identity.windowID]?.identity == identity ? identity : nil
         }
-        return WindowObservation(inventory: inventory, focusedIdentity: focusedIdentity)
+        let mainIdentity = mainWindowIdentity.flatMap { identity in
+            windowsByID[identity.windowID]?.identity == identity ? identity : nil
+        }
+        return WindowObservation(
+            inventory: inventory,
+            focusedIdentity: focusedIdentity,
+            mainIdentity: mainIdentity
+        )
     }
 
     func onScreenWindowIdentities() -> Set<WindowIdentity> {
@@ -183,6 +202,10 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         else {
             return false
         }
+        if let pinned = acceptedButPinnedFrameWindowIDs[windowID] {
+            windowsByID[windowID] = window.withFrame(pinned)
+            return true
+        }
         if let pinned = pinnedFrameWindowIDs[windowID] {
             windowsByID[windowID] = window.withFrame(pinned)
             return false
@@ -216,6 +239,10 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         if let thief = stealFocusOnPositionAttempt {
             focusedWindowIDs.append(thief)
             focusedWindowIdentity = windowsByID[thief]?.identity
+        }
+        if let pinned = acceptedButPinnedFrameWindowIDs[windowID] {
+            windowsByID[windowID] = window.withFrame(pinned)
+            return true
         }
         if let pinned = pinnedFrameWindowIDs[windowID] {
             windowsByID[windowID] = window.withFrame(pinned)
@@ -318,6 +345,8 @@ extension WindowSnapshot {
             title: title,
             role: role,
             subrole: subrole,
+            modal: modal,
+            geometryBlocked: geometryBlocked,
             isAXBacked: newValue,
             minimized: minimized,
             hidden: hidden,
@@ -338,6 +367,8 @@ extension WindowSnapshot {
             title: title,
             role: role,
             subrole: subrole,
+            modal: modal,
+            geometryBlocked: geometryBlocked,
             isAXBacked: isAXBacked,
             minimized: minimized,
             hidden: hidden,
@@ -358,6 +389,8 @@ extension WindowSnapshot {
             title: title,
             role: role,
             subrole: subrole,
+            modal: modal,
+            geometryBlocked: geometryBlocked,
             isAXBacked: isAXBacked,
             minimized: newValue,
             hidden: hidden,
@@ -388,8 +421,10 @@ enum TestFixtures {
         processStartTime: UInt64? = nil,
         title: String = "win",
         frame: ResolvedFrame = ResolvedFrame(x: 10, y: 10, width: 700, height: 400),
-        role: String = "AXWindow",
-        subrole: String? = nil,
+        role: String? = "AXWindow",
+        subrole: String? = "AXStandardWindow",
+        modal: Bool? = false,
+        geometryBlocked: Bool = false,
         isAXBacked: Bool,
         minimized: Bool = false,
         isFullscreen: Bool = false,
@@ -404,6 +439,8 @@ enum TestFixtures {
             title: title,
             role: role,
             subrole: subrole,
+            modal: modal,
+            geometryBlocked: geometryBlocked,
             isAXBacked: isAXBacked,
             minimized: minimized,
             hidden: false,

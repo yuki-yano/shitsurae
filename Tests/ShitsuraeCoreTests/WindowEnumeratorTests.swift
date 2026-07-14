@@ -69,7 +69,7 @@ struct WindowEnumeratorTests {
         ]
     }
 
-    @Test func buildsSnapshotsWithMinimizedAndSubroleFromResolver() {
+    @Test func buildsSnapshotsWithRawAXClassificationAttributesFromResolver() {
         let raw = [
             rawWindow(id: 1, pid: 100),
             rawWindow(id: 2, pid: 100),
@@ -84,7 +84,9 @@ struct WindowEnumeratorTests {
                 return WindowEnumerator.WindowAXInfo(
                     axBackedWindowIDs: [ax(100, 1), ax(100, 2)],
                     minimized: [ax(100, 2)],
-                    subroles: [ax(100, 1): "AXStandardWindow", ax(100, 2): "AXDialog"]
+                    roles: [ax(100, 1): "AXWindow", ax(100, 2): "AXWindow"],
+                    subroles: [ax(100, 1): "AXStandardWindow", ax(100, 2): "AXDialog"],
+                    modals: [ax(100, 1): false, ax(100, 2): true]
                 )
             }
         )
@@ -93,8 +95,72 @@ struct WindowEnumeratorTests {
         #expect(snapshots.first { $0.windowID == 1 }?.minimized == false)
         #expect(snapshots.first { $0.windowID == 2 }?.minimized == true)
         #expect(snapshots.allSatisfy { $0.isAXBacked })
+        #expect(snapshots.first { $0.windowID == 1 }?.role == "AXWindow")
         #expect(snapshots.first { $0.windowID == 1 }?.subrole == "AXStandardWindow")
+        #expect(snapshots.first { $0.windowID == 1 }?.modal == false)
         #expect(snapshots.first { $0.windowID == 2 }?.subrole == "AXDialog")
+        #expect(snapshots.first { $0.windowID == 2 }?.modal == true)
+    }
+
+    @Test func focusedCompanionBlocksOnlyItsExactProcessMainWindow() {
+        let chromeBundleID = "com.google.Chrome"
+        let main = ax(100, 1, bundleID: chromeBundleID)
+        let sheet = ax(100, 2, bundleID: chromeBundleID)
+        let siblingProcessMain = ax(200, 3, bundleID: chromeBundleID)
+        let snapshots = WindowEnumerator.buildSnapshots(
+            rawWindowInfo: [
+                rawWindow(id: 1, pid: 100, title: "Main"),
+                rawWindow(id: 2, pid: 100, title: "Confirm"),
+                rawWindow(id: 3, pid: 200, title: "Other Chrome"),
+            ],
+            displays: [display],
+            appResolver: { pid in app(chromeBundleID, pid: pid) },
+            windowAXInfoResolver: { _ in
+                WindowEnumerator.WindowAXInfo(
+                    axBackedWindowIDs: [main, sheet, siblingProcessMain],
+                    roles: [main: "AXWindow", sheet: "AXWindow", siblingProcessMain: "AXWindow"],
+                    subroles: [
+                        main: "AXStandardWindow",
+                        sheet: "AXSheet",
+                        siblingProcessMain: "AXStandardWindow",
+                    ],
+                    modals: [main: false, sheet: true, siblingProcessMain: false],
+                    focusedWindowIdentities: [sheet, siblingProcessMain],
+                    mainWindowIdentities: [main, siblingProcessMain]
+                )
+            }
+        )
+
+        #expect(snapshots.first { $0.identity == main }?.geometryBlocked == true)
+        #expect(snapshots.first { $0.identity == sheet }?.geometryBlocked == false)
+        #expect(snapshots.first { $0.identity == siblingProcessMain }?.geometryBlocked == false)
+        #expect(snapshots.first { $0.identity == siblingProcessMain }
+            .map(WindowEligibility.isManageableForVirtualWorkspace) == true)
+    }
+
+    @Test func missingFocusedCGSnapshotStillBlocksExactMainWindow() {
+        let chromeBundleID = "com.google.Chrome"
+        let main = ax(100, 1, bundleID: chromeBundleID)
+        let missingSheet = ax(100, 2, bundleID: chromeBundleID)
+        let snapshots = WindowEnumerator.buildSnapshots(
+            rawWindowInfo: [rawWindow(id: 1, pid: 100, title: "Main")],
+            displays: [display],
+            appResolver: { pid in app(chromeBundleID, pid: pid) },
+            windowAXInfoResolver: { _ in
+                WindowEnumerator.WindowAXInfo(
+                    axBackedWindowIDs: [main],
+                    roles: [main: "AXWindow"],
+                    subroles: [main: "AXStandardWindow"],
+                    modals: [main: false],
+                    focusedWindowIdentities: [missingSheet],
+                    mainWindowIdentities: [main]
+                )
+            }
+        )
+
+        #expect(snapshots.first?.identity == main)
+        #expect(snapshots.first?.geometryBlocked == true)
+        #expect(snapshots.first.map(WindowEligibility.isManageableForVirtualWorkspace) == false)
     }
 
     @Test func skipsNonZeroLayersAndZeroSizeWindows() {
@@ -248,10 +314,15 @@ struct WindowEnumeratorTests {
                         ax(200, 2, bundleID: "com.example.200"),
                     ],
                     minimized: [ax(200, 1, bundleID: "com.example.200")],
+                    roles: [
+                        ax(200, 1, bundleID: "com.example.200"): "AXWindow",
+                        ax(200, 2, bundleID: "com.example.200"): "AXWindow",
+                    ],
                     subroles: [
                         ax(200, 1, bundleID: "com.example.200"): "AXDialog",
                         ax(200, 2, bundleID: "com.example.200"): "AXStandardWindow",
-                    ]
+                    ],
+                    modals: [ax(200, 1, bundleID: "com.example.200"): true]
                 )
             }
         )
@@ -259,7 +330,9 @@ struct WindowEnumeratorTests {
         let oldOwner = snapshots.first { $0.pid == 100 }
         #expect(oldOwner?.isAXBacked == false)
         #expect(oldOwner?.minimized == false)
+        #expect(oldOwner?.role == nil)
         #expect(oldOwner?.subrole == nil)
+        #expect(oldOwner?.modal == nil)
         let currentOwner = snapshots.first { $0.pid == 200 }
         #expect(currentOwner?.isAXBacked == true)
         #expect(currentOwner?.subrole == "AXStandardWindow")
@@ -276,14 +349,18 @@ struct WindowEnumeratorTests {
                 return WindowEnumerator.WindowAXInfo(
                     axBackedWindowIDs: [ax(100, 1, bundleID: "com.example.New")],
                     minimized: [ax(100, 1, bundleID: "com.example.New")],
-                    subroles: [ax(100, 1, bundleID: "com.example.New"): "AXDialog"]
+                    roles: [ax(100, 1, bundleID: "com.example.New"): "AXWindow"],
+                    subroles: [ax(100, 1, bundleID: "com.example.New"): "AXDialog"],
+                    modals: [ax(100, 1, bundleID: "com.example.New"): true]
                 )
             }
         )
 
         #expect(snapshots.first?.isAXBacked == false)
         #expect(snapshots.first?.minimized == false)
+        #expect(snapshots.first?.role == nil)
         #expect(snapshots.first?.subrole == nil)
+        #expect(snapshots.first?.modal == nil)
     }
 
     @Test func axMetadataNeverCrossesProcessGenerationWithinReusedPID() {
@@ -303,14 +380,18 @@ struct WindowEnumeratorTests {
                 return WindowEnumerator.WindowAXInfo(
                     axBackedWindowIDs: [staleIdentity],
                     minimized: [staleIdentity],
-                    subroles: [staleIdentity: "AXDialog"]
+                    roles: [staleIdentity: "AXWindow"],
+                    subroles: [staleIdentity: "AXDialog"],
+                    modals: [staleIdentity: true]
                 )
             }
         )
 
         #expect(snapshots.first?.isAXBacked == false)
         #expect(snapshots.first?.minimized == false)
+        #expect(snapshots.first?.role == nil)
         #expect(snapshots.first?.subrole == nil)
+        #expect(snapshots.first?.modal == nil)
     }
 
     @Test func rawCGHandlesIncludeRecordsDroppedFromSnapshots() {
@@ -340,6 +421,10 @@ struct WindowEnumeratorTests {
             pid: 200,
             processStartTime: 200_000_000,
             title: "DevTools helper",
+            role: "AXWindow",
+            subrole: "AXStandardWindow",
+            modal: false,
+            geometryBlocked: false,
             isAXBacked: true,
             minimized: false,
             hidden: false,
@@ -354,6 +439,10 @@ struct WindowEnumeratorTests {
             pid: 100,
             processStartTime: 100_000_000,
             title: "Main Chrome",
+            role: "AXWindow",
+            subrole: "AXStandardWindow",
+            modal: false,
+            geometryBlocked: false,
             isAXBacked: true,
             minimized: false,
             hidden: false,
@@ -382,6 +471,10 @@ struct WindowEnumeratorTests {
             pid: 200,
             processStartTime: 200_000_000,
             title: "DevTools helper",
+            role: "AXWindow",
+            subrole: "AXStandardWindow",
+            modal: false,
+            geometryBlocked: false,
             isAXBacked: true,
             minimized: false,
             hidden: false,

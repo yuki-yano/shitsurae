@@ -32,8 +32,10 @@ public enum PolicyEngine {
                 ?? windowDefinition.match.title?.contains
                 ?? windowDefinition.match.title?.regex
                 ?? "",
-            role: windowDefinition.match.role ?? "AXWindow",
+            role: windowDefinition.match.role,
             subrole: windowDefinition.match.subrole,
+            modal: nil,
+            geometryBlocked: false,
             isAXBacked: false,
             minimized: false,
             hidden: false,

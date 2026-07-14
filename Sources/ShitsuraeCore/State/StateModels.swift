@@ -166,6 +166,16 @@ public struct SlotEntry: Codable, Equatable, Sendable {
     /// placement fields are untouched.
     public func bound(to window: WindowSnapshot) -> SlotEntry {
         var copy = self
+        if let previousIdentity = boundIdentity, previousIdentity != window.identity {
+            // Geometry and MRU belong to one concrete window, not to the
+            // bundle-level layout rule. Carrying them across a legitimate
+            // layout rebind is how a transient Chrome sheet can resize or
+            // reposition an unrelated browser window.
+            copy.lastVisibleFrame = nil
+            copy.lastHiddenFrame = nil
+            copy.visibilityState = .visible
+            copy.lastActivatedAt = nil
+        }
         copy.windowID = window.windowID
         copy.pid = window.pid
         copy.processStartTime = window.processStartTime

@@ -18,16 +18,16 @@ public extension VirtualSpaceEngine {
 
     /// Resolves a CLI selector to a live window. Empty selector = focused.
     func resolveTargetWindow(selector: WindowTargetSelector) -> WindowSnapshot? {
+        let observation = control.focusedWindowObservation()
+        guard observation.inventory.isAuthoritative else { return nil }
+        let geometryCandidates = WindowEligibility.geometryCandidates(in: observation)
+
         if selector.isEmpty {
-            guard let focused = control.focusedWindow(),
-                  WindowEligibility.isManageableForVirtualWorkspace(focused)
-            else {
-                return nil
-            }
-            return focused
+            guard let focusedIdentity = observation.focusedIdentity else { return nil }
+            return geometryCandidates.first { $0.identity == focusedIdentity }
         }
 
-        let windows = control.listAllWindows().filter(WindowEligibility.isManageableForVirtualWorkspace)
+        let windows = geometryCandidates
 
         if let windowID = selector.windowID {
             guard let pid = selector.pid,
@@ -69,8 +69,10 @@ public extension VirtualSpaceEngine {
     /// update, and — for unassigned windows — the adoption decision. Nothing
     /// is decided from an earlier snapshot, so an AX dropout or window close
     /// between enumerations can never leave a duplicate adopted entry.
-    /// Returns nil when the event must be ignored (identity not present and
-    /// manageable in the current snapshot, or no active layout).
+    /// A definite companion surface projects state tracking to a manageable
+    /// window of the same exact process. The returned identity nevertheless
+    /// remains the real focused surface so follow-focus freshness checks can
+    /// never accept a different focused window.
     func processFocusEvent(
         sequence: UInt64,
         windowID: UInt32,
@@ -90,22 +92,37 @@ public extension VirtualSpaceEngine {
         )
         let observation = control.focusedWindowObservation()
         guard observation.focusedIdentity == identity else { return nil }
+        guard let focusedWindow = observation.inventory.windows.first(where: {
+            $0.identity == identity
+        }) else {
+            return nil
+        }
         // A frontmost AX identity can transiently refer to a window that still
         // lives on another native macOS Space. Focus notifications must never
         // rebind or adopt such an off-screen window into the current virtual
         // workspace; wait for an on-screen event or the normal bulk-adoption
         // pass after it actually arrives.
-        guard control.onScreenWindowIdentities().contains(identity) else { return nil }
+        let onScreenIdentities = control.onScreenWindowIdentities()
+        guard onScreenIdentities.contains(identity) else { return nil }
+
+        guard let trackingWindow = WindowEligibility.manageableMainWindow(
+            for: focusedWindow,
+            mainIdentity: observation.mainIdentity,
+            in: observation.inventory.windows
+        ), onScreenIdentities.contains(trackingWindow.identity) else {
+            return nil
+        }
 
         guard let result = try? trackWindow(
-            windowID: windowID,
-            pid: pid,
-            processStartTime: processStartTime,
-            expectedBundleID: bundleID,
+            windowID: trackingWindow.windowID,
+            pid: trackingWindow.pid,
+            processStartTime: trackingWindow.processStartTime,
+            expectedBundleID: trackingWindow.bundleID,
             config: config,
             respectFocusIgnoreRules: true,
             updateMRU: true,
-            inventory: observation.inventory
+            inventory: observation.inventory,
+            allowBlockedBindingRefresh: trackingWindow.identity != focusedWindow.identity
         ), result.window != nil else {
             return nil
         }
@@ -163,6 +180,7 @@ public extension VirtualSpaceEngine {
             displayID: window.displayID ?? "",
             role: window.role,
             subrole: window.subrole,
+            isModal: window.modal,
             isMinimized: window.minimized,
             frame: window.frame,
             slot: entry.flatMap { $0.slot > 0 ? $0.slot : nil }
@@ -319,7 +337,7 @@ public extension VirtualSpaceEngine {
             throw VirtualSpaceEngineError.hostDisplayUnavailable
         }
 
-        let basis = VisibilityPlanner.coordinateRect(display.visibleFrame, displays: displays)
+        let basis = display.visibleFrame
         func resolve(_ value: LengthValue?, dimension: Double, fallback: Double, origin: Double) throws -> Double {
             guard let value else { return fallback }
             return origin + (try LengthParser.parse(value).resolve(dimension: dimension, scale: display.scale))
@@ -377,7 +395,7 @@ public extension VirtualSpaceEngine {
             throw VirtualSpaceEngineError.hostDisplayUnavailable
         }
 
-        let basis = VisibilityPlanner.coordinateRect(display.visibleFrame, displays: displays)
+        let basis = display.visibleFrame
         let frame = SnapPresetResolver.frame(for: preset, basis: basis)
 
         guard control.setWindowFrame(
@@ -568,6 +586,7 @@ public extension VirtualSpaceEngine {
         respectFocusIgnoreRules: Bool,
         updateMRU: Bool,
         inventory suppliedInventory: WindowInventory? = nil,
+        allowBlockedBindingRefresh: Bool = false,
         persistChanges: Bool = true
     ) throws -> WindowTrackingResult {
         guard let layoutName = currentState.activeLayoutName,
@@ -577,7 +596,22 @@ public extension VirtualSpaceEngine {
         }
 
         let inventory = suppliedInventory ?? control.windowInventory()
-        let manageable = inventory.windows.filter(WindowEligibility.isManageableForVirtualWorkspace)
+        let targetIdentity = WindowIdentity(
+            pid: pid,
+            processStartTime: processStartTime,
+            windowID: windowID,
+            bundleID: expectedBundleID
+        )
+        // Focus projection may refresh the exact AX main's existing binding
+        // and MRU while a sheet protects it from geometry. No other blocked
+        // window enters the assignment pool, and a blocked target is never
+        // newly adopted below.
+        let manageable = inventory.windows.filter { candidate in
+            WindowEligibility.isManageableForVirtualWorkspace(candidate)
+                || (allowBlockedBindingRefresh
+                    && candidate.identity == targetIdentity
+                    && WindowEligibility.classification(of: candidate) == .manageable)
+        }
         guard let window = manageable.first(where: {
             $0.windowID == windowID
                 && $0.pid == pid
@@ -597,6 +631,9 @@ public extension VirtualSpaceEngine {
         if let assignment = resolution.assignments.first(where: {
             $0.value.identity == window.identity
         }), let entry = slots.first(where: { $0.id == assignment.key }) {
+            if allowBlockedBindingRefresh, entry.boundIdentity != window.identity {
+                return WindowTrackingResult(entry: nil, window: window, didAdopt: false)
+            }
             var updated = entry.bound(to: window)
             if updateMRU {
                 updated.lastActivatedAt = Date.rfc3339UTC()
@@ -610,6 +647,10 @@ public extension VirtualSpaceEngine {
         }
 
         if resolution.deferredWindows.contains(where: { $0.identity == window.identity }) {
+            return WindowTrackingResult(entry: nil, window: window, didAdopt: false)
+        }
+
+        if window.geometryBlocked || allowBlockedBindingRefresh {
             return WindowTrackingResult(entry: nil, window: window, didAdopt: false)
         }
 

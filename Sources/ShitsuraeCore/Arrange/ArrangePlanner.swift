@@ -36,7 +36,7 @@ public enum ArrangePlanner {
 
         // All spaces of a layout share the host display in v2.0 (validated at
         // config load). The placement basis is its visible frame in CG coords.
-        let basis = VisibilityPlanner.coordinateRect(hostDisplay.visibleFrame, displays: displays)
+        let basis = hostDisplay.visibleFrame
 
         for space in layout.spaces {
             if let spaceID, space.spaceID != spaceID {

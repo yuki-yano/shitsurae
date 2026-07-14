@@ -9,6 +9,26 @@ public struct AppliedVisibilityChange: Equatable, Sendable {
     public var effectiveEntry: SlotEntry
     public let desiredEntry: SlotEntry
     public let restoredFromMinimized: Bool
+    /// Whether the initial geometry setter accepted the request. Rejected AX
+    /// writes are never retried in the same switch: some Chrome surfaces move
+    /// even while returning an error.
+    public let mutationAccepted: Bool
+
+    public init(
+        window: WindowSnapshot,
+        originalEntry: SlotEntry,
+        effectiveEntry: SlotEntry,
+        desiredEntry: SlotEntry,
+        restoredFromMinimized: Bool,
+        mutationAccepted: Bool = true
+    ) {
+        self.window = window
+        self.originalEntry = originalEntry
+        self.effectiveEntry = effectiveEntry
+        self.desiredEntry = desiredEntry
+        self.restoredFromMinimized = restoredFromMinimized
+        self.mutationAccepted = mutationAccepted
+    }
 }
 
 public struct ConvergenceOutcome: Equatable, Sendable {
@@ -69,7 +89,8 @@ public enum VisibilityApplier {
                 originalEntry: plan.originalEntry,
                 effectiveEntry: succeeded ? plan.desiredEntry : plan.originalEntry,
                 desiredEntry: plan.desiredEntry,
-                restoredFromMinimized: plan.restoreFromMinimized
+                restoredFromMinimized: plan.restoreFromMinimized,
+                mutationAccepted: succeeded
             )
         }
     }
@@ -181,7 +202,13 @@ public enum VisibilityApplier {
         var verification = desiredStateVerification(changes: changes, inventory: latestInventory)
 
         for delayMS in retryDelaysMS where verification.values.contains(where: { $0 != .desired }) {
-            let retryable = changes.filter { verification[$0.window.identity] == .notDesired }
+            let retryable = changes.filter {
+                $0.mutationAccepted && verification[$0.window.identity] == .notDesired
+            }
+            let hasUnknown = verification.values.contains(.unknown)
+            if retryable.isEmpty && !hasUnknown {
+                break
+            }
             if !retryable.isEmpty {
                 retryCount += 1
                 retry(changes: retryable, control: control, logger: logger)

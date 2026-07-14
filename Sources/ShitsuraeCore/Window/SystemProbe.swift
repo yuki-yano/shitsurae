@@ -52,9 +52,14 @@ public struct DisplayInfo: Codable, Equatable, Sendable {
 
 public enum SystemProbe {
     public static func displays() -> [DisplayInfo] {
-        let mainID = NSScreen.main.flatMap(screenDisplayID)
+        let mainID = CGMainDisplayID()
+        let screens = NSScreen.screens
+        let primaryAppKitFrame = screens
+            .first { screenDisplayID($0) == mainID }?
+            .frame
+            ?? CGRect(origin: .zero, size: screens.first?.frame.size ?? .zero)
 
-        return NSScreen.screens.compactMap { screen in
+        return screens.compactMap { screen in
             guard let displayID = screenDisplayID(screen) else { return nil }
             guard let uuidRef = CGDisplayCreateUUIDFromDisplayID(displayID)?.takeRetainedValue() else {
                 return nil
@@ -71,11 +76,27 @@ public enum SystemProbe {
                 height: height,
                 scale: screen.backingScaleFactor,
                 isPrimary: mainID == displayID,
-                frame: screen.frame,
-                visibleFrame: screen.visibleFrame
+                frame: cgGlobalRect(fromAppKit: screen.frame, primaryAppKitFrame: primaryAppKitFrame),
+                visibleFrame: cgGlobalRect(
+                    fromAppKit: screen.visibleFrame,
+                    primaryAppKitFrame: primaryAppKitFrame
+                )
             )
         }
         .sorted { $0.id < $1.id }
+    }
+
+    /// Converts AppKit's bottom-left-origin global screen coordinates into the
+    /// top-left-origin global coordinates shared by CGWindow and AXPosition.
+    /// DisplayInfo crosses the AppKit boundary only here; every consumer can
+    /// therefore compare display and window frames without another transform.
+    static func cgGlobalRect(fromAppKit rect: CGRect, primaryAppKitFrame: CGRect) -> CGRect {
+        CGRect(
+            x: rect.minX,
+            y: primaryAppKitFrame.maxY - rect.maxY,
+            width: rect.width,
+            height: rect.height
+        )
     }
 
     public static func accessibilityGranted() -> Bool {

@@ -285,6 +285,48 @@ struct VisibilityPlannerTests {
         }
     }
 
+    @Test func rebindNeverRestoresGeometryFromPreviousExactWindow() throws {
+        let layout = TestFixtures.twoSpaceLayout()
+        let previousWindow = TestFixtures.window(
+            id: 1,
+            bundleID: "com.google.Chrome",
+            pid: 100,
+            processStartTime: 100_000_000,
+            frame: ResolvedFrame(x: 40, y: 50, width: 500, height: 300),
+            isAXBacked: true
+        )
+        let replacement = TestFixtures.window(
+            id: 2,
+            bundleID: "com.google.Chrome",
+            pid: 200,
+            processStartTime: 200_000_000,
+            frame: ResolvedFrame(x: 300, y: 200, width: 800, height: 500),
+            isAXBacked: true
+        )
+        var entry = makeEntry(spaceID: 1, bundleID: "com.google.Chrome")
+        entry = entry.bound(to: previousWindow)
+        entry.spaceID = 2
+        entry.visibilityState = .hiddenOffscreen
+        entry.lastVisibleFrame = previousWindow.frame
+        entry.lastHiddenFrame = ResolvedFrame(x: -499, y: 50, width: 500, height: 300)
+        entry.lastActivatedAt = "2026-07-14T00:00:00Z"
+
+        let plan = try #require(VisibilityPlanner.plan(
+            entry: entry,
+            window: replacement,
+            transition: .show,
+            layout: layout,
+            hostDisplay: display,
+            displays: [display]
+        ))
+
+        #expect(plan.mutation == .frame(replacement.frame))
+        #expect(plan.desiredEntry.boundIdentity == replacement.identity)
+        #expect(plan.desiredEntry.lastVisibleFrame == replacement.frame)
+        #expect(plan.desiredEntry.lastHiddenFrame == nil)
+        #expect(plan.desiredEntry.lastActivatedAt == nil)
+    }
+
     @Test func hideCornerAvoidsAdjacentDisplay() {
         // Secondary display to the LEFT of main: hiding bottom-left would
         // bleed into it, so the corner must be bottom-right.

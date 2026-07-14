@@ -49,11 +49,12 @@ public enum VisibilityPlanner {
         guard WindowEligibility.isManageableForVirtualWorkspace(window) else {
             return nil
         }
+        let workingEntry = entry.bound(to: window)
 
         switch transition {
         case .show:
             guard let visibleFrame = resolveVisibleFrame(
-                entry: entry,
+                entry: workingEntry,
                 window: window,
                 layout: layout,
                 hostDisplay: hostDisplay,
@@ -62,7 +63,7 @@ public enum VisibilityPlanner {
                 return nil
             }
 
-            var desired = entry.bound(to: window)
+            var desired = workingEntry
             desired.lastVisibleFrame = visibleFrame
             desired.visibilityState = .visible
 
@@ -94,19 +95,19 @@ public enum VisibilityPlanner {
             }
 
             let hiddenFrame = resolveHiddenFrame(
-                entry: entry,
+                entry: workingEntry,
                 window: window,
                 hostDisplay: hostDisplay,
                 displays: displays
             )
 
-            var desired = entry.bound(to: window)
+            var desired = workingEntry
             // Keep the last truly-visible frame: if the window is already
             // hidden, the current frame is the parking spot, not a real one.
             // A native-fullscreen frame is equally unsuitable: it describes
             // the display, not the windowed frame macOS should restore later.
-            desired.lastVisibleFrame = entry.visibilityState == .hiddenOffscreen || window.isFullscreen
-                ? entry.lastVisibleFrame
+            desired.lastVisibleFrame = workingEntry.visibilityState == .hiddenOffscreen || window.isFullscreen
+                ? workingEntry.lastVisibleFrame
                 : window.frame
             desired.lastHiddenFrame = hiddenFrame
             desired.visibilityState = .hiddenOffscreen
@@ -186,7 +187,7 @@ public enum VisibilityPlanner {
             return nil
         }
 
-        let basis = coordinateRect(hostDisplay.visibleFrame, displays: displays)
+        let basis = hostDisplay.visibleFrame
         return try? LengthParser.resolveFrame(
             definition.frame,
             basis: basis,
@@ -201,7 +202,7 @@ public enum VisibilityPlanner {
         hostDisplay: DisplayInfo,
         displays: [DisplayInfo]
     ) -> ResolvedFrame {
-        let basis = coordinateRect(hostDisplay.visibleFrame, displays: displays)
+        let basis = hostDisplay.visibleFrame
         let source = entry.lastVisibleFrame ?? window.frame
         let width = min(max(1, source.width), basis.width)
         let height = min(max(1, source.height), basis.height)
@@ -223,7 +224,7 @@ public enum VisibilityPlanner {
         let width = max(1, window.frame.width)
         let height = max(1, window.frame.height)
         let targetDisplay = resolveTargetDisplay(entry: entry, window: window, displays: displays) ?? hostDisplay
-        let targetVisibleFrame = coordinateRect(targetDisplay.visibleFrame, displays: displays)
+        let targetVisibleFrame = targetDisplay.visibleFrame
         let corner = optimalHideCorner(for: targetDisplay, displays: displays)
         let x: Double
         switch corner {
@@ -264,8 +265,8 @@ public enum VisibilityPlanner {
     /// least, so the parked window can't bleed into a neighboring screen.
     /// The 1px outside margin is intentional — do not change.
     public static func optimalHideCorner(for display: DisplayInfo, displays: [DisplayInfo]) -> HideCorner {
-        let normalizedDisplayFrame = coordinateRect(display.frame, displays: displays)
-        let normalizedDisplayFrames = displays.map { coordinateRect($0.frame, displays: displays) }
+        let normalizedDisplayFrame = display.frame
+        let normalizedDisplayFrames = displays.map(\.frame)
         let xOffset = normalizedDisplayFrame.width * 0.1
         let yOffset = normalizedDisplayFrame.height * 0.1
 
@@ -291,20 +292,6 @@ public enum VisibilityPlanner {
     }
 
     // MARK: - Geometry helpers
-
-    /// Converts an AppKit (bottom-left origin) rect into the CG (top-left
-    /// origin) coordinate space AX and CGWindowList use.
-    public static func coordinateRect(_ rect: CGRect, displays: [DisplayInfo]) -> CGRect {
-        let mainDisplayHeight = displays.first(where: \.isPrimary)?.frame.height
-            ?? displays.map { $0.frame.height }.max()
-            ?? rect.height
-        return CGRect(
-            x: rect.minX,
-            y: mainDisplayHeight - rect.maxY,
-            width: rect.width,
-            height: rect.height
-        )
-    }
 
     public static func isHiddenWindowFrame(frame: ResolvedFrame, displays: [DisplayInfo]) -> Bool {
         isOffscreenFrame(frame: frame, displays: displays)

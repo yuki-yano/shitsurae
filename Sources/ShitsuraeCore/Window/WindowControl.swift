@@ -67,7 +67,8 @@ public extension WindowControl {
     func focusedWindowObservation() -> WindowObservation {
         WindowObservation(
             inventory: windowInventory(),
-            focusedIdentity: focusedWindow()?.identity
+            focusedIdentity: focusedWindow()?.identity,
+            mainIdentity: focusedWindow()?.identity
         )
     }
 
