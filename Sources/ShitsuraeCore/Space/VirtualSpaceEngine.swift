@@ -59,6 +59,13 @@ public actor VirtualSpaceEngine {
     private var quarantinedWindowIdentities: Set<WindowIdentity> = []
     private static let quarantineThreshold = 3
 
+    /// Exact main windows temporarily kept on-screen because their focused
+    /// companion surface must not be moved. The value is the workspace the
+    /// main belonged to when protection started. Once the companion closes,
+    /// the next main-window focus event reconciles that window back to this
+    /// workspace without follow-focus undoing the user's explicit switch.
+    var suspendedCompanionMainSpaces: [WindowIdentity: Int] = [:]
+
     public init(
         store: RuntimeStateStore,
         control: WindowControl,
@@ -181,16 +188,33 @@ public actor VirtualSpaceEngine {
         let allWindows = inventory.windows
         let windows = WindowEligibility.geometryCandidates(in: observation)
         let blockedIdentities = WindowEligibility.geometryBlockedIdentities(in: observation)
-        let affectedSpaceIDs = Set([previousSpaceID, targetSpaceID].compactMap { $0 })
-        let hasBlockedTrackedWindow = state.slots(layoutName: layoutName).contains { entry in
-            affectedSpaceIDs.contains(entry.spaceID)
-                && entry.boundIdentity.map(blockedIdentities.contains) == true
-        }
         let focusedMainIsBlocked = observation.mainIdentity.map(blockedIdentities.contains) == true
-        if hasBlockedTrackedWindow || focusedMainIsBlocked {
-            throw VirtualSpaceEngineError.stateError(
-                "a tracked window has a focused companion surface"
-            )
+
+        // Resolve ownership with blocked-but-otherwise-manageable main
+        // windows included. Their entries are then removed from the physical
+        // switch plan altogether: no frame write can drag an attached sheet,
+        // while every unrelated window can still switch normally.
+        let layoutSlots = state.slots(layoutName: layoutName)
+        let ownershipWindows = allWindows.filter {
+            WindowEligibility.classification(of: $0) == .manageable
+        }
+        let ownershipResolution = WindowRegistry.resolve(
+            entries: layoutSlots.map(\.registryEntry),
+            manageableWindows: ownershipWindows,
+            fullInventory: inventory
+        )
+        let protectedEntryIDs = Set(ownershipResolution.assignments.compactMap { entryID, window in
+            blockedIdentities.contains(window.identity) ? entryID : nil
+        })
+        let entryByID = Dictionary(uniqueKeysWithValues: layoutSlots.map { ($0.id, $0) })
+        for window in ownershipWindows where blockedIdentities.contains(window.identity) {
+            guard suspendedCompanionMainSpaces[window.identity] == nil else { continue }
+            let assignedSpaceID = ownershipResolution.assignments.first(where: {
+                $0.value.identity == window.identity
+            }).flatMap { entryByID[$0.key]?.spaceID }
+            if let originSpaceID = assignedSpaceID ?? previousSpaceID {
+                suspendedCompanionMainSpaces[window.identity] = originSpaceID
+            }
         }
 
         // A CG inventory can be authoritative about liveness while the AX
@@ -204,6 +228,7 @@ public actor VirtualSpaceEngine {
         )
         let preflightEntries = state.slots(layoutName: layoutName).filter {
             !preflightExcludedEntryIDs.contains($0.id)
+                && !protectedEntryIDs.contains($0.id)
         }
         let preflightResolution = WindowRegistry.resolve(
             entries: preflightEntries.map(\.registryEntry),
@@ -263,7 +288,8 @@ public actor VirtualSpaceEngine {
         _ = try? adoptUntrackedWindows(
             config: config,
             persistChanges: false,
-            inventory: inventory
+            inventory: inventory,
+            excludedWindowIdentities: blockedIdentities
         )
 
         pruneIneligibleAdoptedEntriesInMemory(layoutName: layoutName, windows: allWindows)
@@ -272,7 +298,7 @@ public actor VirtualSpaceEngine {
         convergenceFailureCounts = convergenceFailureCounts.filter { inventory.mayContain($0.key) }
         quarantinedWindowIdentities = Set(quarantinedWindowIdentities.filter { inventory.mayContain($0) })
         let plan = SpaceSwitchPlanner.plan(
-            slots: state.slots,
+            slots: state.slots.filter { !protectedEntryIDs.contains($0.id) },
             layoutName: layoutName,
             layout: layout,
             targetSpaceID: targetSpaceID,
@@ -340,7 +366,9 @@ public actor VirtualSpaceEngine {
         // Focus the MRU window of the target workspace right away — the
         // convergence retries below can take a few hundred ms and the user
         // must not wait for them to get keyboard focus.
-        var focusedIdentity = focusTarget(from: plan.focusCandidates)
+        var focusedIdentity = focusedMainIsBlocked
+            ? nil
+            : focusTarget(from: plan.focusCandidates)
 
         let convergence = VisibilityApplier.converge(
             changes: applied,
@@ -359,7 +387,7 @@ public actor VirtualSpaceEngine {
         // user deliberately moved focus outside the workspace mid-switch. This
         // folds the user's manual "press the shortcut again" into a single
         // switch.
-        if !plan.focusCandidates.isEmpty {
+        if !focusedMainIsBlocked, !plan.focusCandidates.isEmpty {
             let intendedTopIdentity = plan.focusCandidates[0].window.identity
             let liveFocus = control.focusedWindowObservation().focusedIdentity
             let driftedWithinWorkspace = liveFocus
@@ -442,6 +470,16 @@ public actor VirtualSpaceEngine {
             : nil
 
         try persist(newState)
+
+        // A previously suspended main that is manageable again participated
+        // in this successful switch, so no later focus event should suppress
+        // an intentional follow-focus action for it.
+        let reconciledSuspensions = Set(suspendedCompanionMainSpaces.keys).intersection(
+            Set(windows.map(\.identity))
+        )
+        for identity in reconciledSuspensions {
+            suspendedCompanionMainSpaces.removeValue(forKey: identity)
+        }
 
         // Record intended, reported, and actual focus together with the same
         // convergence value returned to callers. This distinguishes a focus

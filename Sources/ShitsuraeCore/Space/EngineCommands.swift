@@ -113,6 +113,7 @@ public extension VirtualSpaceEngine {
             return nil
         }
 
+        let suspendedSpaceID = suspendedCompanionMainSpaces[trackingWindow.identity]
         guard let result = try? trackWindow(
             windowID: trackingWindow.windowID,
             pid: trackingWindow.pid,
@@ -122,8 +123,51 @@ public extension VirtualSpaceEngine {
             respectFocusIgnoreRules: true,
             updateMRU: true,
             inventory: observation.inventory,
-            allowBlockedBindingRefresh: trackingWindow.identity != focusedWindow.identity
+            allowBlockedBindingRefresh: trackingWindow.identity != focusedWindow.identity,
+            adoptionSpaceID: suspendedSpaceID
         ), result.window != nil else {
+            return nil
+        }
+
+        // Dismissing a companion normally focuses its main window. If an
+        // explicit workspace switch happened while the companion was open,
+        // reconcile the main to its original membership and consume this
+        // focus event so follow-focus cannot immediately switch back.
+        if suspendedSpaceID != nil,
+           trackingWindow.identity == focusedWindow.identity
+        {
+            guard let activeSpaceID = currentState.primaryActiveSpaceID,
+                  let entry = result.entry,
+                  entry.spaceID != activeSpaceID
+            else {
+                suspendedCompanionMainSpaces.removeValue(forKey: trackingWindow.identity)
+                return result.entry.map {
+                    FocusEventOutcome(
+                        sequence: sequence,
+                        identity: identity,
+                        spaceID: $0.spaceID,
+                        activeSpaceID: currentState.primaryActiveSpaceID,
+                        didAdopt: result.didAdopt
+                    )
+                }
+            }
+
+            do {
+                _ = try switchSpace(to: activeSpaceID, config: config, reconcile: true)
+                suspendedCompanionMainSpaces.removeValue(forKey: trackingWindow.identity)
+            } catch {
+                logger.log(
+                    level: "warn",
+                    event: "space.switch.companionReleaseReconcileFailed",
+                    fields: [
+                        "windowID": Int(trackingWindow.windowID),
+                        "bundleID": trackingWindow.bundleID,
+                        "originSpace": suspendedSpaceID ?? -1,
+                        "activeSpace": activeSpaceID,
+                        "error": String(describing: error),
+                    ]
+                )
+            }
             return nil
         }
         return FocusEventOutcome(
@@ -482,7 +526,8 @@ public extension VirtualSpaceEngine {
     func adoptUntrackedWindows(
         config: LoadedConfig,
         persistChanges: Bool = true,
-        inventory suppliedInventory: WindowInventory? = nil
+        inventory suppliedInventory: WindowInventory? = nil,
+        excludedWindowIdentities: Set<WindowIdentity> = []
     ) throws -> Int {
         guard let layoutName = currentState.activeLayoutName,
               let activeSpaceID = currentState.primaryActiveSpaceID,
@@ -510,6 +555,7 @@ public extension VirtualSpaceEngine {
             onScreenIdentities.contains(window.identity)
                 && window.displayID == hostDisplay.id
                 && !window.minimized
+                && !excludedWindowIdentities.contains(window.identity)
                 && WindowEligibility.isManageableForVirtualWorkspace(window)
                 && !PolicyEngine.matchesIgnoreRule(window: window, rules: config.config.ignore?.focus)
         }
@@ -587,6 +633,7 @@ public extension VirtualSpaceEngine {
         updateMRU: Bool,
         inventory suppliedInventory: WindowInventory? = nil,
         allowBlockedBindingRefresh: Bool = false,
+        adoptionSpaceID: Int? = nil,
         persistChanges: Bool = true
     ) throws -> WindowTrackingResult {
         guard let layoutName = currentState.activeLayoutName,
@@ -663,7 +710,7 @@ public extension VirtualSpaceEngine {
         var entry = Self.makeAdoptedEntry(
             window: window,
             layoutName: layoutName,
-            spaceID: activeSpaceID
+            spaceID: adoptionSpaceID ?? activeSpaceID
         )
         if updateMRU {
             entry.lastActivatedAt = Date.rfc3339UTC()

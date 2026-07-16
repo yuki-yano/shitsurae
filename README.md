@@ -33,6 +33,7 @@ Shitsurae never touches native macOS Spaces (Mission Control). Every virtual wor
 
 - Workspace switch = coordinate moves, no animation, instant
 - Independent of Mission Control and native desktop settings
+- Dialogs, sheets, and other transient companion windows stay on-screen during a switch; their main window is temporarily protected from geometry changes and returns to its assigned workspace after the dialog closes
 
 ## Features
 

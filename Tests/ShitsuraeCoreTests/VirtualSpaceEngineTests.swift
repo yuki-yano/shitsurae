@@ -958,7 +958,7 @@ struct VirtualSpaceEngineTests {
         #expect(entries.first?.lastActivatedAt == oldEntry.lastActivatedAt)
     }
 
-    @Test func focusedCompanionProjectsTrackingToExactMainAndBlocksGeometryChanges() async throws {
+    @Test func focusedCompanionStaysVisibleWhileOtherWindowsSwitchSpaces() async throws {
         let main = TestFixtures.window(
             id: 9,
             bundleID: "com.google.Chrome",
@@ -1038,18 +1038,19 @@ struct VirtualSpaceEngineTests {
         ) == nil)
 
         let attemptsBefore = control.frameMutationAttemptWindowIDs.count
-        var switchWasBlocked = false
-        do {
-            _ = try await engine.switchSpaceForFocusEvent(
-                sequence: 2,
-                identity: confirmationSheet.identity,
-                to: 2,
-                config: config
-            )
-        } catch {
-            switchWasBlocked = true
-        }
-        #expect(switchWasBlocked)
+        let switchOutcome = try #require(await engine.switchSpaceForFocusEvent(
+            sequence: 2,
+            identity: confirmationSheet.identity,
+            to: 2,
+            config: config
+        ))
+        #expect(switchOutcome.didChangeSpace)
+        #expect(switchOutcome.converged)
+        #expect(switchOutcome.focusedWindowID == nil)
+        #expect(control.frameMutationAttemptWindowIDs.dropFirst(attemptsBefore).allSatisfy {
+            $0 != main.windowID && $0 != confirmationSheet.windowID
+        })
+        #expect(control.focusedWindow()?.identity == confirmationSheet.identity)
 
         var moveWasBlocked = false
         do {
@@ -1058,12 +1059,19 @@ struct VirtualSpaceEngineTests {
             moveWasBlocked = true
         }
         #expect(moveWasBlocked)
-        #expect(control.frameMutationAttemptWindowIDs.count == attemptsBefore)
+        #expect(control.frameMutationAttemptWindowIDs.allSatisfy { $0 != main.windowID })
 
         state = await engine.currentState
-        #expect(state.primaryActiveSpaceID == 1)
+        #expect(state.primaryActiveSpaceID == 2)
         #expect(state.slots.first { $0.boundIdentity == main.identity }?.spaceID == 1)
-        #expect(!state.slots.contains { $0.boundIdentity == otherOrdinaryWindow.identity })
+        #expect(state.slots.first { $0.boundIdentity == main.identity }?.visibilityState == .visible)
+        #expect(state.pendingVisibilityConvergence == nil)
+        let otherEntry = try #require(state.slots.first {
+            $0.boundIdentity == otherOrdinaryWindow.identity
+        })
+        #expect(otherEntry.origin == .adopted)
+        #expect(otherEntry.spaceID == 1)
+        #expect(otherEntry.visibilityState == .hiddenOffscreen)
     }
 
     @Test func focusedUnknownBlocksExactMainWithoutTrackingMutation() async throws {
@@ -1110,7 +1118,7 @@ struct VirtualSpaceEngineTests {
         )) == nil)
     }
 
-    @Test func untrackedCompanionBlocksSwitchUntilItClosesThenAdoptsExactMain() async throws {
+    @Test func untrackedCompanionMainReturnsToOriginalSpaceAfterDialogCloses() async throws {
         let main = TestFixtures.window(
             id: 9,
             bundleID: "com.google.Chrome",
@@ -1149,26 +1157,41 @@ struct VirtualSpaceEngineTests {
         #expect(!(await engine.currentState).slots.contains { $0.bundleID == main.bundleID })
 
         let attemptsBefore = control.frameMutationAttemptWindowIDs.count
-        await #expect(throws: VirtualSpaceEngineError.self) {
-            _ = try await engine.switchSpace(to: 2, config: config)
-        }
-        #expect(control.frameMutationAttemptWindowIDs.count == attemptsBefore)
-        #expect((await engine.currentState).primaryActiveSpaceID == 1)
+        let switched = try await engine.switchSpace(to: 2, config: config)
+        #expect(switched.didChangeSpace)
+        #expect(switched.converged)
+        #expect(switched.focusedWindowID == nil)
+        #expect(control.frameMutationAttemptWindowIDs.dropFirst(attemptsBefore).allSatisfy {
+            $0 != main.windowID && $0 != sheet.windowID
+        })
+        #expect((await engine.currentState).primaryActiveSpaceID == 2)
 
         control.removeWindow(sheet.windowID)
         control.setFocusedWindowID(main.windowID)
         control.setMainWindowID(main.windowID)
-        let resumed = try #require(await engine.processFocusEvent(
+        let resumed = await engine.processFocusEvent(
             sequence: 2,
             windowID: main.windowID,
             pid: main.pid,
             processStartTime: main.processStartTime,
             bundleID: main.bundleID,
             config: config
+        )
+        #expect(resumed == nil)
+
+        let state = await engine.currentState
+        let mainEntry = try #require(state.slots.first { $0.boundIdentity == main.identity })
+        #expect(mainEntry.origin == .adopted)
+        #expect(mainEntry.spaceID == 1)
+        #expect(mainEntry.visibilityState == .hiddenOffscreen)
+        #expect(state.primaryActiveSpaceID == 2)
+        #expect(state.pendingVisibilityConvergence == nil)
+        #expect(VisibilityPlanner.isHiddenWindowFrame(
+            frame: try #require(control.window(main.windowID)).frame,
+            displays: [TestFixtures.display]
         ))
-        #expect(resumed.didAdopt)
-        #expect(resumed.spaceID == 1)
-        #expect(try await engine.switchSpace(to: 2, config: config).didChangeSpace)
+        #expect(control.focusedWindow()?.bundleID == "com.apple.Notes")
+        #expect(!(try await engine.switchSpace(to: 2, config: config).didChangeSpace))
         #expect((await engine.currentState).primaryActiveSpaceID == 2)
     }
 
