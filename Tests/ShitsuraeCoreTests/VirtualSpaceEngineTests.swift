@@ -731,6 +731,73 @@ struct VirtualSpaceEngineTests {
         #expect(entry?.visibilityState == .hiddenOffscreen)
     }
 
+    @Test func visibilityPendingDoesNotBlockExplicitWorkspaceMove() async throws {
+        let zoom = TestFixtures.window(
+            id: 9,
+            bundleID: "us.zoom.xos",
+            pid: 90,
+            isAXBacked: true,
+            frontIndex: 0
+        )
+        let (engine, control, url) = makeEngine(windows: standardWindows() + [zoom])
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        var state = await engine.currentState
+        let previousPending = PendingVisibilityConvergence(
+            requestID: "unrelated-unresolved-slot",
+            startedAt: Date.rfc3339UTC(),
+            layoutName: "work",
+            targetSpaceID: 1,
+            unresolvedSlots: [PendingUnresolvedSlot(
+                slot: 1,
+                spaceID: 2,
+                reason: "windowUnresolved"
+            )]
+        )
+        state.pendingVisibilityConvergence = previousPending
+        try await engine.replaceState(state)
+        control.setFocusedWindowID(zoom.windowID)
+
+        let outcome = try await engine.windowWorkspace(
+            selector: WindowTargetSelector(),
+            toSpaceID: 2,
+            config: config
+        )
+
+        #expect(outcome.bundleID == "us.zoom.xos")
+        #expect(outcome.previousSpaceID == 1)
+        #expect(outcome.spaceID == 2)
+        #expect(outcome.didCreateTrackingEntry)
+        #expect(VisibilityPlanner.isHiddenWindowFrame(
+            frame: try #require(control.window(zoom.windowID)).frame,
+            displays: [TestFixtures.display]
+        ))
+        state = await engine.currentState
+        #expect(state.pendingVisibilityConvergence == previousPending)
+        #expect(state.slots.first { $0.boundIdentity == zoom.identity }?.spaceID == 2)
+    }
+
+    @Test func liveArrangeRecoveryStillBlocksExplicitWorkspaceMove() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        var state = await engine.currentState
+        state.liveArrangeRecoveryRequired = true
+        try await engine.replaceState(state)
+        control.setFocusedWindowID(1)
+
+        await #expect(throws: VirtualSpaceEngineError.self) {
+            _ = try await engine.windowWorkspace(
+                selector: WindowTargetSelector(),
+                toSpaceID: 2,
+                config: self.config
+            )
+        }
+        #expect(control.frameMutationAttemptWindowIDs.isEmpty)
+    }
+
     @Test func moveUpdatesExactlyTheGloballyAssignedEntry() async throws {
         // Two terminals, two unbound index entries. The move must update the
         // same entry the next switch's bulk resolution would bind to window 1
@@ -1765,29 +1832,32 @@ struct VirtualSpaceEngineTests {
         #expect(state.pendingVisibilityConvergence != nil)
     }
 
-    @Test func workspaceMoveIsRejectedWhileRecoveryIsPending() async throws {
+    @Test func workspaceMovePreservesPendingVisibilityRecovery() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
         var pending = await engine.currentState
-        pending.pendingVisibilityConvergence = PendingVisibilityConvergence(
+        let previousPending = PendingVisibilityConvergence(
             requestID: "pending",
             startedAt: Date.rfc3339UTC(),
             layoutName: "work",
             targetSpaceID: 1
         )
+        pending.pendingVisibilityConvergence = previousPending
         try await engine.replaceState(pending)
-        let before = await engine.currentState
 
-        await #expect(throws: VirtualSpaceEngineError.self) {
-            _ = try await engine.moveWindowToWorkspace(
-                window: control.window(1)!,
-                toSpaceID: 2,
-                config: self.config
-            )
-        }
-        #expect(await engine.currentState == before)
-        #expect(control.frameMutationAttemptWindowIDs.isEmpty)
+        let outcome = try await engine.moveWindowToWorkspace(
+            window: control.window(1)!,
+            toSpaceID: 2,
+            config: self.config
+        )
+
+        #expect(outcome.fromSpaceID == 1)
+        #expect(outcome.toSpaceID == 2)
+        let state = await engine.currentState
+        #expect(state.pendingVisibilityConvergence == previousPending)
+        #expect(state.slots.first { $0.windowID == 1 }?.spaceID == 2)
+        #expect(control.frameMutationAttemptWindowIDs == [1])
     }
 
     @Test func invalidWorkspaceNeverAdoptsUntrackedWindow() async throws {

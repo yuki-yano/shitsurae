@@ -627,9 +627,16 @@ public actor VirtualSpaceEngine {
         guard layout.spaces.contains(where: { $0.spaceID == toSpaceID }) else {
             throw VirtualSpaceEngineError.spaceNotFound(layoutName: layoutName, spaceID: toSpaceID)
         }
-        guard !state.recoveryRequired else {
+        // A visibility convergence marker can remain while an unrelated
+        // layout slot is temporarily unresolved (for example, Zoom replaces
+        // one of its meeting windows). This move has its own write-ahead
+        // transaction and restores the previous marker after a verified
+        // success, so that marker must not disable explicit window moves.
+        // A live-arrange recovery is different: its multi-window transaction
+        // is still incomplete and must be reconciled before another mutation.
+        guard !state.liveArrangeRecoveryRequired else {
             throw VirtualSpaceEngineError.stateError(
-                "visibility recovery is pending; reconcile before moving a window"
+                "live arrange recovery is pending; reconcile before moving a window"
             )
         }
 
