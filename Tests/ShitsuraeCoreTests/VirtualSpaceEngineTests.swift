@@ -119,6 +119,47 @@ struct VirtualSpaceEngineTests {
         #expect(state.pendingVisibilityConvergence == nil)
     }
 
+    @Test func terminationFocusRestoreKeepsActiveWorkspaceAndUsesMRU() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        let terminated = try #require(control.window(1))
+        await engine.markActivated(window: try #require(control.window(2)))
+        control.removeWindow(terminated.windowID)
+        control.setFocusedWindowID(3)
+
+        let focused = try await engine.focusPreferredWindowInActiveWorkspace(
+            excludingPID: terminated.pid,
+            bundleID: terminated.bundleID,
+            config: config
+        )
+
+        #expect(focused == control.window(2)?.identity)
+        #expect(control.focusedWindow()?.windowID == 2)
+        #expect(await engine.activeSpaceID() == 1)
+    }
+
+    @Test func terminationFocusRestoreFallsBackWhenMRUTargetRejectsFocus() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        await engine.markActivated(window: try #require(control.window(2)))
+        control.failFocusWindowIDs = [2]
+
+        let focused = try await engine.focusPreferredWindowInActiveWorkspace(
+            excludingPID: 999,
+            bundleID: "com.example.Terminated",
+            config: config
+        )
+
+        #expect(focused == control.window(1)?.identity)
+        #expect(control.focusedWindow()?.windowID == 1)
+        #expect(control.focusedWindowIDs == [1])
+        #expect(await engine.activeSpaceID() == 1)
+    }
+
     @Test func switchSpaceDoesNotTreatBundleActivationAsConfirmedFocus() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

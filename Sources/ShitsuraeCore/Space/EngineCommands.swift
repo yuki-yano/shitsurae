@@ -340,6 +340,80 @@ public extension VirtualSpaceEngine {
         )
     }
 
+    /// Restores focus after the frontmost application terminates without
+    /// changing the active virtual workspace. Candidates are limited to
+    /// visible windows in the current workspace and tried in MRU order.
+    ///
+    /// The terminating process is excluded explicitly because AppKit can
+    /// publish its termination before the last AX/CG window disappears.
+    func focusPreferredWindowInActiveWorkspace(
+        excludingPID: Int,
+        bundleID excludedBundleID: String,
+        config: LoadedConfig
+    ) throws -> WindowIdentity? {
+        try ensureAccessibility()
+        guard let layoutName = currentState.activeLayoutName,
+              let activeSpaceID = currentState.primaryActiveSpaceID
+        else {
+            throw VirtualSpaceEngineError.noActiveLayout
+        }
+
+        let inventory = control.windowInventory()
+        guard inventory.isAuthoritative else {
+            throw VirtualSpaceEngineError.stateError("window inventory unavailable")
+        }
+
+        let terminatingIdentities = Set(inventory.windows.compactMap { window in
+            window.pid == excludingPID && window.bundleID == excludedBundleID
+                ? window.identity
+                : nil
+        })
+        _ = try? adoptUntrackedWindows(
+            config: config,
+            inventory: inventory,
+            excludedWindowIdentities: terminatingIdentities
+        )
+
+        let entries = currentState.slots(layoutName: layoutName)
+            .filter { $0.spaceID == activeSpaceID }
+        let entriesByID = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
+        let manageableWindows = inventory.windows.filter {
+            WindowEligibility.isManageableForVirtualWorkspace($0)
+        }
+        let resolution = WindowRegistry.resolve(
+            entries: entries.map(\.registryEntry),
+            manageableWindows: manageableWindows,
+            fullInventory: inventory
+        )
+        let onScreenIdentities = control.onScreenWindowIdentities()
+        let candidates = resolution.assignments.compactMap { entryID, window -> BoundWindow? in
+            guard let entry = entriesByID[entryID],
+                  window.pid != excludingPID || window.bundleID != excludedBundleID,
+                  !window.minimized,
+                  !window.hidden,
+                  onScreenIdentities.contains(window.identity)
+            else {
+                return nil
+            }
+            return BoundWindow(entry: entry, window: window)
+        }
+        let ordered = SpaceSwitchPlanner.preferredFocusCandidates(from: candidates)
+        guard let focusedIdentity = focusTarget(from: ordered) else { return nil }
+
+        if let focused = ordered.first(where: { $0.window.identity == focusedIdentity }) {
+            var newState = currentState
+            newState.slots = newState.slots.map { entry in
+                guard entry.id == focused.entry.id else { return entry }
+                var updated = entry.bound(to: focused.window)
+                updated.lastActivatedAt = Date.rfc3339UTC()
+                return updated
+            }
+            try replaceState(newState)
+        }
+
+        return focusedIdentity
+    }
+
     private func applyFocus(window: WindowSnapshot) throws {
         let result = control.focusWindow(
             windowID: window.windowID,

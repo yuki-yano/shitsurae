@@ -62,6 +62,81 @@ final class FocusEventCoordinator {
     }
 }
 
+struct RunningApplicationIdentity: Equatable {
+    let pid: Int
+    let bundleID: String
+    let launchDate: Date?
+
+    init(pid: Int, bundleID: String, launchDate: Date?) {
+        self.pid = pid
+        self.bundleID = bundleID
+        self.launchDate = launchDate
+    }
+
+    init?(application: NSRunningApplication) {
+        guard let bundleID = application.bundleIdentifier else { return nil }
+        self.init(
+            pid: Int(application.processIdentifier),
+            bundleID: bundleID,
+            launchDate: application.launchDate
+        )
+    }
+}
+
+struct FrontmostApplicationTracker {
+    private struct DisplacedApplication {
+        let identity: RunningApplicationIdentity
+        let displacedAt: Date
+    }
+
+    private(set) var current: RunningApplicationIdentity?
+    private var displaced: DisplacedApplication?
+    let terminationCoalescingWindow: TimeInterval
+
+    init(terminationCoalescingWindow: TimeInterval = 0.5) {
+        self.terminationCoalescingWindow = terminationCoalescingWindow
+    }
+
+    mutating func reset(to identity: RunningApplicationIdentity?) {
+        current = identity
+        displaced = nil
+    }
+
+    @discardableResult
+    mutating func recordActivation(
+        _ identity: RunningApplicationIdentity,
+        now: Date
+    ) -> RunningApplicationIdentity? {
+        guard current != identity else { return nil }
+        let previous = current
+        displaced = previous.map { DisplacedApplication(identity: $0, displacedAt: now) }
+        current = identity
+        return previous
+    }
+
+    /// Accepts either notification order used by AppKit: termination before
+    /// replacement activation, or replacement activation immediately before
+    /// termination.
+    mutating func consumeFrontmostTermination(
+        _ identity: RunningApplicationIdentity,
+        now: Date
+    ) -> Bool {
+        if current == identity {
+            current = nil
+            return true
+        }
+
+        guard let displaced,
+              displaced.identity == identity,
+              now.timeIntervalSince(displaced.displacedAt) <= terminationCoalescingWindow
+        else {
+            return false
+        }
+        self.displaced = nil
+        return true
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     let logger = ShitsuraeLogger()
@@ -111,6 +186,8 @@ final class AppModel: ObservableObject {
     private let focusEventCoordinator: FocusEventCoordinator
     private let interactiveActivationGrace: TimeInterval = 0.18
     private static let activationFocusRetryDelayNanoseconds: UInt64 = 40_000_000
+    private static let terminationFollowFocusDelayNanoseconds: UInt64 = 100_000_000
+    private var frontmostApplicationTracker = FrontmostApplicationTracker()
 
     private var observers: [NSObjectProtocol] = []
 
@@ -131,6 +208,9 @@ final class AppModel: ObservableObject {
     func start() {
         accessibilityGranted = SystemProbe.accessibilityGranted()
         screenRecordingGranted = SystemProbe.screenRecordingGranted()
+        frontmostApplicationTracker.reset(
+            to: NSWorkspace.shared.frontmostApplication.flatMap(RunningApplicationIdentity.init)
+        )
 
         configManager.start { [weak self] in
             Task { @MainActor [weak self] in
@@ -523,7 +603,7 @@ final class AppModel: ObservableObject {
                         if name == NSWorkspace.didLaunchApplicationNotification {
                             self?.windowEventMonitor.register(application: app)
                         } else {
-                            self?.windowEventMonitor.unregister(application: app)
+                            self?.handleAppTerminated(application: app, bundleID: bundleID)
                         }
                     }
                 }
@@ -548,14 +628,19 @@ final class AppModel: ObservableObject {
         bundleID: String,
         sequence: UInt64
     ) {
-        guard !bundleID.hasPrefix("com.yuki-yano.shitsurae"),
-              bundleID != Bundle.main.bundleIdentifier,
-              !application.isTerminated,
+        guard !application.isTerminated,
               application.bundleIdentifier == bundleID,
               let frontmost = NSWorkspace.shared.frontmostApplication,
               frontmost.processIdentifier == application.processIdentifier,
               frontmost.bundleIdentifier == bundleID,
-              frontmost.launchDate == application.launchDate,
+              frontmost.launchDate == application.launchDate
+        else {
+            return
+        }
+
+        recordFrontmostActivation(application)
+        guard !bundleID.hasPrefix("com.yuki-yano.shitsurae"),
+              bundleID != Bundle.main.bundleIdentifier,
               let processStartTime = ProcessGenerationResolver.startTime(
                   pid: Int(application.processIdentifier)
               )
@@ -648,6 +733,7 @@ final class AppModel: ObservableObject {
             else {
                 return
             }
+            recordFrontmostActivation(application)
             guard let windowID else {
                 sampleActivatedWindowFocus(
                     application: application,
@@ -731,6 +817,11 @@ final class AppModel: ObservableObject {
                 return
 
             case let .switchSpace(targetSpaceID):
+                // AppKit may activate a previously used application just
+                // before publishing that the current one terminated. Briefly
+                // coalesce cross-workspace focus so the termination handler
+                // can replace it with an in-workspace MRU target.
+                try? await Task.sleep(nanoseconds: Self.terminationFollowFocusDelayNanoseconds)
                 guard self?.focusEventCoordinator.isCurrent(sequence) == true else { return }
                 let switchOutcome = try? await engine.switchSpaceForFocusEvent(
                     sequence: sequence,
@@ -749,6 +840,85 @@ final class AppModel: ObservableObject {
                     self?.lastActiveSpaceChangeAt = now
                     self?.frontmostWindowBelongsToActiveWorkspace = switchOutcome.focusedWindowID != nil
                     self?.refreshStatus()
+                }
+            }
+        }
+    }
+
+    private func handleAppTerminated(
+        application: NSRunningApplication,
+        bundleID: String
+    ) {
+        windowEventMonitor.unregister(application: application)
+        let identity = RunningApplicationIdentity(
+            pid: Int(application.processIdentifier),
+            bundleID: bundleID,
+            launchDate: application.launchDate
+        )
+        guard frontmostApplicationTracker.consumeFrontmostTermination(identity, now: Date())
+        else {
+            return
+        }
+        restoreFocusAfterFrontmostTermination(identity)
+    }
+
+    private func recordFrontmostActivation(_ application: NSRunningApplication) {
+        guard let identity = RunningApplicationIdentity(application: application),
+              let displaced = frontmostApplicationTracker.recordActivation(identity, now: Date()),
+              !isApplicationStillRunning(displaced),
+              frontmostApplicationTracker.consumeFrontmostTermination(displaced, now: Date())
+        else {
+            return
+        }
+        restoreFocusAfterFrontmostTermination(displaced)
+    }
+
+    private func isApplicationStillRunning(_ identity: RunningApplicationIdentity) -> Bool {
+        guard let application = NSRunningApplication(
+            processIdentifier: pid_t(identity.pid)
+        ), !application.isTerminated,
+           let runningIdentity = RunningApplicationIdentity(application: application)
+        else {
+            return false
+        }
+        return runningIdentity == identity
+    }
+
+    private func restoreFocusAfterFrontmostTermination(
+        _ identity: RunningApplicationIdentity
+    ) {
+        guard let config = configManager.configIfLoaded() else { return }
+
+        // Supersede any activation/focus event emitted for AppKit's automatic
+        // replacement before it can trigger follow-focus.
+        markInteractiveActivation()
+        let engine = engine
+        Task { [weak self] in
+            do {
+                let focusedIdentity = try await engine.focusPreferredWindowInActiveWorkspace(
+                    excludingPID: identity.pid,
+                    bundleID: identity.bundleID,
+                    config: config
+                )
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.frontmostWindowBelongsToActiveWorkspace = focusedIdentity != nil
+                    self.syncHotkeyFastPathPolicy(
+                        frontmostBundleID: focusedIdentity?.bundleID
+                    )
+                }
+            } catch {
+                self?.logger.log(
+                    level: "warn",
+                    event: "app.terminationFocusRestoreFailed",
+                    fields: [
+                        "pid": identity.pid,
+                        "bundleID": identity.bundleID,
+                        "error": String(describing: error),
+                    ]
+                )
+                await MainActor.run { [weak self] in
+                    self?.frontmostWindowBelongsToActiveWorkspace = false
                 }
             }
         }

@@ -61,6 +61,69 @@ struct FocusEventCoordinatorTests {
 
         #expect(WindowThumbnailProvider.cacheKey(for: old) != WindowThumbnailProvider.cacheKey(for: replacement))
     }
+
+    @Test func frontmostTerminationIsRecognizedBeforeReplacementActivation() {
+        let terminated = RunningApplicationIdentity(
+            pid: 100,
+            bundleID: "com.example.Terminated",
+            launchDate: Date(timeIntervalSince1970: 1)
+        )
+        var tracker = FrontmostApplicationTracker()
+        tracker.reset(to: terminated)
+
+        let consumed = tracker.consumeFrontmostTermination(
+            terminated,
+            now: Date(timeIntervalSince1970: 2)
+        )
+        #expect(consumed)
+    }
+
+    @Test func frontmostTerminationIsRecognizedAfterReplacementActivation() {
+        let terminated = RunningApplicationIdentity(
+            pid: 100,
+            bundleID: "com.example.Terminated",
+            launchDate: Date(timeIntervalSince1970: 1)
+        )
+        let replacement = RunningApplicationIdentity(
+            pid: 200,
+            bundleID: "com.example.Replacement",
+            launchDate: Date(timeIntervalSince1970: 2)
+        )
+        let activatedAt = Date(timeIntervalSince1970: 10)
+        var tracker = FrontmostApplicationTracker(terminationCoalescingWindow: 0.5)
+        tracker.reset(to: terminated)
+        tracker.recordActivation(replacement, now: activatedAt)
+
+        let consumed = tracker.consumeFrontmostTermination(
+            terminated,
+            now: activatedAt.addingTimeInterval(0.1)
+        )
+        #expect(consumed)
+        #expect(tracker.current == replacement)
+    }
+
+    @Test func backgroundTerminationOutsideCoalescingWindowIsIgnored() {
+        let background = RunningApplicationIdentity(
+            pid: 100,
+            bundleID: "com.example.Background",
+            launchDate: Date(timeIntervalSince1970: 1)
+        )
+        let frontmost = RunningApplicationIdentity(
+            pid: 200,
+            bundleID: "com.example.Frontmost",
+            launchDate: Date(timeIntervalSince1970: 2)
+        )
+        let activatedAt = Date(timeIntervalSince1970: 10)
+        var tracker = FrontmostApplicationTracker(terminationCoalescingWindow: 0.5)
+        tracker.reset(to: background)
+        tracker.recordActivation(frontmost, now: activatedAt)
+
+        let consumed = tracker.consumeFrontmostTermination(
+            background,
+            now: activatedAt.addingTimeInterval(0.6)
+        )
+        #expect(!consumed)
+    }
 }
 import ShitsuraeCore
 

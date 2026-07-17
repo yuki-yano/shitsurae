@@ -526,7 +526,7 @@ public actor VirtualSpaceEngine {
         }
     }
 
-    private func focusTarget(from candidates: [BoundWindow]) -> WindowIdentity? {
+    func focusTarget(from candidates: [BoundWindow]) -> WindowIdentity? {
         for target in candidates {
             if focusOneTarget(target) {
                 return target.window.identity
