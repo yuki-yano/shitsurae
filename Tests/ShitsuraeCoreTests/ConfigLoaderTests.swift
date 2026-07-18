@@ -188,6 +188,36 @@ struct ConfigLoaderTests {
         }
     }
 
+    @Test func rejectsUnknownKeysAtEverySchemaLevel() throws {
+        let dir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let yaml = """
+        applcation:
+          launchAtLogin: false
+        \(basicLayout.replacingOccurrences(
+            of: "width: \"50%\"",
+            with: "widht: \"50%\""
+        ))
+        """
+        try write(yaml, as: "01-unknown.yaml", in: dir)
+
+        do {
+            _ = try ConfigLoader().load(from: dir)
+            Issue.record("expected ConfigLoadError")
+        } catch let error as ConfigLoadError {
+            #expect(error.code == .validationError)
+            #expect(error.errors.contains {
+                $0.message == "unknown config key: applcation"
+            })
+            #expect(error.errors.contains {
+                $0.message.contains("frame.widht")
+            })
+            #expect(error.errors.allSatisfy { $0.line != nil && $0.column != nil })
+        } catch {
+            Issue.record("unexpected error type: \(error)")
+        }
+    }
+
     @Test func configGenerationChangesWithContent() throws {
         let dir = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }

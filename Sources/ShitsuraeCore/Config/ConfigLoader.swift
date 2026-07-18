@@ -72,6 +72,24 @@ public final class ConfigLoader: @unchecked Sendable {
         for file in files {
             do {
                 let yaml = try String(contentsOf: file, encoding: .utf8)
+                if let node = try compose(yaml: yaml) {
+                    let schemaErrors = ConfigSchemaValidator.validate(
+                        node: node,
+                        sourcePath: file.path
+                    )
+                    if !schemaErrors.isEmpty {
+                        parseErrors.append(contentsOf: schemaErrors)
+                        statuses.append(
+                            ConfigFileStatus(
+                                path: file.path,
+                                loaded: false,
+                                errorCode: ErrorCode.validationError.rawValue,
+                                message: schemaErrors.map(\.message).joined(separator: "; ")
+                            )
+                        )
+                        continue
+                    }
+                }
                 let parsed = try YAMLDecoder().decode(ShitsuraeConfigFile.self, from: yaml)
                 decoded.append((file, parsed))
                 statuses.append(ConfigFileStatus(path: file.path, loaded: true, errorCode: nil, message: nil))
