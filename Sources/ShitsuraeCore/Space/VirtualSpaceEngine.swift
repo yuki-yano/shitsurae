@@ -30,6 +30,27 @@ public enum VirtualSpaceEngineError: Error, Equatable, Sendable {
     case stateError(String)
 }
 
+private struct SpaceSwitchPreflightSnapshot {
+    let observation: WindowObservation
+    let manageableWindows: [WindowSnapshot]
+    let blockedIdentities: Set<WindowIdentity>
+    let focusedMainIsBlocked: Bool
+    let ownershipWindows: [WindowSnapshot]
+    let ownershipResolution: WindowRegistry.Resolution
+    let protectedEntryIDs: Set<String>
+    let resolution: WindowRegistry.Resolution
+    let reservedExactEntryIDs: Set<String>
+    let previousReservedCount: Int
+    let previousAssignmentCount: Int
+    let targetReservedCount: Int
+    let targetAssignmentCount: Int
+
+    var shouldReject: Bool {
+        (previousReservedCount > 0 && previousAssignmentCount == 0)
+            || (targetReservedCount > 0 && targetAssignmentCount == 0)
+    }
+}
+
 /// The single owner of virtual workspace state. All mutations are serialized
 /// by the actor; the state file is loaded once at init and kept as the
 /// authoritative in-memory copy (the store's expectation check is only a
@@ -134,6 +155,86 @@ public actor VirtualSpaceEngine {
         return slots.first { $0.id == matched.id }
     }
 
+    private func makeSpaceSwitchPreflightSnapshot(
+        observation: WindowObservation,
+        layoutName: String,
+        layoutSlots: [SlotEntry],
+        previousSpaceID: Int?,
+        targetSpaceID: Int
+    ) -> SpaceSwitchPreflightSnapshot {
+        let inventory = observation.inventory
+        let allWindows = inventory.windows
+        let manageableWindows = WindowEligibility.geometryCandidates(in: observation)
+        let blockedIdentities = WindowEligibility.geometryBlockedIdentities(in: observation)
+        let focusedMainIsBlocked = observation.mainIdentity.map(blockedIdentities.contains) == true
+
+        // Resolve ownership with blocked-but-otherwise-manageable main
+        // windows included. Their entries are excluded from the physical
+        // switch plan so a focused companion can never drag its main window.
+        let ownershipWindows = allWindows.filter {
+            WindowEligibility.classification(of: $0) == .manageable
+        }
+        let ownershipResolution = WindowRegistry.resolve(
+            entries: layoutSlots.map(\.registryEntry),
+            manageableWindows: ownershipWindows,
+            fullInventory: inventory
+        )
+        let protectedEntryIDs = Set(ownershipResolution.assignments.compactMap { entryID, window in
+            blockedIdentities.contains(window.identity) ? entryID : nil
+        })
+
+        // A CG inventory can prove that exact windows are alive while a
+        // transient AX failure leaves them unsafe to mutate. This observation
+        // is retryable, but it must never authorize an empty logical switch.
+        let excludedEntryIDs = Set(
+            ineligibleAdoptedEntryIDs(layoutName: layoutName, windows: allWindows)
+        )
+        let entries = layoutSlots.filter {
+            !excludedEntryIDs.contains($0.id)
+                && !protectedEntryIDs.contains($0.id)
+        }
+        let resolution = WindowRegistry.resolve(
+            entries: entries.map(\.registryEntry),
+            manageableWindows: manageableWindows,
+            fullInventory: inventory
+        )
+        let reservedExactEntryIDs = Set(resolution.unresolved.compactMap { entryID in
+            resolution.unresolvedReasons[entryID] == .reservedExactIdentity
+                ? entryID
+                : nil
+        })
+        let targetEntryIDs = Set(entries.filter { $0.spaceID == targetSpaceID }.map(\.id))
+        let previousEntryIDs = Set(entries.filter { $0.spaceID == previousSpaceID }.map(\.id))
+        let targetReservedCount = reservedExactEntryIDs.intersection(targetEntryIDs).count
+        let previousReservedCount = reservedExactEntryIDs.intersection(previousEntryIDs).count
+        let targetAssignmentCount = resolution.assignments.keys.reduce(into: 0) { count, entryID in
+            if targetEntryIDs.contains(entryID) {
+                count += 1
+            }
+        }
+        let previousAssignmentCount = resolution.assignments.keys.reduce(into: 0) { count, entryID in
+            if previousEntryIDs.contains(entryID) {
+                count += 1
+            }
+        }
+
+        return SpaceSwitchPreflightSnapshot(
+            observation: observation,
+            manageableWindows: manageableWindows,
+            blockedIdentities: blockedIdentities,
+            focusedMainIsBlocked: focusedMainIsBlocked,
+            ownershipWindows: ownershipWindows,
+            ownershipResolution: ownershipResolution,
+            protectedEntryIDs: protectedEntryIDs,
+            resolution: resolution,
+            reservedExactEntryIDs: reservedExactEntryIDs,
+            previousReservedCount: previousReservedCount,
+            previousAssignmentCount: previousAssignmentCount,
+            targetReservedCount: targetReservedCount,
+            targetAssignmentCount: targetAssignmentCount
+        )
+    }
+
     // MARK: - Space switch
 
     @discardableResult
@@ -180,33 +281,78 @@ public actor VirtualSpaceEngine {
             )
         }
 
-        let observation = control.focusedWindowObservation()
-        let inventory = observation.inventory
-        guard inventory.isAuthoritative else {
+        let initialObservation = control.focusedWindowObservation()
+        guard initialObservation.inventory.isAuthoritative else {
             throw VirtualSpaceEngineError.stateError("window inventory unavailable")
         }
 
-        let allWindows = inventory.windows
-        let windows = WindowEligibility.geometryCandidates(in: observation)
-        let blockedIdentities = WindowEligibility.geometryBlockedIdentities(in: observation)
-        let focusedMainIsBlocked = observation.mainIdentity.map(blockedIdentities.contains) == true
-
-        // Resolve ownership with blocked-but-otherwise-manageable main
-        // windows included. Their entries are then removed from the physical
-        // switch plan altogether: no frame write can drag an attached sheet,
-        // while every unrelated window can still switch normally.
         let layoutSlots = state.slots(layoutName: layoutName)
-        let ownershipWindows = allWindows.filter {
-            WindowEligibility.classification(of: $0) == .manageable
-        }
-        let ownershipResolution = WindowRegistry.resolve(
-            entries: layoutSlots.map(\.registryEntry),
-            manageableWindows: ownershipWindows,
-            fullInventory: inventory
+        var preflight = makeSpaceSwitchPreflightSnapshot(
+            observation: initialObservation,
+            layoutName: layoutName,
+            layoutSlots: layoutSlots,
+            previousSpaceID: previousSpaceID,
+            targetSpaceID: targetSpaceID
         )
-        let protectedEntryIDs = Set(ownershipResolution.assignments.compactMap { entryID, window in
-            blockedIdentities.contains(window.identity) ? entryID : nil
-        })
+        var preflightAttempts = 1
+        for delayMS in retryDelaysMS where preflight.shouldReject {
+            control.sleep(milliseconds: delayMS)
+            preflightAttempts += 1
+            let retryObservation = control.focusedWindowObservation()
+            guard retryObservation.inventory.isAuthoritative else { continue }
+            preflight = makeSpaceSwitchPreflightSnapshot(
+                observation: retryObservation,
+                layoutName: layoutName,
+                layoutSlots: layoutSlots,
+                previousSpaceID: previousSpaceID,
+                targetSpaceID: targetSpaceID
+            )
+        }
+
+        if preflight.shouldReject {
+            logger.log(
+                level: "warn",
+                event: "space.switch.preflightRejected",
+                fields: [
+                    "from": previousSpaceID ?? -1,
+                    "to": targetSpaceID,
+                    "attempts": preflightAttempts,
+                    "manageable": preflight.manageableWindows.count,
+                    "assignments": preflight.resolution.assignments.count,
+                    "reservedExact": preflight.reservedExactEntryIDs.count,
+                    "previousReserved": preflight.previousReservedCount,
+                    "previousAssignments": preflight.previousAssignmentCount,
+                    "targetReserved": preflight.targetReservedCount,
+                    "targetAssignments": preflight.targetAssignmentCount,
+                ]
+            )
+            throw VirtualSpaceEngineError.stateError(
+                "window inventory temporarily lacks manageable bindings"
+            )
+        }
+        if preflightAttempts > 1 {
+            logger.log(
+                event: "space.switch.preflightRecovered",
+                fields: [
+                    "from": previousSpaceID ?? -1,
+                    "to": targetSpaceID,
+                    "attempts": preflightAttempts,
+                ]
+            )
+        }
+
+        let observation = preflight.observation
+        let inventory = observation.inventory
+        let allWindows = inventory.windows
+        let windows = preflight.manageableWindows
+        let blockedIdentities = preflight.blockedIdentities
+        let focusedMainIsBlocked = preflight.focusedMainIsBlocked
+        let ownershipWindows = preflight.ownershipWindows
+        let ownershipResolution = preflight.ownershipResolution
+        let protectedEntryIDs = preflight.protectedEntryIDs
+
+        // Only record companion protection after preflight has succeeded, so
+        // every rejected observation remains completely side-effect free.
         let entryByID = Dictionary(uniqueKeysWithValues: layoutSlots.map { ($0.id, $0) })
         for window in ownershipWindows where blockedIdentities.contains(window.identity) {
             guard suspendedCompanionMainSpaces[window.identity] == nil else { continue }
@@ -216,70 +362,6 @@ public actor VirtualSpaceEngine {
             if let originSpaceID = assignedSpaceID ?? previousSpaceID {
                 suspendedCompanionMainSpaces[window.identity] = originSpaceID
             }
-        }
-
-        // A CG inventory can be authoritative about liveness while the AX
-        // view needed for safe mutations is temporarily incomplete. Resolve
-        // before adoption or any other state change so an all-AX-dropout pass
-        // cannot commit a logical space switch with zero physical work. Raw
-        // CG identities are used only to reject the pass; they never become
-        // mutation candidates.
-        let preflightExcludedEntryIDs = Set(
-            ineligibleAdoptedEntryIDs(layoutName: layoutName, windows: allWindows)
-        )
-        let preflightEntries = state.slots(layoutName: layoutName).filter {
-            !preflightExcludedEntryIDs.contains($0.id)
-                && !protectedEntryIDs.contains($0.id)
-        }
-        let preflightResolution = WindowRegistry.resolve(
-            entries: preflightEntries.map(\.registryEntry),
-            manageableWindows: windows,
-            fullInventory: inventory
-        )
-        let reservedExactEntryIDs = Set(preflightResolution.unresolved.compactMap { entryID in
-            preflightResolution.unresolvedReasons[entryID] == .reservedExactIdentity
-                ? entryID
-                : nil
-        })
-        let targetEntryIDs = Set(
-            preflightEntries.filter { $0.spaceID == targetSpaceID }.map(\.id)
-        )
-        let previousEntryIDs = Set(
-            preflightEntries.filter { $0.spaceID == previousSpaceID }.map(\.id)
-        )
-        let targetReservedCount = reservedExactEntryIDs.intersection(targetEntryIDs).count
-        let previousReservedCount = reservedExactEntryIDs.intersection(previousEntryIDs).count
-        let targetAssignmentCount = preflightResolution.assignments.keys.reduce(into: 0) { count, entryID in
-            if targetEntryIDs.contains(entryID) {
-                count += 1
-            }
-        }
-        let previousAssignmentCount = preflightResolution.assignments.keys.reduce(into: 0) { count, entryID in
-            if previousEntryIDs.contains(entryID) {
-                count += 1
-            }
-        }
-        let rejectedPrevious = previousReservedCount > 0 && previousAssignmentCount == 0
-        let rejectedTarget = targetReservedCount > 0 && targetAssignmentCount == 0
-        if rejectedPrevious || rejectedTarget {
-            logger.log(
-                level: "warn",
-                event: "space.switch.preflightRejected",
-                fields: [
-                    "from": previousSpaceID ?? -1,
-                    "to": targetSpaceID,
-                    "manageable": windows.count,
-                    "assignments": preflightResolution.assignments.count,
-                    "reservedExact": reservedExactEntryIDs.count,
-                    "previousReserved": previousReservedCount,
-                    "previousAssignments": previousAssignmentCount,
-                    "targetReserved": targetReservedCount,
-                    "targetAssignments": targetAssignmentCount,
-                ]
-            )
-            throw VirtualSpaceEngineError.stateError(
-                "window inventory temporarily lacks manageable bindings"
-            )
         }
 
         // Untracked visible windows belong to the workspace the user sees

@@ -1506,6 +1506,27 @@ struct VirtualSpaceEngineTests {
         }
     }
 
+    @Test func transientAXDropoutRecoversWithinSingleSwitchRequest() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        _ = try await engine.switchSpace(to: 2, config: config)
+        _ = try await engine.switchSpace(to: 1, config: config)
+
+        let recovered = control.currentWindows()
+        let droppedOut = recovered.map { $0.withAXBacked(false) }
+        control.windowListSequence = [droppedOut, recovered]
+        let sleepsBefore = control.sleptMilliseconds.count
+
+        let outcome = try await engine.switchSpace(to: 2, config: config)
+
+        #expect(outcome.didChangeSpace)
+        #expect(outcome.targetSpaceID == 2)
+        #expect(outcome.converged)
+        #expect(control.sleptMilliseconds.dropFirst(sleepsBefore).first == 1)
+        #expect(await engine.currentState.primaryActiveSpaceID == 2)
+    }
+
     @Test func targetReservedExactBindingRejectsBeforeHidingCurrentWorkspace() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
