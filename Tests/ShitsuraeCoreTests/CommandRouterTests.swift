@@ -267,7 +267,8 @@ struct CommandServerTests {
                 bundleIdentifier: "shitsurae-tests",
                 executablePath: nil,
                 codeDirectoryHash: testCodeHash,
-                signatureValid: true
+                signatureValid: true,
+                appleAnchored: false
             )
         })
         let server = CommandServer(router: router, logger: logger, socketURL: socketURL, auth: auth)
@@ -310,7 +311,8 @@ struct CommandServerTests {
                 bundleIdentifier: "shitsurae-tests",
                 executablePath: nil,
                 codeDirectoryHash: testCodeHash,
-                signatureValid: true
+                signatureValid: true,
+                appleAnchored: false
             )
         })
         let first = CommandServer(router: router, logger: logger, socketURL: socketURL, auth: auth)
@@ -360,7 +362,8 @@ struct PeerAuthServiceTests {
             bundleIdentifier: "com.yuki-yano.shitsurae.cli",
             executablePath: "/tmp/anything",
             codeDirectoryHash: Data([1]),
-            signatureValid: true
+            signatureValid: true,
+            appleAnchored: true
         )))
     }
 
@@ -370,7 +373,19 @@ struct PeerAuthServiceTests {
             bundleIdentifier: "com.yuki-yano.shitsurae.cli",
             executablePath: nil,
             codeDirectoryHash: Data([1]),
-            signatureValid: false
+            signatureValid: false,
+            appleAnchored: true
+        )))
+    }
+
+    @Test func rejectsSelfSignedTeamIdentity() {
+        #expect(!service.authorize(identity: PeerIdentity(
+            teamIdentifier: "TEAM123",
+            bundleIdentifier: "com.yuki-yano.shitsurae.cli",
+            executablePath: "/tmp/forged-cli",
+            codeDirectoryHash: Data([1]),
+            signatureValid: true,
+            appleAnchored: false
         )))
     }
 
@@ -380,7 +395,8 @@ struct PeerAuthServiceTests {
             bundleIdentifier: "com.yuki-yano.shitsurae.cli",
             executablePath: "/tmp/shitsurae",
             codeDirectoryHash: adHocHash,
-            signatureValid: true
+            signatureValid: true,
+            appleAnchored: false
         )))
 
         #expect(!service.authorize(identity: PeerIdentity(
@@ -388,14 +404,16 @@ struct PeerAuthServiceTests {
             bundleIdentifier: "com.yuki-yano.shitsurae.cli.attacker",
             executablePath: "/tmp/shitsurae",
             codeDirectoryHash: adHocHash,
-            signatureValid: true
+            signatureValid: true,
+            appleAnchored: false
         )))
         #expect(!service.authorize(identity: PeerIdentity(
             teamIdentifier: nil,
             bundleIdentifier: "com.yuki-yano.shitsurae.cli",
             executablePath: "/tmp/shitsurae",
             codeDirectoryHash: Data([0xde, 0xad]),
-            signatureValid: true
+            signatureValid: true,
+            appleAnchored: false
         )))
     }
 }

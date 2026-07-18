@@ -312,10 +312,13 @@ final class WindowThumbnailProvider {
         configuration.height = Int(scWindow.frame.height * scale)
         configuration.showsCursor = false
 
-        guard let cgImage = try? await SCScreenshotManager.captureImage(
+        guard !Task.isCancelled,
+              let cgImage = try? await SCScreenshotManager.captureImage(
             contentFilter: filter,
             configuration: configuration
-        ), processStartTime(identity.pid) == identity.processStartTime else {
+        ), !Task.isCancelled,
+              processStartTime(identity.pid) == identity.processStartTime
+        else {
             return nil
         }
 
@@ -353,12 +356,19 @@ final class WindowThumbnailSession: Identifiable {
         contentTask = Task { await contentLoader() }
     }
 
+    deinit {
+        contentTask.cancel()
+    }
+
     func placeholder(identity: WindowIdentity) -> NSImage? {
         provider.placeholder(identity: identity)
     }
 
     func captureFresh(identity: WindowIdentity) async -> NSImage? {
-        guard let content = await contentTask.value else {
+        guard !Task.isCancelled,
+              let content = await contentTask.value,
+              !Task.isCancelled
+        else {
             return nil
         }
         return await provider.capture(identity: identity, content: content)

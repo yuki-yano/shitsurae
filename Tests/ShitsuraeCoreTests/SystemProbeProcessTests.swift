@@ -36,4 +36,17 @@ struct SystemProbeProcessTests {
         #expect(output == nil)
         #expect(elapsed < .seconds(1))
     }
+
+    @Test func forceKillsProcessThatIgnoresTermination() {
+        let startedAt = ContinuousClock.now
+        let output = SystemProbe.runProcess(
+            executable: "/bin/sh",
+            arguments: ["-c", "trap '' TERM; while :; do :; done"],
+            timeoutSeconds: 0.05
+        )
+        let elapsed = startedAt.duration(to: .now)
+
+        #expect(output == nil)
+        #expect(elapsed < .seconds(1))
+    }
 }

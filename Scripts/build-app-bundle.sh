@@ -68,6 +68,19 @@ cd "$ROOT_DIR"
 swift build -c "$CONFIGURATION"
 BIN_DIR="$(swift build -c "$CONFIGURATION" --show-bin-path)"
 
+if ! cmp -s \
+  "$ROOT_DIR/.build/checkouts/swift-argument-parser/LICENSE.txt" \
+  "$THIRD_PARTY_LICENSES_DIR/swift-argument-parser.txt"; then
+  echo "error: bundled swift-argument-parser license is stale" >&2
+  exit 1
+fi
+if ! cmp -s \
+  "$ROOT_DIR/.build/checkouts/Yams/LICENSE" \
+  "$THIRD_PARTY_LICENSES_DIR/Yams.txt"; then
+  echo "error: bundled Yams license is stale" >&2
+  exit 1
+fi
+
 if [[ ! -x "$BIN_DIR/$APP_NAME" ]]; then
   echo "error: missing app binary: $BIN_DIR/$APP_NAME" >&2
   exit 1

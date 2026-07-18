@@ -3,23 +3,6 @@ import ApplicationServices
 import Darwin
 import Foundation
 
-private final class ProcessOutputBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var data = Data()
-
-    func set(_ newValue: Data) {
-        lock.lock()
-        data = newValue
-        lock.unlock()
-    }
-
-    func get() -> Data {
-        lock.lock()
-        defer { lock.unlock() }
-        return data
-    }
-}
-
 /// Runtime display description. `id` is the display UUID
 /// (CGDisplayCreateUUIDFromDisplayID) — the stable DisplayKey used everywhere
 /// in v2; CGDirectDisplayID changes across reconnects and must not leak out.
@@ -242,39 +225,34 @@ public enum SystemProbe {
         process.arguments = arguments
         process.standardInput = nil
 
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("shitsurae-process-\(UUID().uuidString).output")
+        guard FileManager.default.createFile(
+            atPath: outputURL.path,
+            contents: nil,
+            attributes: [.posixPermissions: 0o600]
+        ),
+              let outputHandle = try? FileHandle(forUpdating: outputURL)
+        else {
+            return nil
+        }
+        defer {
+            try? outputHandle.close()
+            try? FileManager.default.removeItem(at: outputURL)
+        }
 
-        let outputReader = outputPipe.fileHandleForReading
-        let errorReader = errorPipe.fileHandleForReading
-        let outputData = ProcessOutputBox()
-        let group = DispatchGroup()
+        process.standardOutput = outputHandle
+        process.standardError = FileHandle.nullDevice
+
         let termination = DispatchSemaphore(value: 0)
 
         process.terminationHandler = { _ in
             termination.signal()
         }
 
-        group.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
-            outputData.set(outputReader.readDataToEndOfFile())
-            group.leave()
-        }
-
-        group.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
-            _ = errorReader.readDataToEndOfFile()
-            group.leave()
-        }
-
         do {
             try process.run()
         } catch {
-            outputPipe.fileHandleForWriting.closeFile()
-            errorPipe.fileHandleForWriting.closeFile()
-            group.wait()
             return nil
         }
 
@@ -284,19 +262,25 @@ public enum SystemProbe {
             process.terminate()
             let graceDeadline = DispatchTime.now() + processTerminationGraceSeconds
             if termination.wait(timeout: graceDeadline) == .timedOut {
-                kill(process.processIdentifier, SIGKILL)
-                termination.wait()
+                _ = kill(process.processIdentifier, SIGKILL)
+                let killDeadline = DispatchTime.now() + processTerminationGraceSeconds
+                guard termination.wait(timeout: killDeadline) == .success else {
+                    return nil
+                }
             }
         }
-
-        outputPipe.fileHandleForWriting.closeFile()
-        errorPipe.fileHandleForWriting.closeFile()
-        group.wait()
 
         guard !timedOut, process.terminationStatus == 0 else {
             return nil
         }
 
-        return String(data: outputData.get(), encoding: .utf8)
+        do {
+            try outputHandle.synchronize()
+            try outputHandle.seek(toOffset: 0)
+            let outputData = try outputHandle.readToEnd() ?? Data()
+            return String(data: outputData, encoding: .utf8)
+        } catch {
+            return nil
+        }
     }
 }

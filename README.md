@@ -365,7 +365,7 @@ shortcuts:
 1. **Config**: delete these keys (they are load errors now):
    - `mode.space` (always virtual; `mode.followFocus` still works)
    - `executionPolicy` (whole section)
-2. **Runtime state**: pre-v4 state files are discarded automatically on first launch (backed up as `runtime-state.discarded-*.json`). Re-bootstrap with `shitsurae arrange <layout> --state-only --space <id>`.
+2. **Runtime state**: unsupported or corrupt state is preserved and startup stops instead of assuming no windows are parked. Quit the previous version normally to restore its windows, then move `~/.local/state/shitsurae/runtime-state.json` aside and apply a v2 layout.
 3. **Same app in multiple slots**: each slot now needs a `title` / `profile` / `index` discriminator.
 4. **ShitsuraeAgent is gone**: you can delete `~/Library/LaunchAgents/com.yuki-yano.shitsurae.agent.plist` if it remains.
 

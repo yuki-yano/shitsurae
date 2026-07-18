@@ -28,19 +28,22 @@ public struct PeerIdentity: Equatable, Sendable {
     public let executablePath: String?
     public let codeDirectoryHash: Data?
     public let signatureValid: Bool
+    public let appleAnchored: Bool
 
     public init(
         teamIdentifier: String?,
         bundleIdentifier: String?,
         executablePath: String?,
         codeDirectoryHash: Data?,
-        signatureValid: Bool
+        signatureValid: Bool,
+        appleAnchored: Bool
     ) {
         self.teamIdentifier = teamIdentifier
         self.bundleIdentifier = bundleIdentifier
         self.executablePath = executablePath
         self.codeDirectoryHash = codeDirectoryHash
         self.signatureValid = signatureValid
+        self.appleAnchored = appleAnchored
     }
 }
 
@@ -92,6 +95,7 @@ public final class PeerAuthService: Sendable {
             }
         }
 
+        guard identity.appleAnchored else { return false }
         return allowlist.contains(where: { $0.teamIdentifier == team && $0.bundleIdentifier == bundle })
     }
 
@@ -140,6 +144,9 @@ public final class PeerAuthService: Sendable {
         }
 
         let signatureValid = SecCodeCheckValidity(code, [], nil) == errSecSuccess
+        let appleAnchored = appleAnchorRequirement.map {
+            SecCodeCheckValidity(code, [], $0) == errSecSuccess
+        } ?? false
         var staticCode: SecStaticCode?
         guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess,
               let staticCode
@@ -147,7 +154,11 @@ public final class PeerAuthService: Sendable {
             return nil
         }
 
-        return identity(from: staticCode, signatureValid: signatureValid)
+        return identity(
+            from: staticCode,
+            signatureValid: signatureValid,
+            appleAnchored: appleAnchored
+        )
     }
 
     private static func currentExecutableIdentity() -> PeerIdentity? {
@@ -167,12 +178,20 @@ public final class PeerAuthService: Sendable {
             return nil
         }
         let signatureValid = SecStaticCodeCheckValidity(staticCode, [], nil) == errSecSuccess
-        return identity(from: staticCode, signatureValid: signatureValid)
+        let appleAnchored = appleAnchorRequirement.map {
+            SecStaticCodeCheckValidity(staticCode, [], $0) == errSecSuccess
+        } ?? false
+        return identity(
+            from: staticCode,
+            signatureValid: signatureValid,
+            appleAnchored: appleAnchored
+        )
     }
 
     private static func identity(
         from staticCode: SecStaticCode,
-        signatureValid: Bool
+        signatureValid: Bool,
+        appleAnchored: Bool
     ) -> PeerIdentity? {
         var rawInfo: CFDictionary?
         guard SecCodeCopySigningInformation(
@@ -190,7 +209,20 @@ public final class PeerAuthService: Sendable {
             bundleIdentifier: info[kSecCodeInfoIdentifier as String] as? String,
             executablePath: (info[kSecCodeInfoMainExecutable as String] as? URL)?.path,
             codeDirectoryHash: info[kSecCodeInfoUnique as String] as? Data,
-            signatureValid: signatureValid
+            signatureValid: signatureValid,
+            appleAnchored: appleAnchored
         )
     }
+
+    private nonisolated(unsafe) static let appleAnchorRequirement: SecRequirement? = {
+        var requirement: SecRequirement?
+        guard SecRequirementCreateWithString(
+            "anchor apple generic" as CFString,
+            [],
+            &requirement
+        ) == errSecSuccess else {
+            return nil
+        }
+        return requirement
+    }()
 }
