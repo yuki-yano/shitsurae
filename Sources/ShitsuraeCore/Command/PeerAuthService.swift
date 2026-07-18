@@ -12,15 +12,35 @@ public struct PeerAllowedIdentity: Equatable, Sendable {
     }
 }
 
+public struct PeerAllowedAdHocIdentity: Equatable, Sendable {
+    public let bundleIdentifier: String
+    public let codeDirectoryHash: Data
+
+    public init(bundleIdentifier: String, codeDirectoryHash: Data) {
+        self.bundleIdentifier = bundleIdentifier
+        self.codeDirectoryHash = codeDirectoryHash
+    }
+}
+
 public struct PeerIdentity: Equatable, Sendable {
     public let teamIdentifier: String?
     public let bundleIdentifier: String?
     public let executablePath: String?
+    public let codeDirectoryHash: Data?
+    public let signatureValid: Bool
 
-    public init(teamIdentifier: String?, bundleIdentifier: String?, executablePath: String?) {
+    public init(
+        teamIdentifier: String?,
+        bundleIdentifier: String?,
+        executablePath: String?,
+        codeDirectoryHash: Data?,
+        signatureValid: Bool
+    ) {
         self.teamIdentifier = teamIdentifier
         self.bundleIdentifier = bundleIdentifier
         self.executablePath = executablePath
+        self.codeDirectoryHash = codeDirectoryHash
+        self.signatureValid = signatureValid
     }
 }
 
@@ -29,13 +49,16 @@ public struct PeerIdentity: Equatable, Sendable {
 /// any user process drive Shitsurae's Accessibility powers.
 public final class PeerAuthService: Sendable {
     private let allowlist: [PeerAllowedIdentity]
+    private let adHocAllowlist: [PeerAllowedAdHocIdentity]
     private let identityProvider: @Sendable (Int32) -> PeerIdentity?
 
     public init(
         allowlist: [PeerAllowedIdentity] = PeerAuthService.defaultAllowlist(),
+        adHocAllowlist: [PeerAllowedAdHocIdentity] = PeerAuthService.defaultAdHocAllowlist(),
         identityProvider: @escaping @Sendable (Int32) -> PeerIdentity? = PeerAuthService.identityForSocketPeer(fd:)
     ) {
         self.allowlist = allowlist
+        self.adHocAllowlist = adHocAllowlist
         self.identityProvider = identityProvider
     }
 
@@ -53,21 +76,49 @@ public final class PeerAuthService: Sendable {
     }
 
     func authorize(identity: PeerIdentity) -> Bool {
+        guard identity.signatureValid else { return false }
         guard let team = identity.teamIdentifier,
               let bundle = identity.bundleIdentifier
         else {
-            return matchesAdHocDevelopmentIdentity(identity)
+            guard identity.teamIdentifier == nil,
+                  let bundle = identity.bundleIdentifier,
+                  let codeDirectoryHash = identity.codeDirectoryHash
+            else {
+                return false
+            }
+            return adHocAllowlist.contains {
+                $0.bundleIdentifier == bundle
+                    && $0.codeDirectoryHash == codeDirectoryHash
+            }
         }
 
         return allowlist.contains(where: { $0.teamIdentifier == team && $0.bundleIdentifier == bundle })
     }
 
     public static func defaultAllowlist() -> [PeerAllowedIdentity] {
-        let team = ProcessInfo.processInfo.environment["SHITSURAE_DEVELOPMENT_TEAM"] ?? "DEVELOPMENT_TEAM_UNSET"
+        let team = currentExecutableIdentity()?.teamIdentifier
+            ?? ProcessInfo.processInfo.environment["SHITSURAE_DEVELOPMENT_TEAM"]
+            ?? "DEVELOPMENT_TEAM_UNSET"
         return [
             PeerAllowedIdentity(teamIdentifier: team, bundleIdentifier: "com.yuki-yano.shitsurae"),
             PeerAllowedIdentity(teamIdentifier: team, bundleIdentifier: "com.yuki-yano.shitsurae.cli"),
         ]
+    }
+
+    public static func defaultAdHocAllowlist() -> [PeerAllowedAdHocIdentity] {
+        guard let resourceURL = Bundle.main.resourceURL?.appendingPathComponent("shitsurae"),
+              let identity = identityForExecutable(at: resourceURL),
+              identity.signatureValid,
+              identity.teamIdentifier == nil,
+              let bundleIdentifier = identity.bundleIdentifier,
+              let codeDirectoryHash = identity.codeDirectoryHash
+        else {
+            return []
+        }
+        return [PeerAllowedAdHocIdentity(
+            bundleIdentifier: bundleIdentifier,
+            codeDirectoryHash: codeDirectoryHash
+        )]
     }
 
     /// Resolves the peer's code-signing identity from its audit token
@@ -88,6 +139,7 @@ public final class PeerAuthService: Sendable {
             return nil
         }
 
+        let signatureValid = SecCodeCheckValidity(code, [], nil) == errSecSuccess
         var staticCode: SecStaticCode?
         guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess,
               let staticCode
@@ -95,6 +147,33 @@ public final class PeerAuthService: Sendable {
             return nil
         }
 
+        return identity(from: staticCode, signatureValid: signatureValid)
+    }
+
+    private static func currentExecutableIdentity() -> PeerIdentity? {
+        identityForExecutable(at: Bundle.main.executableURL)
+    }
+
+    private static func identityForExecutable(at executableURL: URL?) -> PeerIdentity? {
+        guard let executableURL else { return nil }
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(
+            executableURL as CFURL,
+            [],
+            &staticCode
+        ) == errSecSuccess,
+            let staticCode
+        else {
+            return nil
+        }
+        let signatureValid = SecStaticCodeCheckValidity(staticCode, [], nil) == errSecSuccess
+        return identity(from: staticCode, signatureValid: signatureValid)
+    }
+
+    private static func identity(
+        from staticCode: SecStaticCode,
+        signatureValid: Bool
+    ) -> PeerIdentity? {
         var rawInfo: CFDictionary?
         guard SecCodeCopySigningInformation(
             staticCode,
@@ -109,29 +188,9 @@ public final class PeerAuthService: Sendable {
         return PeerIdentity(
             teamIdentifier: info[kSecCodeInfoTeamIdentifier as String] as? String,
             bundleIdentifier: info[kSecCodeInfoIdentifier as String] as? String,
-            executablePath: (info[kSecCodeInfoMainExecutable as String] as? URL)?.path
+            executablePath: (info[kSecCodeInfoMainExecutable as String] as? URL)?.path,
+            codeDirectoryHash: info[kSecCodeInfoUnique as String] as? Data,
+            signatureValid: signatureValid
         )
-    }
-
-    /// Local ad-hoc builds carry no team identifier; allow the known
-    /// Shitsurae executables (same policy as v1).
-    private func matchesAdHocDevelopmentIdentity(_ identity: PeerIdentity) -> Bool {
-        guard identity.teamIdentifier == nil else {
-            return false
-        }
-
-        let allowedPrefixes = ["shitsurae-", "Shitsurae-", "com.yuki-yano.shitsurae"]
-        if let bundle = identity.bundleIdentifier,
-           allowedPrefixes.contains(where: { bundle.hasPrefix($0) })
-        {
-            return true
-        }
-
-        if let executablePath = identity.executablePath {
-            let executable = URL(fileURLWithPath: executablePath).lastPathComponent
-            return executable == "shitsurae" || executable == "shitsurae-cli" || executable == "Shitsurae"
-        }
-
-        return false
     }
 }
