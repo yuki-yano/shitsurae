@@ -190,18 +190,28 @@ final class AppModel: ObservableObject {
     private var frontmostApplicationTracker = FrontmostApplicationTracker()
 
     private var observers: [NSObjectProtocol] = []
+    private var shutdownInProgress = false
+    private var shutdownCompletions: [() -> Void] = []
 
     init() {
         let focusEventGate = FocusEventGate()
         self.focusEventGate = focusEventGate
         focusEventCoordinator = FocusEventCoordinator(gate: focusEventGate)
         configManager = ConfigManager(logger: logger)
-        engine = VirtualSpaceEngine(
-            store: RuntimeStateStore(),
-            control: LiveWindowControl(),
-            logger: logger,
-            focusEventGate: focusEventGate
-        )
+        do {
+            engine = try VirtualSpaceEngine(
+                store: RuntimeStateStore(),
+                control: LiveWindowControl(),
+                logger: logger,
+                focusEventGate: focusEventGate
+            )
+        } catch {
+            logger.error(
+                event: "app.runtimeStateLoadFailed",
+                fields: ["error": String(describing: error)]
+            )
+            fatalError("Unable to load runtime state safely: \(error)")
+        }
         router = CommandRouter(engine: engine, configManager: configManager, logger: logger)
     }
 
@@ -241,7 +251,12 @@ final class AppModel: ObservableObject {
         refreshStatus()
     }
 
-    func shutdown() {
+    func shutdown(completion: @escaping () -> Void) {
+        shutdownCompletions.append(completion)
+        guard !shutdownInProgress else { return }
+        shutdownInProgress = true
+
+        let config = configManager.configIfLoaded()
         hotkeyManager?.stop()
         windowEventMonitor.stop()
         server?.stop()
@@ -257,10 +272,8 @@ final class AppModel: ObservableObject {
         // was actually restored. A failed restore keeps the state so the
         // next session can still find and recover the parked windows.
         let engine = engine
-        let config = configManager.configIfLoaded()
         let logger = logger
-        let semaphore = DispatchSemaphore(value: 0)
-        Task.detached {
+        Task {
             var restored = false
             if let config {
                 restored = await engine.restoreAllForShutdown(config: config)
@@ -274,9 +287,10 @@ final class AppModel: ObservableObject {
                     fields: ["keptState": true]
                 )
             }
-            semaphore.signal()
+            let completions = shutdownCompletions
+            shutdownCompletions.removeAll()
+            completions.forEach { $0() }
         }
-        _ = semaphore.wait(timeout: .now() + 3)
     }
 
     // MARK: - Config

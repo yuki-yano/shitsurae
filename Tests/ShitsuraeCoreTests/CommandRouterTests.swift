@@ -20,7 +20,7 @@ struct CommandRouterTests {
         let control = MockWindowControl(windows: windows, displays: [TestFixtures.display])
         let (store, stateURL) = TestFixtures.tempStateStore()
         let logger = TestFixtures.nullLogger()
-        let engine = VirtualSpaceEngine(
+        let engine = try VirtualSpaceEngine(
             store: store,
             control: control,
             logger: logger,
@@ -229,7 +229,7 @@ struct CommandServerTests {
         let (store, stateURL) = TestFixtures.tempStateStore()
         defer { try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent()) }
         let logger = TestFixtures.nullLogger()
-        let engine = VirtualSpaceEngine(store: store, control: control, logger: logger, retryDelaysMS: [1])
+        let engine = try VirtualSpaceEngine(store: store, control: control, logger: logger, retryDelaysMS: [1])
 
         let configDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("shitsurae-server-config-\(UUID().uuidString)", isDirectory: true)
@@ -282,7 +282,7 @@ struct CommandServerTests {
         let (store, stateURL) = TestFixtures.tempStateStore()
         defer { try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent()) }
         let logger = TestFixtures.nullLogger()
-        let engine = VirtualSpaceEngine(store: store, control: control, logger: logger, retryDelaysMS: [1])
+        let engine = try VirtualSpaceEngine(store: store, control: control, logger: logger, retryDelaysMS: [1])
         let configManager = ConfigManager(directoryURL: FileManager.default.temporaryDirectory, logger: logger)
         let router = CommandRouter(engine: engine, configManager: configManager, logger: logger)
         let socketURL = URL(fileURLWithPath: "/tmp/shitsurae-test-\(UInt32.random(in: 0 ..< 99999)).sock")

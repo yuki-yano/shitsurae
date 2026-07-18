@@ -107,6 +107,24 @@ public extension VirtualSpaceEngine {
             config: config
         )
 
+        if let previousLayoutName = currentState.activeLayoutName,
+           previousLayoutName != layoutName
+        {
+            let previousEntries = currentState.slots(layoutName: previousLayoutName)
+            let previousHiddenEntries = previousEntries.filter {
+                $0.visibilityState == .hiddenOffscreen
+            }
+            guard restoreHiddenEntriesBeforeArrange(
+                previousHiddenEntries,
+                registryEntries: previousEntries.map(\.registryEntry),
+                recoveryLayout: layout,
+                hostDisplay: hostDisplay,
+                displays: displays
+            ) else {
+                return restoreIncompleteResult(layoutName: layoutName)
+            }
+        }
+
         let plan = ArrangePlanner.buildPlan(
             layoutName: layoutName,
             layout: layout,
@@ -123,6 +141,21 @@ public extension VirtualSpaceEngine {
                 definition: step.definition
             )
         })
+        let configuredFingerprints: Set<String> = Set(layout.spaces.flatMap { space in
+            space.windows.compactMap { definition in
+                guard !PolicyEngine.matchesIgnoreRule(
+                    windowDefinition: definition,
+                    rules: config.config.ignore?.apply
+                ) else {
+                    return nil
+                }
+                return SlotEntry.fingerprint(
+                    layoutName: layoutName,
+                    spaceID: space.spaceID,
+                    definition: definition
+                )
+            }
+        })
         let arrangeRegistryEntries = makeArrangeRegistryEntries(
             layoutName: layoutName,
             layout: layout,
@@ -137,25 +170,10 @@ public extension VirtualSpaceEngine {
             layoutName: layoutName,
             layout: layout,
             arrangedFingerprints: arrangedFingerprints,
+            configuredFingerprints: configuredFingerprints,
             config: config
         ) else {
-            let error = ErrorItem(
-                code: ErrorCode.operationTimedOut.rawValue,
-                message: "unable to restore hidden windows before arrange",
-                spaceID: nil,
-                slot: nil
-            )
-            return ArrangeExecutionJSON(
-                layout: layoutName,
-                result: "failed",
-                subcode: "restoreIncomplete",
-                unresolvedSlots: [],
-                hardErrors: [error],
-                softErrors: [],
-                skipped: [],
-                warnings: [],
-                exitCode: ErrorCode.operationTimedOut.rawValue
-            )
+            return restoreIncompleteResult(layoutName: layoutName)
         }
 
         var softErrors: [ErrorItem] = []
@@ -360,6 +378,7 @@ public extension VirtualSpaceEngine {
         layoutName: String,
         layout: LayoutDefinition,
         arrangedFingerprints: Set<String>,
+        configuredFingerprints: Set<String>,
         config: LoadedConfig
     ) -> Bool {
         let displays = control.displays()
@@ -375,16 +394,13 @@ public extension VirtualSpaceEngine {
             .filter {
                 $0.visibilityState == .hiddenOffscreen
                     && $0.origin == .layout
-                    && arrangedFingerprints.contains($0.definitionFingerprint)
+                    && (arrangedFingerprints.contains($0.definitionFingerprint)
+                        || !configuredFingerprints.contains($0.definitionFingerprint))
             }
         guard !hiddenEntries.isEmpty else {
             return true
         }
 
-        let observation = control.focusedWindowObservation()
-        let inventory = observation.inventory
-        guard inventory.isAuthoritative else { return false }
-        let windows = WindowEligibility.geometryCandidates(in: observation)
         // Restore participates in the same global ownership assignment as
         // wait/place. Resolving only the selected hidden entries lets a stale
         // binding borrow a live window that an out-of-scope layout entry owns
@@ -395,26 +411,56 @@ public extension VirtualSpaceEngine {
             layout: layout,
             config: config
         )
+        let registeredIDs = Set(registryEntries.map(\.entry.id))
+        let discardedEntries = currentState.slots(layoutName: layoutName)
+            .filter { !registeredIDs.contains($0.id) }
+            .map(\.registryEntry)
+        return restoreHiddenEntriesBeforeArrange(
+            hiddenEntries,
+            registryEntries: registryEntries.map(\.entry) + discardedEntries,
+            recoveryLayout: layout,
+            hostDisplay: hostDisplay,
+            displays: displays
+        )
+    }
+
+    private func restoreHiddenEntriesBeforeArrange(
+        _ hiddenEntries: [SlotEntry],
+        registryEntries: [WindowRegistry.Entry],
+        recoveryLayout: LayoutDefinition,
+        hostDisplay: DisplayInfo,
+        displays: [DisplayInfo]
+    ) -> Bool {
+        guard !hiddenEntries.isEmpty else { return true }
+
+        let observation = control.focusedWindowObservation()
+        let inventory = observation.inventory
+        guard inventory.isAuthoritative else { return false }
+        let windows = WindowEligibility.geometryCandidates(in: observation)
         let resolution = WindowRegistry.resolve(
-            entries: registryEntries.map(\.entry),
+            entries: registryEntries,
             manageableWindows: windows,
             fullInventory: inventory
         )
 
         var plans: [VisibilityPlan] = []
+        var authoritativelyGoneEntryIDs: Set<String> = []
         for entry in hiddenEntries {
             guard let window = resolution.assignments[entry.id] else {
                 if resolution.unresolvedReasons[entry.id] == .reservedExactIdentity {
                     return false
                 }
                 // An authoritatively gone exact-only window needs no restore.
+                if entry.boundIdentity.map({ !inventory.mayContain($0) }) ?? true {
+                    authoritativelyGoneEntryIDs.insert(entry.id)
+                }
                 continue
             }
             guard let plan = VisibilityPlanner.plan(
                 entry: entry,
                 window: window,
                 transition: .show,
-                layout: layout,
+                layout: recoveryLayout,
                 hostDisplay: hostDisplay,
                 displays: displays
             ) else {
@@ -430,8 +476,53 @@ public extension VirtualSpaceEngine {
             logger: logger,
             retryDelaysMS: retryDelaysMS
         )
-        return !convergence.hasPending
-            && convergence.changes.allSatisfy { $0.effectiveEntry == $0.desiredEntry }
+        guard !convergence.hasPending,
+              convergence.changes.allSatisfy({ $0.effectiveEntry == $0.desiredEntry })
+        else {
+            return false
+        }
+
+        var newState = currentState
+        var restoredEntries = Dictionary(uniqueKeysWithValues: convergence.changes.map {
+            ($0.effectiveEntry.id, $0.effectiveEntry)
+        })
+        for entry in hiddenEntries where authoritativelyGoneEntryIDs.contains(entry.id) {
+            var restored = entry
+            restored.visibilityState = .visible
+            restored.lastHiddenFrame = nil
+            restoredEntries[restored.id] = restored
+        }
+        newState.slots = newState.slots.map { restoredEntries[$0.id] ?? $0 }
+        do {
+            try replaceState(newState)
+            return true
+        } catch {
+            logger.error(
+                event: "arrange.restore.persistFailed",
+                fields: ["error": String(describing: error)]
+            )
+            return false
+        }
+    }
+
+    private func restoreIncompleteResult(layoutName: String) -> ArrangeExecutionJSON {
+        let error = ErrorItem(
+            code: ErrorCode.operationTimedOut.rawValue,
+            message: "unable to restore hidden windows before arrange",
+            spaceID: nil,
+            slot: nil
+        )
+        return ArrangeExecutionJSON(
+            layout: layoutName,
+            result: "failed",
+            subcode: "restoreIncomplete",
+            unresolvedSlots: [],
+            hardErrors: [error],
+            softErrors: [],
+            skipped: [],
+            warnings: [],
+            exitCode: ErrorCode.operationTimedOut.rawValue
+        )
     }
 
     private func rebuildStateAfterArrange(

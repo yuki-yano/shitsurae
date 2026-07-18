@@ -30,6 +30,7 @@ private let menuBarIconImage: NSImage? = {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static nonisolated(unsafe) var sharedModel: AppModel?
+    private var terminationPending = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Prompt for Accessibility on first launch — the whole app needs it.
@@ -40,8 +41,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Self.sharedModel?.start()
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        Self.sharedModel?.shutdown()
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let model = Self.sharedModel else { return .terminateNow }
+        guard !terminationPending else { return .terminateLater }
+
+        terminationPending = true
+        model.shutdown { [weak sender] in
+            sender?.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

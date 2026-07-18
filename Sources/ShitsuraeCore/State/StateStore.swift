@@ -2,6 +2,7 @@ import Foundation
 
 public enum RuntimeStateStoreError: Error, Equatable {
     case corrupted(fileURL: URL, backupURL: URL?)
+    case unsupportedSchema(fileURL: URL, actualVersion: Int?, expectedVersion: Int)
     case readPermissionDenied(fileURL: URL)
     case readFailed(fileURL: URL, reason: String)
     case encodingFailed
@@ -32,9 +33,9 @@ public struct RuntimeStateWriteExpectation: Equatable, Sendable {
 /// revision/configGeneration expectation is kept as a tripwire against
 /// external modification, not as a cross-process lock.
 ///
-/// Pre-v4 state files (no schemaVersion / schemaVersion != 4) are moved aside and
-/// replaced with a fresh state on first load — re-bootstrap with
-/// `shitsurae arrange <layout> --state-only --space <id>` afterwards.
+/// State loading is fail-closed: an unreadable, corrupt, or unsupported file is
+/// never converted into an empty state because it may be the only record of
+/// windows currently parked offscreen.
 public final class RuntimeStateStore: @unchecked Sendable {
     private let fileURL: URL
     private let fileManager: FileManager
@@ -73,25 +74,28 @@ public final class RuntimeStateStore: @unchecked Sendable {
             let schemaVersion: Int?
         }
 
-        guard let probe = try? JSONDecoder().decode(SchemaProbe.self, from: data),
-              probe.schemaVersion == RuntimeState.currentSchemaVersion
-        else {
-            // Pre-v4 (or unknown) state: discard and start fresh, keeping the old
-            // file as a timestamped backup.
-            _ = backupStateFile(label: "discarded")
-            return RuntimeState()
+        let probe: SchemaProbe
+        do {
+            probe = try JSONDecoder().decode(SchemaProbe.self, from: data)
+        } catch {
+            let backupURL = copyStateFile(label: "corrupt")
+            throw RuntimeStateStoreError.corrupted(fileURL: fileURL, backupURL: backupURL)
+        }
+
+        guard probe.schemaVersion == RuntimeState.currentSchemaVersion else {
+            throw RuntimeStateStoreError.unsupportedSchema(
+                fileURL: fileURL,
+                actualVersion: probe.schemaVersion,
+                expectedVersion: RuntimeState.currentSchemaVersion
+            )
         }
 
         do {
             return try JSONDecoder().decode(RuntimeState.self, from: data).canonicalized()
         } catch {
-            let backupURL = backupStateFile(label: "corrupt")
+            let backupURL = copyStateFile(label: "corrupt")
             throw RuntimeStateStoreError.corrupted(fileURL: fileURL, backupURL: backupURL)
         }
-    }
-
-    public func load() -> RuntimeState {
-        (try? loadStrict()) ?? RuntimeState()
     }
 
     @discardableResult
@@ -158,7 +162,7 @@ public final class RuntimeStateStore: @unchecked Sendable {
         RuntimeState(slots: slots).canonicalized().slots
     }
 
-    private func backupStateFile(label: String) -> URL? {
+    private func copyStateFile(label: String) -> URL? {
         guard fileManager.fileExists(atPath: fileURL.path) else {
             return nil
         }
@@ -167,7 +171,7 @@ public final class RuntimeStateStore: @unchecked Sendable {
             "runtime-state.\(label)-\(Self.backupTimestamp()).json"
         )
         do {
-            try fileManager.moveItem(at: fileURL, to: backupURL)
+            try fileManager.copyItem(at: fileURL, to: backupURL)
             return backupURL
         } catch {
             return nil

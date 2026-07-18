@@ -13,7 +13,7 @@ struct ArrangeTests {
     ) -> (engine: VirtualSpaceEngine, control: MockWindowControl, stateURL: URL) {
         let control = MockWindowControl(windows: windows, displays: [TestFixtures.display])
         let (store, url) = TestFixtures.tempStateStore()
-        let engine = VirtualSpaceEngine(
+        let engine = try! VirtualSpaceEngine(
             store: store,
             control: control,
             logger: TestFixtures.nullLogger(),
@@ -165,6 +165,105 @@ struct ArrangeTests {
         if let frame = notesEntry?.lastVisibleFrame {
             #expect(!VisibilityPlanner.isHiddenWindowFrame(frame: frame, displays: [TestFixtures.display]))
         }
+    }
+
+    @Test func stateOnlyRejectsRemovingRecoveryMetadataForHiddenWindow() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        _ = try await engine.switchSpace(to: 2, config: config)
+
+        let hiddenTextEdit = try #require(control.window(1))
+        #expect(VisibilityPlanner.isHiddenWindowFrame(
+            frame: hiddenTextEdit.frame,
+            displays: [TestFixtures.display]
+        ))
+        let oldLayout = try #require(config.config.layouts["work"])
+        let newLayout = LayoutDefinition(
+            initialFocus: oldLayout.initialFocus,
+            spaces: oldLayout.spaces.map { space in
+                SpaceDefinition(
+                    spaceID: space.spaceID,
+                    windows: space.windows.filter { $0.match.bundleID != "com.apple.TextEdit" }
+                )
+            }
+        )
+        let newConfig = TestFixtures.loadedConfig(layouts: ["work": newLayout])
+        let before = await engine.currentState
+
+        await #expect(throws: VirtualSpaceEngineError.self) {
+            try await engine.arrangeStateOnly(layoutName: "work", spaceID: 2, config: newConfig)
+        }
+        #expect(await engine.currentState == before)
+    }
+
+    @Test func liveArrangeRestoresHiddenWindowBeforeRemovingItsSlot() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        _ = try await engine.switchSpace(to: 2, config: config)
+
+        let oldLayout = try #require(config.config.layouts["work"])
+        let newLayout = LayoutDefinition(
+            initialFocus: oldLayout.initialFocus,
+            spaces: oldLayout.spaces.map { space in
+                SpaceDefinition(
+                    spaceID: space.spaceID,
+                    windows: space.windows.filter { $0.match.bundleID != "com.apple.TextEdit" }
+                )
+            }
+        )
+        let newConfig = TestFixtures.loadedConfig(layouts: ["work": newLayout])
+
+        let result = try await engine.arrange(layoutName: "work", spaceID: 2, config: newConfig)
+
+        #expect(result.result == "success")
+        let restoredTextEdit = try #require(control.window(1))
+        #expect(!VisibilityPlanner.isHiddenWindowFrame(
+            frame: restoredTextEdit.frame,
+            displays: [TestFixtures.display]
+        ))
+        let textEditEntries = (await engine.currentState).slots.filter {
+            $0.bundleID == "com.apple.TextEdit"
+        }
+        #expect(textEditEntries.allSatisfy { $0.origin == .adopted })
+        #expect(textEditEntries.allSatisfy { $0.visibilityState == .visible })
+    }
+
+    @Test func liveArrangeRestoresPreviousLayoutWhenLayoutWasRenamed() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        _ = try await engine.switchSpace(to: 2, config: config)
+        #expect(VisibilityPlanner.isHiddenWindowFrame(
+            frame: try #require(control.window(1)).frame,
+            displays: [TestFixtures.display]
+        ))
+
+        let renamedLayout = LayoutDefinition(spaces: [
+            SpaceDefinition(spaceID: 1, windows: [
+                WindowDefinition(
+                    match: WindowMatchRule(bundleID: "com.apple.Notes"),
+                    slot: 1,
+                    launch: false,
+                    frame: TestFixtures.frameDef("0%", "0%", "100%", "100%")
+                ),
+            ]),
+        ])
+        let renamedConfig = TestFixtures.loadedConfig(layouts: ["renamed": renamedLayout])
+
+        let result = try await engine.arrange(
+            layoutName: "renamed",
+            spaceID: 1,
+            config: renamedConfig
+        )
+
+        #expect(result.result == "success")
+        #expect(!VisibilityPlanner.isHiddenWindowFrame(
+            frame: try #require(control.window(1)).frame,
+            displays: [TestFixtures.display]
+        ))
+        #expect((await engine.currentState).activeLayoutName == "renamed")
     }
 
     @Test func arrangeAbortsWhenHiddenExactBindingIsAXInvisible() async throws {

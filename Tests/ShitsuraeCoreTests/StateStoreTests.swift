@@ -53,8 +53,7 @@ struct StateStoreTests {
         #expect(state.activeLayoutName == nil)
     }
 
-    // 直前のv3状態ファイルも破棄する（後方互換fallbackなし）。
-    @Test func discardsV3StateFile() throws {
+    @Test func rejectsUnsupportedStateWithoutMovingOriginal() throws {
         let (store, url) = TestFixtures.tempStateStore()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
@@ -76,14 +75,14 @@ struct StateStoreTests {
         )
         try v3JSON.write(to: url, atomically: true, encoding: .utf8)
 
-        let state = try store.loadStrict()
-        #expect(state.activeLayoutName == nil)
-        #expect(state.revision == 0)
-
-        // Old file moved aside as a backup.
-        let siblings = try FileManager.default.contentsOfDirectory(atPath: url.deletingLastPathComponent().path)
-        #expect(siblings.contains { $0.contains("discarded") })
-        #expect(!FileManager.default.fileExists(atPath: url.path))
+        #expect(throws: RuntimeStateStoreError.unsupportedSchema(
+            fileURL: url,
+            actualVersion: 3,
+            expectedVersion: RuntimeState.currentSchemaVersion
+        )) {
+            try store.loadStrict()
+        }
+        #expect(FileManager.default.fileExists(atPath: url.path))
     }
 
     @Test func backsUpCorruptedFile() throws {
@@ -96,9 +95,12 @@ struct StateStoreTests {
         )
         try "{\"schemaVersion\": 4, \"broken".write(to: url, atomically: true, encoding: .utf8)
 
-        // Probe fails to decode → treated as invalid schema → discarded, fresh state.
-        let state = try store.loadStrict()
-        #expect(state.slots.isEmpty)
+        #expect(throws: RuntimeStateStoreError.self) {
+            try store.loadStrict()
+        }
+        #expect(FileManager.default.fileExists(atPath: url.path))
+        let siblings = try FileManager.default.contentsOfDirectory(atPath: url.deletingLastPathComponent().path)
+        #expect(siblings.contains { $0.contains("corrupt") })
     }
 
     @Test func rejectsStaleWrite() throws {

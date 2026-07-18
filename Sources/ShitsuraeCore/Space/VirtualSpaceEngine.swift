@@ -73,14 +73,14 @@ public actor VirtualSpaceEngine {
         retryDelaysMS: [Int] = VisibilityApplier.defaultRetryDelaysMS,
         arrangeWaitTimeoutMS: Int = 5000,
         focusEventGate: FocusEventGate = FocusEventGate()
-    ) {
+    ) throws {
         self.store = store
         self.control = control
         self.logger = logger
         self.retryDelaysMS = retryDelaysMS
         self.arrangeWaitTimeoutMS = arrangeWaitTimeoutMS
         self.focusEventGate = focusEventGate
-        self.state = store.load()
+        self.state = try store.loadStrict()
     }
 
     // MARK: - Queries
@@ -856,6 +856,39 @@ public actor VirtualSpaceEngine {
             displays: displays
         ) else {
             throw VirtualSpaceEngineError.hostDisplayUnavailable
+        }
+
+        let incomingFingerprints: Set<String> = Set(layout.spaces.flatMap { space in
+            space.windows.compactMap { definition in
+                guard !PolicyEngine.matchesIgnoreRule(
+                    windowDefinition: definition,
+                    rules: config.config.ignore?.apply
+                ) else {
+                    return nil
+                }
+                return SlotEntry.fingerprint(
+                    layoutName: layoutName,
+                    spaceID: space.spaceID,
+                    definition: definition
+                )
+            }
+        })
+        let hiddenEntriesThatWouldLoseRecovery = state.slots.filter { entry in
+            guard entry.visibilityState == .hiddenOffscreen else { return false }
+            if let activeLayoutName = state.activeLayoutName,
+               activeLayoutName != layoutName,
+               entry.layoutName == activeLayoutName
+            {
+                return true
+            }
+            return entry.layoutName == layoutName
+                && entry.origin == .layout
+                && !incomingFingerprints.contains(entry.definitionFingerprint)
+        }
+        guard hiddenEntriesThatWouldLoseRecovery.isEmpty else {
+            throw VirtualSpaceEngineError.stateError(
+                "state-only arrange would discard recovery metadata for hidden windows; run live arrange first"
+            )
         }
 
         let existingByFingerprint = Dictionary(

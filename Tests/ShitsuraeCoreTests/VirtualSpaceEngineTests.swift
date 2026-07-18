@@ -9,7 +9,7 @@ struct VirtualSpaceEngineTests {
     ) -> (engine: VirtualSpaceEngine, control: MockWindowControl, stateURL: URL) {
         let control = MockWindowControl(windows: windows, displays: [TestFixtures.display])
         let (store, url) = TestFixtures.tempStateStore()
-        let engine = VirtualSpaceEngine(
+        let engine = try! VirtualSpaceEngine(
             store: store,
             control: control,
             logger: TestFixtures.nullLogger(),
@@ -1987,7 +1987,7 @@ struct VirtualSpaceEngineTests {
         #expect(stateBefore.slots.map(\.slot) == [1, 2])
 
         // Fresh engine loads the exact state currently held in memory.
-        let reloaded = VirtualSpaceEngine(
+        let reloaded = try VirtualSpaceEngine(
             store: RuntimeStateStore(stateFileURL: url),
             control: control,
             logger: TestFixtures.nullLogger(),
@@ -2237,7 +2237,7 @@ struct VirtualSpaceEngineTests {
         defer { try? FileManager.default.removeItem(at: recoveryURL.deletingLastPathComponent()) }
         _ = try recoveryStore.saveStrict(state: captured)
         let recoveryControl = MockWindowControl(windows: physicallyHidden, displays: [TestFixtures.display])
-        let recoveryEngine = VirtualSpaceEngine(
+        let recoveryEngine = try VirtualSpaceEngine(
             store: recoveryStore,
             control: recoveryControl,
             logger: TestFixtures.nullLogger(),
@@ -2287,7 +2287,7 @@ struct VirtualSpaceEngineTests {
             windows: physicalStateBeforeMutation,
             displays: [TestFixtures.display]
         )
-        let recoveryEngine = VirtualSpaceEngine(
+        let recoveryEngine = try VirtualSpaceEngine(
             store: recoveryStore,
             control: recoveryControl,
             logger: TestFixtures.nullLogger(),
@@ -2332,7 +2332,7 @@ struct VirtualSpaceEngineTests {
             windows: physicalStateBeforeMutation,
             displays: [TestFixtures.display]
         )
-        let recoveryEngine = VirtualSpaceEngine(
+        let recoveryEngine = try VirtualSpaceEngine(
             store: recoveryStore,
             control: recoveryControl,
             logger: TestFixtures.nullLogger(),
