@@ -62,6 +62,7 @@ struct WorkspaceStateSnapshotTests {
         #expect(snapshot.inventoryAvailability == .available)
         #expect(snapshot.trackedWindowCount == 3)
         #expect(snapshot.boundWindowCount == 3)
+        #expect(snapshot.displays == [TestFixtures.display])
         #expect(snapshot.unmanagedWindows.isEmpty)
         #expect(snapshot.workspaces.map(\.spaceID) == [1, 2])
         #expect(snapshot.workspaces.first(where: { $0.spaceID == 1 })?.isActive == true)
@@ -76,6 +77,8 @@ struct WorkspaceStateSnapshotTests {
         #expect(focused.liveWindow?.isFocused == true)
         #expect(focused.bindingState == .bound)
         #expect(focused.trackedVisibility == .visible)
+        #expect(focused.previewFrame == focused.liveWindow?.frame)
+        #expect(focused.previewFrameSource == .liveFrame)
         #expect(!focused.hasVisibilityMismatch)
     }
 
@@ -95,6 +98,15 @@ struct WorkspaceStateSnapshotTests {
         #expect(inactiveWindows.allSatisfy { $0.trackedVisibility == .hiddenOffscreen })
         #expect(inactiveWindows.allSatisfy {
             $0.liveWindow?.actualVisibility == .hiddenOffscreen
+        })
+        #expect(inactiveWindows.allSatisfy { $0.previewFrameSource == .lastVisibleFrame })
+        #expect(inactiveWindows.allSatisfy { window in
+            window.previewFrame.map {
+                !VisibilityPlanner.isHiddenWindowFrame(
+                    frame: $0,
+                    displays: snapshot.displays
+                )
+            } == true
         })
         #expect(inactiveWindows.allSatisfy { !$0.hasVisibilityMismatch })
     }

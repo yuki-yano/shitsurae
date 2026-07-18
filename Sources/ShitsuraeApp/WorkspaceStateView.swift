@@ -48,7 +48,10 @@ struct WorkspaceStateSection: View {
                     } else {
                         LazyVStack(alignment: .leading, spacing: 12) {
                             ForEach(snapshot.workspaces) { workspace in
-                                WorkspaceStateCard(workspace: workspace)
+                                WorkspaceStateCard(
+                                    workspace: workspace,
+                                    displays: snapshot.displays
+                                )
                             }
                         }
                     }
@@ -184,6 +187,7 @@ private struct WorkspaceStateNotice: View {
 
 private struct WorkspaceStateCard: View {
     let workspace: WorkspaceStateGroup
+    let displays: [DisplayInfo]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -198,6 +202,11 @@ private struct WorkspaceStateCard: View {
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
+                WorkspaceStatePreview(workspace: workspace, displays: displays)
+                    .padding(12)
+
+                Divider()
+
                 ForEach(workspace.windows) { window in
                     WorkspaceTrackedWindowRow(window: window)
                         .padding(.horizontal, 12)
@@ -537,7 +546,7 @@ private struct WorkspaceStatePill: View {
     }
 }
 
-private func shortDisplayID(_ displayID: String) -> String {
+func shortDisplayID(_ displayID: String) -> String {
     displayID.count > 8 ? "\(displayID.prefix(8))…" : displayID
 }
 

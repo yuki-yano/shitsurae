@@ -22,6 +22,11 @@ public enum WorkspaceWindowActualVisibility: Equatable, Sendable {
     case applicationHidden
 }
 
+public enum WorkspaceWindowPreviewFrameSource: Equatable, Sendable {
+    case liveFrame
+    case lastVisibleFrame
+}
+
 public enum WorkspaceUnmanagedWindowReason: Equatable, Sendable {
     case unassigned
     case deferredForTrackedBinding
@@ -75,6 +80,8 @@ public struct WorkspaceTrackedWindowState: Equatable, Sendable, Identifiable {
     public let trackedVisibility: VisibilityState
     public let bindingState: WorkspaceWindowBindingState
     public let liveWindow: WorkspaceLiveWindowState?
+    public let previewFrame: ResolvedFrame?
+    public let previewFrameSource: WorkspaceWindowPreviewFrameSource?
     public let pendingReasons: [String]
 
     public var id: String { entryID }
@@ -114,6 +121,7 @@ public struct WorkspaceStateSnapshot: Equatable, Sendable {
     public let revision: UInt64
     public let inventoryAvailability: WorkspaceInventoryAvailability
     public let recoveryRequired: Bool
+    public let displays: [DisplayInfo]
     public let workspaces: [WorkspaceStateGroup]
     public let unmanagedWindows: [WorkspaceUnmanagedWindowState]
 
@@ -181,6 +189,18 @@ public extension VirtualSpaceEngine {
                         blockedIdentities: blockedIdentities
                     )
                 }
+                let previewFrame: ResolvedFrame?
+                let previewFrameSource: WorkspaceWindowPreviewFrameSource?
+                if let liveWindow, liveWindow.actualVisibility != .hiddenOffscreen {
+                    previewFrame = liveWindow.frame
+                    previewFrameSource = .liveFrame
+                } else if let lastVisibleFrame = entry.lastVisibleFrame {
+                    previewFrame = lastVisibleFrame
+                    previewFrameSource = .lastVisibleFrame
+                } else {
+                    previewFrame = nil
+                    previewFrameSource = nil
+                }
                 return WorkspaceTrackedWindowState(
                     entryID: entry.id,
                     slot: entry.slot,
@@ -196,6 +216,8 @@ public extension VirtualSpaceEngine {
                         inventoryAvailable: inventory.isAuthoritative
                     ),
                     liveWindow: liveWindow,
+                    previewFrame: previewFrame,
+                    previewFrameSource: previewFrameSource,
                     pendingReasons: state.pendingVisibilityConvergence?.unresolvedSlots
                         .filter { $0.spaceID == spaceID && $0.slot == entry.slot }
                         .map(\.reason) ?? []
@@ -245,6 +267,7 @@ public extension VirtualSpaceEngine {
             revision: state.revision,
             inventoryAvailability: inventory.isAuthoritative ? .available : .unavailable,
             recoveryRequired: state.recoveryRequired,
+            displays: displays,
             workspaces: workspaces,
             unmanagedWindows: unmanagedWindows
         )
