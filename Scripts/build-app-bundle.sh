@@ -13,6 +13,7 @@ BUNDLED_CLI_NAME="shitsurae"
 ICON_NAME="${ICON_NAME:-Shitsurae}"
 ICON_SOURCE_DIR="$ROOT_DIR/Shitsurae/Assets.xcassets/AppIcon.appiconset"
 MENU_ICON_SOURCE_DIR="$ROOT_DIR/Shitsurae/Assets.xcassets/MenuBarIcon.imageset"
+THIRD_PARTY_LICENSES_DIR="$ROOT_DIR/ThirdPartyLicenses"
 DIST_DIR="${DIST_DIR:-$ROOT_DIR/dist}"
 APP_BUNDLE_PATH="$DIST_DIR/${BUNDLE_NAME}.app"
 APP_CONTENTS_PATH="$APP_BUNDLE_PATH/Contents"
@@ -92,6 +93,17 @@ if [[ ! -d "$MENU_ICON_SOURCE_DIR" ]]; then
   exit 1
 fi
 
+REQUIRED_LICENSES=(
+  "swift-argument-parser.txt"
+  "Yams.txt"
+)
+for license_name in "${REQUIRED_LICENSES[@]}"; do
+  if [[ ! -f "$THIRD_PARTY_LICENSES_DIR/$license_name" ]]; then
+    echo "error: missing dependency license: $THIRD_PARTY_LICENSES_DIR/$license_name" >&2
+    exit 1
+  fi
+done
+
 if ! command -v iconutil >/dev/null 2>&1; then
   echo "error: iconutil command not found" >&2
   exit 1
@@ -133,6 +145,7 @@ cp "$BIN_DIR/$CLI_NAME" "$APP_RESOURCES_PATH/$BUNDLED_CLI_NAME"
 cp "$ROOT_DIR/Shitsurae/Info.plist" "$APP_PLIST_PATH"
 cp "$MENU_ICON_SOURCE_DIR/menu-22.png" "$APP_RESOURCES_PATH/menu-22.png"
 cp "$MENU_ICON_SOURCE_DIR/menu-44.png" "$APP_RESOURCES_PATH/menu-44.png"
+cp -R "$THIRD_PARTY_LICENSES_DIR" "$APP_RESOURCES_PATH/ThirdPartyLicenses"
 iconutil -c icns "$ICONSET_DIR" -o "$APP_RESOURCES_PATH/${ICON_NAME}.icns"
 
 /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $APP_NAME" "$APP_PLIST_PATH" 2>/dev/null || \
