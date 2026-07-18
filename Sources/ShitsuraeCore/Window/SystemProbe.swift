@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Darwin
 import Foundation
 
 private final class ProcessOutputBox: @unchecked Sendable {
@@ -51,6 +52,9 @@ public struct DisplayInfo: Codable, Equatable, Sendable {
 }
 
 public enum SystemProbe {
+    private static let lsofTimeoutSeconds: TimeInterval = 2
+    private static let processTerminationGraceSeconds: TimeInterval = 0.2
+
     public static func displays() -> [DisplayInfo] {
         let mainID = CGMainDisplayID()
         let screens = NSScreen.screens
@@ -153,7 +157,8 @@ public enum SystemProbe {
         guard ChromiumProfileSupport.supports(bundleID: bundleID),
               let lsofOutput = runProcess(
                   executable: "/usr/sbin/lsof",
-                  arguments: ChromiumProfileSupport.lsofArguments(pid: pid)
+                  arguments: ChromiumProfileSupport.lsofArguments(pid: pid),
+                  timeoutSeconds: lsofTimeoutSeconds
               )
         else {
             return nil
@@ -223,7 +228,15 @@ public enum SystemProbe {
     }
 
     @discardableResult
-    static func runProcess(executable: String, arguments: [String]) -> String? {
+    static func runProcess(
+        executable: String,
+        arguments: [String],
+        timeoutSeconds: TimeInterval
+    ) -> String? {
+        guard timeoutSeconds > 0 else {
+            return nil
+        }
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -238,6 +251,11 @@ public enum SystemProbe {
         let errorReader = errorPipe.fileHandleForReading
         let outputData = ProcessOutputBox()
         let group = DispatchGroup()
+        let termination = DispatchSemaphore(value: 0)
+
+        process.terminationHandler = { _ in
+            termination.signal()
+        }
 
         group.enter()
         DispatchQueue.global(qos: .userInitiated).async {
@@ -253,7 +271,6 @@ public enum SystemProbe {
 
         do {
             try process.run()
-            process.waitUntilExit()
         } catch {
             outputPipe.fileHandleForWriting.closeFile()
             errorPipe.fileHandleForWriting.closeFile()
@@ -261,11 +278,22 @@ public enum SystemProbe {
             return nil
         }
 
+        let deadline = DispatchTime.now() + timeoutSeconds
+        let timedOut = termination.wait(timeout: deadline) == .timedOut
+        if timedOut {
+            process.terminate()
+            let graceDeadline = DispatchTime.now() + processTerminationGraceSeconds
+            if termination.wait(timeout: graceDeadline) == .timedOut {
+                kill(process.processIdentifier, SIGKILL)
+                termination.wait()
+            }
+        }
+
         outputPipe.fileHandleForWriting.closeFile()
         errorPipe.fileHandleForWriting.closeFile()
         group.wait()
 
-        guard process.terminationStatus == 0 else {
+        guard !timedOut, process.terminationStatus == 0 else {
             return nil
         }
 
