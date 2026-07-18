@@ -154,6 +154,7 @@ final class AppModel: ObservableObject {
     @Published var selectedSpaceID: Int = 1
     @Published var accessibilityGranted = false
     @Published var screenRecordingGranted = false
+    @Published var displays: [DisplayInfo] = []
     @Published var configErrors: [ValidateErrorItem] = []
     @Published var diagnostics: DiagnosticsJSON?
     @Published var lastActionMessage: String?
@@ -322,6 +323,7 @@ final class AppModel: ObservableObject {
     func refreshStatus() {
         accessibilityGranted = SystemProbe.accessibilityGranted()
         screenRecordingGranted = SystemProbe.screenRecordingGranted()
+        displays = SystemProbe.displays()
 
         Task { @MainActor in
             let state = await engine.currentState

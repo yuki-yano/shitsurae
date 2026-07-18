@@ -92,15 +92,21 @@ struct OverlayContent: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     ForEach(Array(candidates.enumerated()), id: \.element.id) { index, candidate in
-                        CandidateCard(
-                            candidate: candidate,
-                            isSelected: index == selectedIndex,
-                            thumbnailSession: thumbnailSession
-                        )
-                        .id(index)
-                        .onTapGesture {
+                        Button {
                             onSelect(index)
+                        } label: {
+                            CandidateCard(
+                                candidate: candidate,
+                                isSelected: index == selectedIndex,
+                                thumbnailSession: thumbnailSession
+                            )
                         }
+                        .buttonStyle(.plain)
+                        .id(index)
+                        .accessibilityLabel(candidateAccessibilityLabel(candidate))
+                        .accessibilityValue(index == selectedIndex ? "Selected" : "")
+                        .accessibilityHint("Switch to this window")
+                        .accessibilityAddTraits(index == selectedIndex ? .isSelected : [])
                     }
                 }
                 .padding(16)
@@ -116,6 +122,14 @@ struct OverlayContent: View {
         }
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
         .padding(8)
+    }
+
+    private func candidateAccessibilityLabel(_ candidate: SwitcherCandidate) -> String {
+        let application = shortBundleID(candidate.bundleID)
+        guard !candidate.title.isEmpty else {
+            return application
+        }
+        return "\(application), \(candidate.title)"
     }
 }
 

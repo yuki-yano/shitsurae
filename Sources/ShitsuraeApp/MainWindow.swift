@@ -289,7 +289,13 @@ struct ArrangeView: View {
     }
 
     private func layoutPreview(_ layout: LayoutDefinition) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let hostDisplay = DisplayResolver.hostDisplay(
+            layout: layout,
+            config: model.configManager.configIfLoaded()?.config,
+            displays: model.displays
+        )
+
+        return VStack(alignment: .leading, spacing: 10) {
             Label("Preview", systemImage: "rectangle.on.rectangle")
                 .font(.headline)
 
@@ -313,7 +319,11 @@ struct ArrangeView: View {
                             }
                         }
 
-                        VisualLayoutPreview(space: space, compact: true)
+                        VisualLayoutPreview(
+                            space: space,
+                            display: hostDisplay,
+                            compact: true
+                        )
 
                         windowLegend(space.windows)
                     }
@@ -353,8 +363,18 @@ struct ArrangeView: View {
 // MARK: - Layout detail
 
 struct LayoutDetailView: View {
+    @EnvironmentObject var model: AppModel
+
     let name: String
     let layout: LayoutDefinition
+
+    private var hostDisplay: DisplayInfo? {
+        DisplayResolver.hostDisplay(
+            layout: layout,
+            config: model.configManager.configIfLoaded()?.config,
+            displays: model.displays
+        )
+    }
 
     var body: some View {
         ScrollView {
@@ -423,7 +443,11 @@ struct LayoutDetailView: View {
                 if space.windows.isEmpty {
                     Text("No windows").foregroundStyle(.secondary)
                 } else {
-                    VisualLayoutPreview(space: space, compact: false)
+                    VisualLayoutPreview(
+                        space: space,
+                        display: hostDisplay,
+                        compact: false
+                    )
 
                     windowTable(space.windows)
                 }
@@ -502,19 +526,30 @@ struct LayoutDetailView: View {
 
 struct VisualLayoutPreview: View {
     let space: SpaceDefinition
+    let display: DisplayInfo?
     let compact: Bool
 
-    private var displayAspectRatio: CGFloat {
-        let screen = NSScreen.main?.frame.size ?? CGSize(width: 1440, height: 900)
-        return screen.height / screen.width
+    @ViewBuilder
+    var body: some View {
+        if let display, display.visibleFrame.width > 0, display.visibleFrame.height > 0 {
+            preview(display: display)
+        } else {
+            Label("Display unavailable", systemImage: "display.trianglebadge.exclamationmark")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
-    var body: some View {
-        GeometryReader { geo in
+    private func preview(display: DisplayInfo) -> some View {
+        let displayAspectRatio = display.visibleFrame.height / display.visibleFrame.width
+
+        return GeometryReader { geo in
             let previewWidth = geo.size.width
             let previewHeight = previewWidth * displayAspectRatio
-            let rects = space.windows.map { win in
-                (win: win, rect: resolveProportionalRect(frame: win.frame))
+            let rects = space.windows.compactMap { win in
+                resolveProportionalRect(frame: win.frame, display: display).map {
+                    (win: win, rect: $0)
+                }
             }
 
             ZStack {
@@ -1196,36 +1231,33 @@ func shortBundleID(_ bundleID: String) -> String {
     bundleID.split(separator: ".").last.map(String.init) ?? bundleID
 }
 
-struct ProportionalRect {
+struct ProportionalRect: Equatable {
     let x: Double
     let y: Double
     let width: Double
     let height: Double
 }
 
-func lengthToProportion(_ value: LengthValue, referenceDimension: Double) -> Double {
-    guard let parsed = try? LengthParser.parse(value) else { return 0 }
-    switch parsed.unit {
-    case .percent:
-        return parsed.value / 100.0
-    case .ratio:
-        return parsed.value
-    case .pt:
-        return referenceDimension > 0 ? parsed.value / referenceDimension : 0
-    case .px:
-        let points = parsed.value / 2.0
-        return referenceDimension > 0 ? points / referenceDimension : 0
+func resolveProportionalRect(
+    frame: FrameDefinition,
+    display: DisplayInfo
+) -> ProportionalRect? {
+    let basis = display.visibleFrame
+    guard basis.width > 0, basis.height > 0,
+          let resolved = try? LengthParser.resolveFrame(
+              frame,
+              basis: basis,
+              scale: display.scale
+          )
+    else {
+        return nil
     }
-}
 
-func resolveProportionalRect(frame: FrameDefinition) -> ProportionalRect {
-    let refWidth: Double = 1440
-    let refHeight: Double = 900
     return ProportionalRect(
-        x: lengthToProportion(frame.x, referenceDimension: refWidth),
-        y: lengthToProportion(frame.y, referenceDimension: refHeight),
-        width: lengthToProportion(frame.width, referenceDimension: refWidth),
-        height: lengthToProportion(frame.height, referenceDimension: refHeight)
+        x: (resolved.x - basis.minX) / basis.width,
+        y: (resolved.y - basis.minY) / basis.height,
+        width: resolved.width / basis.width,
+        height: resolved.height / basis.height
     )
 }
 
