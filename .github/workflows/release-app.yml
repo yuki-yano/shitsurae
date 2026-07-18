@@ -19,39 +19,45 @@ jobs:
     runs-on: macos-15
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           fetch-depth: 0
 
       - name: Resolve tag
         id: release_tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            TAG="${{ inputs.tag }}"
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            TAG="${INPUT_TAG}"
           else
             TAG="${GITHUB_REF_NAME}"
           fi
-          echo "value=${TAG}" >> "${GITHUB_OUTPUT}"
 
-      - name: Verify tag exists
-        run: git rev-parse "${{ steps.release_tag.outputs.value }}" >/dev/null
-
-      - name: Validate app tag format
-        run: |
-          TAG="${{ steps.release_tag.outputs.value }}"
           if [[ ! "${TAG}" =~ ^app-v[0-9]+(\.[0-9]+)*$ ]]; then
             echo "unexpected app tag format: ${TAG}" >&2
             exit 1
           fi
 
+          printf 'value=%s\n' "${TAG}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify tag exists
+        env:
+          RELEASE_TAG: ${{ steps.release_tag.outputs.value }}
+        run: git rev-parse --verify "${RELEASE_TAG}^{commit}" >/dev/null
+
       - name: Checkout release tag commit
-        run: git checkout --detach "${{ steps.release_tag.outputs.value }}"
+        env:
+          RELEASE_TAG: ${{ steps.release_tag.outputs.value }}
+        run: git checkout --detach "${RELEASE_TAG}"
 
       - name: Resolve version
         id: app_version
+        env:
+          RELEASE_TAG: ${{ steps.release_tag.outputs.value }}
         run: |
-          TAG="${{ steps.release_tag.outputs.value }}"
-          VERSION="${TAG#app-v}"
+          VERSION="${RELEASE_TAG#app-v}"
           FILE_VERSION="$(tr -d '[:space:]' < VERSION)"
 
           if [[ "${FILE_VERSION}" != "${VERSION}" ]]; then
@@ -65,13 +71,13 @@ jobs:
         run: env -u LIBRARY_PATH swift test
 
       - name: Build app release asset
-        run: |
-          APP_VERSION="${{ steps.app_version.outputs.value }}" \
-          APP_BUILD_VERSION="${{ steps.app_version.outputs.value }}" \
-            ./Scripts/create-release-asset.sh
+        env:
+          APP_VERSION: ${{ steps.app_version.outputs.value }}
+          APP_BUILD_VERSION: ${{ steps.app_version.outputs.value }}
+        run: ./Scripts/create-release-asset.sh
 
       - name: Upload GitHub release asset
-        uses: softprops/action-gh-release@v3.0.1
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           tag_name: ${{ steps.release_tag.outputs.value }}
           files: Shitsurae.app.tar.gz
@@ -80,12 +86,13 @@ jobs:
 
       - name: Resolve cask metadata
         id: cask_metadata
+        env:
+          APP_VERSION: ${{ steps.app_version.outputs.value }}
         run: |
-          VERSION="${{ steps.app_version.outputs.value }}"
           SHA256="$(shasum -a 256 Shitsurae.app.tar.gz | awk '{ print $1 }')"
 
-          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-          echo "sha256=${SHA256}" >> "${GITHUB_OUTPUT}"
+          printf 'version=%s\n' "${APP_VERSION}" >> "${GITHUB_OUTPUT}"
+          printf 'sha256=%s\n' "${SHA256}" >> "${GITHUB_OUTPUT}"
 
       - name: Dispatch homebrew tap update
         env:
