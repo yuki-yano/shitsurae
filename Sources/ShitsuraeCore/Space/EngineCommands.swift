@@ -414,22 +414,34 @@ public extension VirtualSpaceEngine {
         return focusedIdentity
     }
 
-    private func applyFocus(window: WindowSnapshot) throws {
-        let result = control.focusWindow(
+    func applyFocus(window: WindowSnapshot) throws {
+        let firstResult = control.focusWindow(
             windowID: window.windowID,
             pid: window.pid,
             processStartTime: window.processStartTime,
             bundleID: window.bundleID
         )
-        if !result.isSuccess,
-           !control.activateApplication(
-               pid: window.pid,
-               processStartTime: window.processStartTime,
-               bundleID: window.bundleID
-           )
-        {
-            throw VirtualSpaceEngineError.stateError("focus failed for window \(window.windowID)")
+        if firstResult.isSuccess, waitForFocusedWindow(identity: window.identity) {
+            return
         }
+
+        if control.activateApplication(
+            pid: window.pid,
+            processStartTime: window.processStartTime,
+            bundleID: window.bundleID
+        ) {
+            let retryResult = control.focusWindow(
+                windowID: window.windowID,
+                pid: window.pid,
+                processStartTime: window.processStartTime,
+                bundleID: window.bundleID
+            )
+            if retryResult.isSuccess, waitForFocusedWindow(identity: window.identity) {
+                return
+            }
+        }
+
+        throw VirtualSpaceEngineError.stateError("focus failed for window \(window.windowID)")
     }
 
     // MARK: - window move/resize/set

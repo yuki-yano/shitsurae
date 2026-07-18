@@ -582,7 +582,7 @@ public actor VirtualSpaceEngine {
         return false
     }
 
-    private func waitForFocusedWindow(identity: WindowIdentity) -> Bool {
+    func waitForFocusedWindow(identity: WindowIdentity) -> Bool {
         if control.focusedWindowObservation().focusedIdentity == identity {
             return true
         }

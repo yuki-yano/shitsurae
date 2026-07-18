@@ -267,16 +267,16 @@ public extension VirtualSpaceEngine {
                 definition: focusStep.definition
             )
             if let window = boundWindows[fingerprint] {
-                if !control.focusWindow(
-                    windowID: window.windowID,
-                    pid: window.pid,
-                    processStartTime: window.processStartTime,
-                    bundleID: window.bundleID
-                ).isSuccess {
-                    _ = control.activateApplication(
-                        pid: window.pid,
-                        processStartTime: window.processStartTime,
-                        bundleID: window.bundleID
+                do {
+                    try applyFocus(window: window)
+                } catch {
+                    softErrors.append(
+                        ErrorItem(
+                            code: ErrorCode.operationTimedOut.rawValue,
+                            message: "failed to focus initial slot",
+                            spaceID: focusStep.spaceID,
+                            slot: focusStep.definition.slot
+                        )
                     )
                 }
             }

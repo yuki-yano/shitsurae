@@ -2805,6 +2805,21 @@ struct VirtualSpaceEngineTests {
         #expect(control.focusedWindowIDs.isEmpty)
     }
 
+    @Test func explicitFocusDoesNotTreatApplicationActivationAsWindowFocus() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        let target = try #require(control.window(1))
+        control.failFocusWindowIDs = [target.windowID]
+
+        await #expect(throws: VirtualSpaceEngineError.self) {
+            _ = try await engine.focusWindow(identity: target.identity, config: self.config)
+        }
+
+        #expect(control.activatedBundles == [target.bundleID])
+        #expect(!control.focusedWindowIDs.contains(target.windowID))
+    }
+
     @Test func hiddenOffscreenWindowsRemainInAllSpacesCandidates() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

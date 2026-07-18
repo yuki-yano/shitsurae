@@ -10,6 +10,12 @@ public enum NativeSymbolicHotKey: Int32, CaseIterable, Sendable {
     case commandShiftTab = 2
 }
 
+public enum SymbolicHotKeyMutationResult: Equatable, Sendable {
+    case applied
+    case rolledBack
+    case indeterminate
+}
+
 public enum SymbolicHotKeyController {
     public static let commandTabGroup: [NativeSymbolicHotKey] = [.commandTab, .commandShiftTab]
 
@@ -29,15 +35,38 @@ public enum SymbolicHotKeyController {
         return unsafeBitCast(symbol, to: CGSSetSymbolicHotKeyEnabledFn.self)
     }()
 
-    @discardableResult
-    public static func setEnabled(_ isEnabled: Bool, hotKeys: [NativeSymbolicHotKey]) -> Bool {
+    public static func setEnabled(
+        _ isEnabled: Bool,
+        hotKeys: [NativeSymbolicHotKey]
+    ) -> SymbolicHotKeyMutationResult {
         guard let setSymbolicHotKeyEnabled else {
-            return false
+            return .rolledBack
         }
 
-        for hotKey in hotKeys {
-            _ = setSymbolicHotKeyEnabled(hotKey.rawValue, isEnabled)
+        return apply(isEnabled: isEnabled, hotKeys: hotKeys) { hotKey, enabled in
+            setSymbolicHotKeyEnabled(hotKey, enabled)
         }
-        return true
+    }
+
+    static func apply(
+        isEnabled: Bool,
+        hotKeys: [NativeSymbolicHotKey],
+        setter: (Int32, Bool) -> Int32
+    ) -> SymbolicHotKeyMutationResult {
+        var allApplied = true
+        for hotKey in hotKeys {
+            if setter(hotKey.rawValue, isEnabled) != 0 {
+                allApplied = false
+            }
+        }
+        guard !allApplied else { return .applied }
+
+        var rollbackSucceeded = true
+        for hotKey in hotKeys {
+            if setter(hotKey.rawValue, !isEnabled) != 0 {
+                rollbackSucceeded = false
+            }
+        }
+        return rollbackSucceeded ? .rolledBack : .indeterminate
     }
 }

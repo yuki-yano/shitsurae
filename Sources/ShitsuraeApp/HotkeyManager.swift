@@ -412,7 +412,13 @@ final class HotkeyManager {
     /// Set when the trigger is released while candidates are still loading;
     /// the loader turns it into an instant switch (quick-tap).
     private var pendingQuickAccept: Int?
-    private var commandTabDisabled = false
+    private enum CommandTabOwnership: Equatable {
+        case native
+        case disabled
+        case indeterminate
+    }
+
+    private var commandTabOwnership: CommandTabOwnership = .native
 
     struct OverlaySession {
         enum Kind {
@@ -497,18 +503,38 @@ final class HotkeyManager {
         } ?? false
         let shouldOwnCommandTab = triggerIsCommandTab && eventTapController?.isRunning == true
 
-        if shouldOwnCommandTab, !commandTabDisabled {
-            SymbolicHotKeyController.setEnabled(false, hotKeys: SymbolicHotKeyController.commandTabGroup)
-            commandTabDisabled = true
-        } else if !shouldOwnCommandTab, commandTabDisabled {
+        if shouldOwnCommandTab, commandTabOwnership != .disabled {
+            updateNativeSwitcherHotKeys(enabled: false)
+        } else if !shouldOwnCommandTab, commandTabOwnership != .native {
             restoreNativeSwitcherHotKeys()
         }
     }
 
     func restoreNativeSwitcherHotKeys() {
-        if commandTabDisabled {
-            SymbolicHotKeyController.setEnabled(true, hotKeys: SymbolicHotKeyController.commandTabGroup)
-            commandTabDisabled = false
+        guard commandTabOwnership != .native else { return }
+        updateNativeSwitcherHotKeys(enabled: true)
+    }
+
+    private func updateNativeSwitcherHotKeys(enabled: Bool) {
+        let result = SymbolicHotKeyController.setEnabled(
+            enabled,
+            hotKeys: SymbolicHotKeyController.commandTabGroup
+        )
+        switch result {
+        case .applied:
+            commandTabOwnership = enabled ? .native : .disabled
+        case .rolledBack:
+            commandTabOwnership = enabled ? .disabled : .native
+            model?.logger.error(
+                event: "hotkey.symbolicMutationFailed",
+                fields: ["enabled": enabled, "rolledBack": true]
+            )
+        case .indeterminate:
+            commandTabOwnership = .indeterminate
+            model?.logger.error(
+                event: "hotkey.symbolicMutationFailed",
+                fields: ["enabled": enabled, "rolledBack": false]
+            )
         }
     }
 
