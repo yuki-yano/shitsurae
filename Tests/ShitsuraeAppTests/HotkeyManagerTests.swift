@@ -1,3 +1,4 @@
+import AppKit
 import Carbon.HIToolbox
 import Testing
 @testable import Shitsurae
@@ -60,6 +61,77 @@ struct FocusEventCoordinatorTests {
         )
 
         #expect(WindowThumbnailProvider.cacheKey(for: old) != WindowThumbnailProvider.cacheKey(for: replacement))
+    }
+
+    @Test func thumbnailCacheIsOnlyASubsecondPlaceholder() {
+        let identity = WindowIdentity(
+            pid: 100,
+            processStartTime: 1,
+            windowID: 20,
+            bundleID: "com.example.Editor"
+        )
+        var now = Date(timeIntervalSince1970: 100)
+        let provider = WindowThumbnailProvider(
+            placeholderTTL: 1,
+            now: { now },
+            processStartTime: { _ in 1 }
+        )
+        let image = NSImage(size: NSSize(width: 10, height: 10))
+        provider.storeForTesting(image, identity: identity, capturedAt: now)
+
+        #expect(provider.placeholder(identity: identity) === image)
+
+        now.addTimeInterval(1.001)
+        #expect(provider.placeholder(identity: identity) == nil)
+    }
+
+    @Test func thumbnailCacheRejectsReusedProcessGeneration() {
+        let identity = WindowIdentity(
+            pid: 100,
+            processStartTime: 1,
+            windowID: 20,
+            bundleID: "com.example.Editor"
+        )
+        let now = Date(timeIntervalSince1970: 100)
+        let provider = WindowThumbnailProvider(
+            now: { now },
+            processStartTime: { _ in 2 }
+        )
+        provider.storeForTesting(
+            NSImage(size: NSSize(width: 10, height: 10)),
+            identity: identity,
+            capturedAt: now
+        )
+
+        #expect(provider.placeholder(identity: identity) == nil)
+    }
+
+    @Test func thumbnailSessionLoadsShareableContentOnlyOnce() async {
+        var loadCount = 0
+        let provider = WindowThumbnailProvider(processStartTime: { _ in 1 })
+        let session = provider.beginSession {
+            loadCount += 1
+            return nil
+        }
+
+        _ = await session.captureFresh(
+            identity: WindowIdentity(
+                pid: 100,
+                processStartTime: 1,
+                windowID: 20,
+                bundleID: "com.example.Editor"
+            )
+        )
+        _ = await session.captureFresh(
+            identity: WindowIdentity(
+                pid: 100,
+                processStartTime: 1,
+                windowID: 21,
+                bundleID: "com.example.Editor"
+            )
+        )
+
+        #expect(loadCount == 1)
     }
 
     @Test func frontmostTerminationIsRecognizedBeforeReplacementActivation() {

@@ -16,10 +16,13 @@ final class SwitcherOverlayController {
     }
 
     func show(session: HotkeyManager.OverlaySession, showThumbnails: Bool) {
+        let thumbnailSession = showThumbnails && SystemProbe.screenRecordingGranted()
+            ? WindowThumbnailProvider.shared.beginSession()
+            : nil
         let content = OverlayContent(
             candidates: session.candidates,
             selectedIndex: session.selectedIndex,
-            showThumbnails: showThumbnails && SystemProbe.screenRecordingGranted(),
+            thumbnailSession: thumbnailSession,
             onSelect: onSelect
         )
 
@@ -66,20 +69,22 @@ final class SwitcherOverlayController {
         hosting.rootView = OverlayContent(
             candidates: session.candidates,
             selectedIndex: session.selectedIndex,
-            showThumbnails: hosting.rootView.showThumbnails,
+            thumbnailSession: hosting.rootView.thumbnailSession,
             onSelect: onSelect
         )
     }
 
     func hide() {
         panel?.orderOut(nil)
+        panel?.contentView = nil
+        hosting = nil
     }
 }
 
 struct OverlayContent: View {
     let candidates: [SwitcherCandidate]
     let selectedIndex: Int
-    let showThumbnails: Bool
+    let thumbnailSession: WindowThumbnailSession?
     let onSelect: (Int) -> Void
 
     var body: some View {
@@ -90,7 +95,7 @@ struct OverlayContent: View {
                         CandidateCard(
                             candidate: candidate,
                             isSelected: index == selectedIndex,
-                            showThumbnail: showThumbnails
+                            thumbnailSession: thumbnailSession
                         )
                         .id(index)
                         .onTapGesture {
@@ -117,7 +122,7 @@ struct OverlayContent: View {
 struct CandidateCard: View {
     let candidate: SwitcherCandidate
     let isSelected: Bool
-    let showThumbnail: Bool
+    let thumbnailSession: WindowThumbnailSession?
 
     @State private var thumbnail: NSImage?
 
@@ -148,9 +153,13 @@ struct CandidateCard: View {
                         .padding(4)
                 }
             }
-            .task(id: candidate.identity) {
-                guard showThumbnail else { return }
-                thumbnail = await WindowThumbnailProvider.shared.thumbnail(identity: candidate.identity)
+            .task(id: thumbnailSession?.id) {
+                guard let thumbnailSession else {
+                    thumbnail = nil
+                    return
+                }
+                thumbnail = thumbnailSession.placeholder(identity: candidate.identity)
+                thumbnail = await thumbnailSession.captureFresh(identity: candidate.identity)
             }
 
             HStack(spacing: 5) {
@@ -208,29 +217,70 @@ struct CandidateCard: View {
 final class WindowThumbnailProvider {
     static let shared = WindowThumbnailProvider()
 
-    private let cache = NSCache<NSString, NSImage>()
+    private final class CacheEntry {
+        let image: NSImage
+        let capturedAt: Date
+
+        init(image: NSImage, capturedAt: Date) {
+            self.image = image
+            self.capturedAt = capturedAt
+        }
+    }
+
+    private let cache = NSCache<NSString, CacheEntry>()
+    private let placeholderTTL: TimeInterval
+    private let now: () -> Date
+    private let processStartTime: (Int) -> UInt64?
+
+    init(
+        placeholderTTL: TimeInterval = 1,
+        now: @escaping () -> Date = Date.init,
+        processStartTime: @escaping (Int) -> UInt64? = ProcessGenerationResolver.startTime(pid:)
+    ) {
+        self.placeholderTTL = placeholderTTL
+        self.now = now
+        self.processStartTime = processStartTime
+    }
 
     static func cacheKey(for identity: WindowIdentity) -> String {
         "\(identity.pid):\(identity.processStartTime):\(identity.windowID):\(identity.bundleID)"
     }
 
-    func thumbnail(identity: WindowIdentity) async -> NSImage? {
-        // An overlay candidate can outlive its process. Never serve a cached
-        // image, or capture a newly reused PID/window ID, for the old process
-        // generation.
-        guard ProcessGenerationResolver.startTime(pid: identity.pid) == identity.processStartTime else {
+    func beginSession(
+        contentLoader: @escaping @MainActor () async -> SCShareableContent? = {
+            try? await SCShareableContent.excludingDesktopWindows(
+                false,
+                onScreenWindowsOnly: false
+            )
+        }
+    ) -> WindowThumbnailSession {
+        WindowThumbnailSession(provider: self, contentLoader: contentLoader)
+    }
+
+    func placeholder(identity: WindowIdentity) -> NSImage? {
+        guard processStartTime(identity.pid) == identity.processStartTime else {
             return nil
         }
         let cacheKey = Self.cacheKey(for: identity) as NSString
-        if let cached = cache.object(forKey: cacheKey) {
-            return cached
+        guard let cached = cache.object(forKey: cacheKey) else {
+            return nil
         }
+        let age = now().timeIntervalSince(cached.capturedAt)
+        guard age >= 0, age <= placeholderTTL
+        else {
+            return nil
+        }
+        return cached.image
+    }
 
-        guard let content = try? await SCShareableContent.excludingDesktopWindows(
-            false,
-            onScreenWindowsOnly: false
-        ),
-            ProcessGenerationResolver.startTime(pid: identity.pid) == identity.processStartTime,
+    fileprivate func capture(
+        identity: WindowIdentity,
+        content: SCShareableContent
+    ) async -> NSImage? {
+        // An overlay candidate can outlive its process. Never serve a cached
+        // image, or capture a newly reused PID/window ID, for the old process
+        // generation.
+        guard processStartTime(identity.pid) == identity.processStartTime,
             let scWindow = content.windows.first(where: {
                 $0.windowID == CGWindowID(identity.windowID)
                     && Int($0.owningApplication?.processID ?? -1) == identity.pid
@@ -251,12 +301,52 @@ final class WindowThumbnailProvider {
         guard let cgImage = try? await SCScreenshotManager.captureImage(
             contentFilter: filter,
             configuration: configuration
-        ), ProcessGenerationResolver.startTime(pid: identity.pid) == identity.processStartTime else {
+        ), processStartTime(identity.pid) == identity.processStartTime else {
             return nil
         }
 
         let image = NSImage(cgImage: cgImage, size: .zero)
-        cache.setObject(image, forKey: cacheKey)
+        cache.setObject(
+            CacheEntry(image: image, capturedAt: now()),
+            forKey: Self.cacheKey(for: identity) as NSString
+        )
         return image
+    }
+
+    func storeForTesting(_ image: NSImage, identity: WindowIdentity, capturedAt: Date) {
+        cache.setObject(
+            CacheEntry(image: image, capturedAt: capturedAt),
+            forKey: Self.cacheKey(for: identity) as NSString
+        )
+    }
+}
+
+/// A switcher session owns exactly one ScreenCaptureKit inventory snapshot.
+/// Every card still requests a fresh screenshot; a sub-second cache entry is
+/// only a placeholder while that capture is in flight.
+@MainActor
+final class WindowThumbnailSession: Identifiable {
+    let id = UUID()
+
+    private let provider: WindowThumbnailProvider
+    private let contentTask: Task<SCShareableContent?, Never>
+
+    init(
+        provider: WindowThumbnailProvider,
+        contentLoader: @escaping @MainActor () async -> SCShareableContent?
+    ) {
+        self.provider = provider
+        contentTask = Task { await contentLoader() }
+    }
+
+    func placeholder(identity: WindowIdentity) -> NSImage? {
+        provider.placeholder(identity: identity)
+    }
+
+    func captureFresh(identity: WindowIdentity) async -> NSImage? {
+        guard let content = await contentTask.value else {
+            return nil
+        }
+        return await provider.capture(identity: identity, content: content)
     }
 }
