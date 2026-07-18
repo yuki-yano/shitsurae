@@ -361,6 +361,79 @@ struct VisibilityPlannerTests {
         )
         #expect(mirrored == .bottomLeft)
     }
+
+    @Test func hiddenFrameAvoidsBothNeighborsForMiddleDisplay() {
+        let left = DisplayInfo(
+            id: "left",
+            width: 1440,
+            height: 900,
+            scale: 1,
+            isPrimary: true,
+            frame: CGRect(x: 0, y: 0, width: 1440, height: 900),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1440, height: 900)
+        )
+        let middle = DisplayInfo(
+            id: "middle",
+            width: 1440,
+            height: 900,
+            scale: 1,
+            isPrimary: false,
+            frame: CGRect(x: 1440, y: 0, width: 1440, height: 900),
+            visibleFrame: CGRect(x: 1440, y: 0, width: 1440, height: 900)
+        )
+        let right = DisplayInfo(
+            id: "right",
+            width: 1440,
+            height: 900,
+            scale: 1,
+            isPrimary: false,
+            frame: CGRect(x: 2880, y: 0, width: 1440, height: 900),
+            visibleFrame: CGRect(x: 2880, y: 0, width: 1440, height: 900)
+        )
+        let displays = [left, middle, right]
+        var entry = makeEntry(
+            spaceID: 1,
+            lastVisibleFrame: ResolvedFrame(x: 1600, y: 100, width: 700, height: 400)
+        )
+        entry.displayID = middle.id
+        let window = TestFixtures.window(
+            id: 1,
+            bundleID: "com.apple.TextEdit",
+            frame: ResolvedFrame(x: 1600, y: 100, width: 700, height: 400),
+            isAXBacked: true
+        )
+
+        let hidden = VisibilityPlanner.resolveHiddenFrame(
+            entry: entry,
+            window: window,
+            hostDisplay: middle,
+            displays: displays
+        )
+
+        #expect(VisibilityPlanner.isHiddenWindowFrame(frame: hidden, displays: displays))
+        let hiddenRect = CGRect(
+            x: hidden.x,
+            y: hidden.y,
+            width: hidden.width,
+            height: hidden.height
+        )
+        let overlaps: [CGRect] = displays.compactMap { display in
+            let overlap = hiddenRect.intersection(display.frame)
+            return overlap.isNull || overlap.isEmpty ? nil : overlap
+        }
+        #expect(overlaps.allSatisfy { $0.width <= 1 || $0.height <= 1 })
+
+        let leakedIntoLeftNeighbor = ResolvedFrame(
+            x: 741,
+            y: 100,
+            width: 700,
+            height: 400
+        )
+        #expect(!VisibilityPlanner.isHiddenWindowFrame(
+            frame: leakedIntoLeftNeighbor,
+            displays: displays
+        ))
+    }
 }
 
 @Suite("VisibilityApplier")

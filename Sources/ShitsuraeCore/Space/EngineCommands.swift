@@ -601,7 +601,8 @@ public extension VirtualSpaceEngine {
         config: LoadedConfig,
         persistChanges: Bool = true,
         inventory suppliedInventory: WindowInventory? = nil,
-        excludedWindowIdentities: Set<WindowIdentity> = []
+        excludedWindowIdentities: Set<WindowIdentity> = [],
+        additionalIgnoreRules: IgnoreRuleSet? = nil
     ) throws -> Int {
         guard let layoutName = currentState.activeLayoutName,
               let activeSpaceID = currentState.primaryActiveSpaceID,
@@ -632,6 +633,7 @@ public extension VirtualSpaceEngine {
                 && !excludedWindowIdentities.contains(window.identity)
                 && WindowEligibility.isManageableForVirtualWorkspace(window)
                 && !PolicyEngine.matchesIgnoreRule(window: window, rules: config.config.ignore?.focus)
+                && !PolicyEngine.matchesIgnoreRule(window: window, rules: additionalIgnoreRules)
         }
 
         let resolution = WindowRegistry.resolve(

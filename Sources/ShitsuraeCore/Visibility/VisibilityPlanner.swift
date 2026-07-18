@@ -225,19 +225,44 @@ public enum VisibilityPlanner {
         let height = max(1, window.frame.height)
         let targetDisplay = resolveTargetDisplay(entry: entry, window: window, displays: displays) ?? hostDisplay
         let targetVisibleFrame = targetDisplay.visibleFrame
-        let corner = optimalHideCorner(for: targetDisplay, displays: displays)
-        let x: Double
-        switch corner {
-        case .bottomLeft:
-            x = targetVisibleFrame.minX - width + 1
-        case .bottomRight:
-            x = targetVisibleFrame.maxX - 1
-        }
         let referenceFrame = entry.lastVisibleFrame ?? window.frame
         let minY = targetVisibleFrame.minY
         let maxY = max(minY, targetVisibleFrame.maxY - height)
         let y = min(max(referenceFrame.y, minY), maxY)
-        return ResolvedFrame(x: x, y: y, width: width, height: height)
+        let minX = targetVisibleFrame.minX
+        let maxX = max(minX, targetVisibleFrame.maxX - width)
+        let x = min(max(referenceFrame.x, minX), maxX)
+        let candidates = [
+            ResolvedFrame(
+                x: targetVisibleFrame.minX - width + 1,
+                y: y,
+                width: width,
+                height: height
+            ),
+            ResolvedFrame(
+                x: targetVisibleFrame.maxX - 1,
+                y: y,
+                width: width,
+                height: height
+            ),
+            ResolvedFrame(
+                x: x,
+                y: targetVisibleFrame.minY - height + 1,
+                width: width,
+                height: height
+            ),
+            ResolvedFrame(
+                x: x,
+                y: targetVisibleFrame.maxY - 1,
+                width: width,
+                height: height
+            ),
+        ]
+
+        return candidates.min { lhs, rhs in
+            displayIntersectionArea(frame: lhs, displays: displays)
+                < displayIntersectionArea(frame: rhs, displays: displays)
+        } ?? candidates[0]
     }
 
     static func resolveTargetDisplay(
@@ -326,14 +351,23 @@ public enum VisibilityPlanner {
 
     private static func isEdgePinnedHiddenFrame(frame: ResolvedFrame, displays: [DisplayInfo]) -> Bool {
         let windowRect = CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
-
-        return displays.contains { display in
+        let overlaps = displays.compactMap { display -> CGRect? in
             let overlap = windowRect.intersection(display.frame)
-            guard !overlap.isNull else {
-                return false
-            }
+            return overlap.isNull || overlap.isEmpty ? nil : overlap
+        }
+        guard !overlaps.isEmpty else { return false }
+        return overlaps.allSatisfy { $0.width <= 1 || $0.height <= 1 }
+    }
 
-            return overlap.width <= 1 || overlap.height <= 1
+    private static func displayIntersectionArea(
+        frame: ResolvedFrame,
+        displays: [DisplayInfo]
+    ) -> CGFloat {
+        let windowRect = CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
+        return displays.reduce(into: CGFloat.zero) { total, display in
+            let overlap = windowRect.intersection(display.frame)
+            guard !overlap.isNull, !overlap.isEmpty else { return }
+            total += overlap.width * overlap.height
         }
     }
 }

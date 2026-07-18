@@ -336,7 +336,9 @@ struct ArrangeTests {
 
         let result = try await engine.arrange(layoutName: "work", spaceID: 2, config: config)
 
-        #expect(result.result == "success")
+        #expect(result.result == "partial")
+        #expect(result.exitCode == ErrorCode.partialSuccess.rawValue)
+        #expect(!result.unresolvedSlots.isEmpty)
         #expect(result.subcode != "restoreIncomplete")
         #expect(!control.frameMutationAttemptWindowIDs
             .dropFirst(attemptsBeforeArrange)
@@ -759,5 +761,50 @@ struct ArrangeTests {
         // Terminal window untouched at its original frame.
         let terminal = control.window(2)!
         #expect(terminal.frame == ResolvedFrame(x: 10, y: 10, width: 700, height: 400))
+    }
+
+    @Test func ignoredWindowRuleUsesLiveWindowAttributes() async throws {
+        let layout = TestFixtures.twoSpaceLayout()
+        let configWithIgnore = LoadedConfig(
+            config: ShitsuraeConfig(
+                ignore: IgnoreDefinition(
+                    apply: IgnoreRuleSet(windows: [
+                        IgnoreWindowRule(bundleID: "com.apple.TextEdit", titleRegex: "^Skip Me$")
+                    ])
+                ),
+                layouts: ["work": layout]
+            ),
+            configFiles: [],
+            directoryURL: URL(fileURLWithPath: "/tmp"),
+            configGeneration: String(repeating: "c", count: 64)
+        )
+        var windows = standardWindows()
+        windows[0] = TestFixtures.window(
+            id: 1,
+            bundleID: "com.apple.TextEdit",
+            title: "Skip Me",
+            isAXBacked: true,
+            frontIndex: 0
+        )
+        let (engine, control, url) = makeEngine(windows: windows)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(
+            layoutName: "work",
+            activeSpaceID: 1,
+            config: configWithIgnore
+        )
+        let originalFrame = try #require(control.window(1)).frame
+
+        let result = try await engine.arrange(
+            layoutName: "work",
+            spaceID: nil,
+            config: configWithIgnore
+        )
+
+        #expect(result.skipped.contains {
+            $0.reason == "ignoreApply" && $0.slot == 1 && $0.spaceID == 1
+        })
+        #expect(control.window(1)?.frame == originalFrame)
+        #expect(!(await engine.currentState).slots.contains { $0.boundIdentity == windows[0].identity })
     }
 }

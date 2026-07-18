@@ -14,37 +14,14 @@ public enum PolicyEngine {
         return windowRules.contains { matches(window: window, rule: $0) }
     }
 
-    public static func matchesIgnoreRule(windowDefinition: WindowDefinition, rules: IgnoreRuleSet?) -> Bool {
-        if rules?.apps?.contains(windowDefinition.match.bundleID) == true {
-            return true
-        }
-
-        guard let windowRules = rules?.windows else {
-            return false
-        }
-
-        let pseudo = WindowSnapshot(
-            windowID: 0,
-            bundleID: windowDefinition.match.bundleID,
-            pid: 0,
-            processStartTime: 0,
-            title: windowDefinition.match.title?.equals
-                ?? windowDefinition.match.title?.contains
-                ?? windowDefinition.match.title?.regex
-                ?? "",
-            role: windowDefinition.match.role,
-            subrole: windowDefinition.match.subrole,
-            modal: nil,
-            geometryBlocked: false,
-            isAXBacked: false,
-            minimized: false,
-            hidden: false,
-            frame: ResolvedFrame(x: 0, y: 0, width: 100, height: 100),
-            displayID: nil,
-            isFullscreen: false,
-            frontIndex: 0
-        )
-        return windowRules.contains { matches(window: pseudo, rule: $0) }
+    /// App-wide apply rules can be decided from a layout definition. Window
+    /// rules require a real snapshot and must never be evaluated against
+    /// synthesized title/role/minimized values.
+    public static func matchesIgnoreAppRule(
+        windowDefinition: WindowDefinition,
+        rules: IgnoreRuleSet?
+    ) -> Bool {
+        rules?.apps?.contains(windowDefinition.match.bundleID) == true
     }
 
     public static func isShortcutDisabled(

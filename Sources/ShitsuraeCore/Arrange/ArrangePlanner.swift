@@ -13,6 +13,7 @@ public struct ArrangePlan: Equatable, Sendable {
     public let steps: [ArrangeStep]
     public let skipped: [SkippedItem]
     public let warnings: [WarningItem]
+    public let ignoredDefinitionFingerprints: Set<String>
 }
 
 /// Pure arrange planning: which windows to launch / wait for / place where.
@@ -32,6 +33,7 @@ public enum ArrangePlanner {
         var steps: [ArrangeStep] = []
         var skipped: [SkippedItem] = []
         var warnings: [WarningItem] = []
+        var ignoredDefinitionFingerprints: Set<String> = []
         var registeredSlots = Set<Int>()
 
         // All spaces of a layout share the host display in v2.0 (validated at
@@ -45,8 +47,17 @@ public enum ArrangePlanner {
 
             for definition in space.windows {
                 let launch = definition.launch ?? true
+                let fingerprint = SlotEntry.fingerprint(
+                    layoutName: layoutName,
+                    spaceID: space.spaceID,
+                    definition: definition
+                )
 
-                if PolicyEngine.matchesIgnoreRule(windowDefinition: definition, rules: config.ignore?.apply) {
+                if PolicyEngine.matchesIgnoreAppRule(
+                    windowDefinition: definition,
+                    rules: config.ignore?.apply
+                ) {
+                    ignoredDefinitionFingerprints.insert(fingerprint)
                     skipped.append(
                         SkippedItem(
                             spaceID: space.spaceID,
@@ -62,6 +73,35 @@ public enum ArrangePlanner {
                         )
                     )
                     continue
+                }
+
+                if let currentWindows {
+                    let matchingWindows = WindowRegistry.sortedCandidates(
+                        rule: definition.match,
+                        pool: currentWindows.filter { !$0.isFullscreen }
+                    )
+                    if !matchingWindows.isEmpty,
+                       matchingWindows.allSatisfy({
+                           PolicyEngine.matchesIgnoreRule(window: $0, rules: config.ignore?.apply)
+                       })
+                    {
+                        ignoredDefinitionFingerprints.insert(fingerprint)
+                        skipped.append(
+                            SkippedItem(
+                                spaceID: space.spaceID,
+                                slot: definition.slot,
+                                reason: "ignoreApply",
+                                detail: "matched ignore.apply window rule"
+                            )
+                        )
+                        warnings.append(
+                            WarningItem(
+                                code: "ignore.apply.matched",
+                                detail: "slot \(definition.slot) skipped by ignore.apply window rule"
+                            )
+                        )
+                        continue
+                    }
                 }
 
                 guard let resolvedFrame = try? LengthParser.resolveFrame(
@@ -177,7 +217,8 @@ public enum ArrangePlanner {
             planItems: planItems,
             steps: steps,
             skipped: skipped,
-            warnings: warnings
+            warnings: warnings,
+            ignoredDefinitionFingerprints: ignoredDefinitionFingerprints
         )
     }
 }

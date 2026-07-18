@@ -106,6 +106,7 @@ public extension VirtualSpaceEngine {
             spaceID: spaceID,
             config: config
         )
+        let arrangeObservation = control.focusedWindowObservation()
 
         if let previousLayoutName = currentState.activeLayoutName,
            previousLayoutName != layoutName
@@ -132,7 +133,9 @@ public extension VirtualSpaceEngine {
             config: config.config,
             hostDisplay: hostDisplay,
             displays: displays,
-            currentWindows: nil
+            currentWindows: arrangeObservation.inventory.isAuthoritative
+                ? WindowEligibility.geometryCandidates(in: arrangeObservation)
+                : []
         )
         let arrangedFingerprints = Set(plan.steps.map { step in
             SlotEntry.fingerprint(
@@ -143,7 +146,7 @@ public extension VirtualSpaceEngine {
         })
         let configuredFingerprints: Set<String> = Set(layout.spaces.flatMap { space in
             space.windows.compactMap { definition in
-                guard !PolicyEngine.matchesIgnoreRule(
+                guard !PolicyEngine.matchesIgnoreAppRule(
                     windowDefinition: definition,
                     rules: config.config.ignore?.apply
                 ) else {
@@ -155,11 +158,12 @@ public extension VirtualSpaceEngine {
                     definition: definition
                 )
             }
-        })
+        }).subtracting(plan.ignoredDefinitionFingerprints)
         let arrangeRegistryEntries = makeArrangeRegistryEntries(
             layoutName: layoutName,
             layout: layout,
-            config: config
+            config: config,
+            excluding: plan.ignoredDefinitionFingerprints
         )
 
         // Only windows that this invocation will place need to be visible.
@@ -224,6 +228,7 @@ public extension VirtualSpaceEngine {
                 preLaunchWindowHandles: preLaunchWindowHandles,
                 alreadyBound: Set(boundWindows.values.map(\.identity)),
                 registryEntries: arrangeRegistryEntries,
+                ignoreRules: config.config.ignore?.apply,
                 provisionalBindings: &provisionalBindings
             ) else {
                 softErrors.append(
@@ -277,6 +282,21 @@ public extension VirtualSpaceEngine {
             }
         }
 
+        let postArrangeObservation = control.focusedWindowObservation()
+        let postArrangeIgnoredFingerprints = postArrangeObservation.inventory.isAuthoritative
+            ? ArrangePlanner.buildPlan(
+                layoutName: layoutName,
+                layout: layout,
+                spaceID: spaceID,
+                config: config.config,
+                hostDisplay: hostDisplay,
+                displays: displays,
+                currentWindows: WindowEligibility.geometryCandidates(in: postArrangeObservation)
+            ).ignoredDefinitionFingerprints
+            : []
+        let ignoredFingerprints = plan.ignoredDefinitionFingerprints
+            .union(postArrangeIgnoredFingerprints)
+
         // Rebuild state for the arranged scope, binding resolved windows.
         try rebuildStateAfterArrange(
             layoutName: layoutName,
@@ -284,13 +304,17 @@ public extension VirtualSpaceEngine {
             arrangedSpaceID: spaceID,
             boundWindows: boundWindows,
             frames: frames,
+            ignoredFingerprints: ignoredFingerprints,
             config: config,
             hostDisplay: hostDisplay
         )
 
         // Adopt windows no layout slot claimed into the active workspace so
         // they are tracked (and hidden/shown) from the start.
-        _ = try? adoptUntrackedWindows(config: config)
+        _ = try? adoptUntrackedWindows(
+            config: config,
+            additionalIgnoreRules: config.config.ignore?.apply
+        )
 
         // Re-hide everything outside the active workspace.
         let activeSpaceID = resolvedActiveSpaceID(
@@ -298,11 +322,19 @@ public extension VirtualSpaceEngine {
             layout: layout,
             hostDisplay: hostDisplay
         )
-        let switchOutcome = try switchSpace(to: activeSpaceID, config: config, reconcile: true)
+        let switchOutcome = try switchSpace(
+            to: activeSpaceID,
+            config: config,
+            reconcile: true,
+            adoptionIgnoreRules: config.config.ignore?.apply
+        )
 
         let unresolvedSlots = switchOutcome.unresolvedSlots
-        let result = softErrors.isEmpty ? "success" : "partial"
-        let exitCode = softErrors.isEmpty ? ErrorCode.success.rawValue : ErrorCode.partialSuccess.rawValue
+        let completedWithoutGaps = softErrors.isEmpty && unresolvedSlots.isEmpty
+        let result = completedWithoutGaps ? "success" : "partial"
+        let exitCode = completedWithoutGaps
+            ? ErrorCode.success.rawValue
+            : ErrorCode.partialSuccess.rawValue
 
         logger.log(
             event: "arrange.finished",
@@ -409,7 +441,8 @@ public extension VirtualSpaceEngine {
         let registryEntries = makeArrangeRegistryEntries(
             layoutName: layoutName,
             layout: layout,
-            config: config
+            config: config,
+            excluding: []
         )
         let registeredIDs = Set(registryEntries.map(\.entry.id))
         let discardedEntries = currentState.slots(layoutName: layoutName)
@@ -531,6 +564,7 @@ public extension VirtualSpaceEngine {
         arrangedSpaceID: Int?,
         boundWindows: [String: WindowSnapshot],
         frames: [String: ResolvedFrame],
+        ignoredFingerprints: Set<String>,
         config: LoadedConfig,
         hostDisplay: DisplayInfo
     ) throws {
@@ -543,7 +577,18 @@ public extension VirtualSpaceEngine {
         var entries: [SlotEntry] = []
         for space in layout.spaces {
             for definition in space.windows {
-                if PolicyEngine.matchesIgnoreRule(windowDefinition: definition, rules: config.config.ignore?.apply) {
+                let fingerprint = SlotEntry.fingerprint(
+                    layoutName: layoutName,
+                    spaceID: space.spaceID,
+                    definition: definition
+                )
+                if ignoredFingerprints.contains(fingerprint) {
+                    continue
+                }
+                if PolicyEngine.matchesIgnoreAppRule(
+                    windowDefinition: definition,
+                    rules: config.config.ignore?.apply
+                ) {
                     continue
                 }
                 var entry = SlotEntry.makeEntry(
@@ -608,6 +653,7 @@ public extension VirtualSpaceEngine {
         preLaunchWindowHandles: Set<WindowHandle>?,
         alreadyBound: Set<WindowIdentity>,
         registryEntries: [(fingerprint: String, entry: WindowRegistry.Entry)],
+        ignoreRules: IgnoreRuleSet?,
         provisionalBindings: inout [String: WindowSnapshot]
     ) -> WindowSnapshot? {
         let deadline = Date().addingTimeInterval(TimeInterval(arrangeWaitTimeoutMS) / 1000)
@@ -626,7 +672,9 @@ public extension VirtualSpaceEngine {
                 control.sleep(milliseconds: min(100, remainingMS))
                 continue
             }
-            let manageable = WindowEligibility.geometryCandidates(in: observation)
+            let manageable = WindowEligibility.geometryCandidates(in: observation).filter {
+                !PolicyEngine.matchesIgnoreRule(window: $0, rules: ignoreRules)
+            }
             let entries = registryEntries.map { item -> WindowRegistry.Entry in
                 guard let bound = provisionalBindings[item.fingerprint] else {
                     return item.entry
@@ -706,7 +754,8 @@ public extension VirtualSpaceEngine {
     private func makeArrangeRegistryEntries(
         layoutName: String,
         layout: LayoutDefinition,
-        config: LoadedConfig
+        config: LoadedConfig,
+        excluding excludedFingerprints: Set<String>
     ) -> [(fingerprint: String, entry: WindowRegistry.Entry)] {
         let existingByFingerprint = Dictionary(
             currentState.slots(layoutName: layoutName)
@@ -717,7 +766,7 @@ public extension VirtualSpaceEngine {
 
         return layout.spaces.flatMap { space in
             space.windows.compactMap { definition -> (fingerprint: String, entry: WindowRegistry.Entry)? in
-                guard !PolicyEngine.matchesIgnoreRule(
+                guard !PolicyEngine.matchesIgnoreAppRule(
                     windowDefinition: definition,
                     rules: config.config.ignore?.apply
                 ) else {
@@ -728,6 +777,9 @@ public extension VirtualSpaceEngine {
                     spaceID: space.spaceID,
                     definition: definition
                 )
+                guard !excludedFingerprints.contains(fresh.definitionFingerprint) else {
+                    return nil
+                }
                 return (
                     fingerprint: fresh.definitionFingerprint,
                     entry: existingByFingerprint[fresh.definitionFingerprint]?.registryEntry

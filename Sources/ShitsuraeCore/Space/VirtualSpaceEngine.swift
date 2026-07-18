@@ -140,7 +140,8 @@ public actor VirtualSpaceEngine {
     public func switchSpace(
         to targetSpaceID: Int,
         config: LoadedConfig,
-        reconcile: Bool = false
+        reconcile: Bool = false,
+        adoptionIgnoreRules: IgnoreRuleSet? = nil
     ) throws -> SpaceSwitchOutcome {
         try ensureAccessibility()
         guard let layoutName = state.activeLayoutName else {
@@ -289,7 +290,8 @@ public actor VirtualSpaceEngine {
             config: config,
             persistChanges: false,
             inventory: inventory,
-            excludedWindowIdentities: blockedIdentities
+            excludedWindowIdentities: blockedIdentities,
+            additionalIgnoreRules: adoptionIgnoreRules
         )
 
         pruneIneligibleAdoptedEntriesInMemory(layoutName: layoutName, windows: allWindows)
@@ -860,7 +862,7 @@ public actor VirtualSpaceEngine {
 
         let incomingFingerprints: Set<String> = Set(layout.spaces.flatMap { space in
             space.windows.compactMap { definition in
-                guard !PolicyEngine.matchesIgnoreRule(
+                guard !PolicyEngine.matchesIgnoreAppRule(
                     windowDefinition: definition,
                     rules: config.config.ignore?.apply
                 ) else {
@@ -899,7 +901,10 @@ public actor VirtualSpaceEngine {
         var entries: [SlotEntry] = []
         for space in layout.spaces {
             for definition in space.windows {
-                if PolicyEngine.matchesIgnoreRule(windowDefinition: definition, rules: config.config.ignore?.apply) {
+                if PolicyEngine.matchesIgnoreAppRule(
+                    windowDefinition: definition,
+                    rules: config.config.ignore?.apply
+                ) {
                     continue
                 }
                 var entry = SlotEntry.makeEntry(
