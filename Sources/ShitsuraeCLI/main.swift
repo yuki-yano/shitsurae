@@ -30,12 +30,26 @@ func executeRemote(_ request: CommandRequest, json: Bool) -> Never {
 
         exit(Int32(probe.exitCode))
     } catch CommandClientError.serverUnavailable {
-        FileHandle.standardError.write(Data("error: Shitsurae.app is not reachable (launch failed?)\n".utf8))
+        writeFormattedError(
+            code: .backendUnavailable,
+            message: "Shitsurae.app is not reachable (launch failed?)",
+            json: json
+        )
         exit(Int32(ErrorCode.backendUnavailable.rawValue))
     } catch {
-        FileHandle.standardError.write(Data("error: \(error)\n".utf8))
+        writeFormattedError(
+            code: .ipcCommunicationError,
+            message: String(describing: error),
+            json: json
+        )
         exit(Int32(ErrorCode.ipcCommunicationError.rawValue))
     }
+}
+
+func writeFormattedError(code: ErrorCode, message: String, json: Bool) {
+    let output = CLIOutputFormatter.error(code: code, message: message, json: json)
+    FileHandle.standardOutput.write(output.standardOutput)
+    FileHandle.standardError.write(output.standardError)
 }
 
 func printJSONFragment(_ object: Any) {
@@ -111,12 +125,14 @@ struct WindowSelectorOptions: ParsableArguments {
     @Option(name: .customLong("title"), help: "Window title substring (with --bundle-id)")
     var title: String?
 
-    func apply(to request: inout CommandRequest) {
-        request.windowID = windowID
-        request.pid = pid
-        request.processStartTime = processStartTime
-        request.bundleID = bundleID
-        request.title = title
+    var value: CLIWindowSelector {
+        CLIWindowSelector(
+            windowID: windowID,
+            pid: pid,
+            processStartTime: processStartTime,
+            bundleID: bundleID,
+            title: title
+        )
     }
 }
 
@@ -157,11 +173,12 @@ struct Arrange: ParsableCommand {
     @OptionGroup var jsonFlag: JSONFlag
 
     func run() throws {
-        var request = CommandRequest(command: "arrange")
-        request.layout = layout
-        request.dryRun = dryRun ? true : nil
-        request.stateOnly = stateOnly ? true : nil
-        request.spaceID = space
+        let request = CLIRequestBuilder.arrange(
+            layout: layout,
+            dryRun: dryRun,
+            stateOnly: stateOnly,
+            spaceID: space
+        )
         executeRemote(request, json: jsonFlag.json)
     }
 }
@@ -293,9 +310,10 @@ struct Space: ParsableCommand {
         @OptionGroup var jsonFlag: JSONFlag
 
         func run() throws {
-            var request = CommandRequest(command: "spaceSwitch")
-            request.spaceID = spaceID
-            request.reconcile = reconcile ? true : nil
+            let request = CLIRequestBuilder.spaceSwitch(
+                spaceID: spaceID,
+                reconcile: reconcile
+            )
             executeRemote(request, json: jsonFlag.json)
         }
     }
@@ -319,8 +337,7 @@ struct Space: ParsableCommand {
                 FileHandle.standardError.write(Data("This clears pending recovery state. Re-run with --yes to confirm.\n".utf8))
                 throw ExitCode(Int32(ErrorCode.validationError.rawValue))
             }
-            var request = CommandRequest(command: "spaceRecover")
-            request.forceClearPending = true
+            let request = CLIRequestBuilder.spaceRecover()
             executeRemote(request, json: jsonFlag.json)
         }
     }
@@ -352,9 +369,11 @@ struct Window: ParsableCommand {
         @OptionGroup var jsonFlag: JSONFlag
 
         func run() throws {
-            var request = CommandRequest(command: "windowWorkspace")
-            request.spaceID = spaceID
-            selector.apply(to: &request)
+            let request = CLIRequestBuilder.window(
+                command: "windowWorkspace",
+                selector: selector.value,
+                spaceID: spaceID
+            )
             executeRemote(request, json: jsonFlag.json)
         }
     }
@@ -372,10 +391,12 @@ struct Window: ParsableCommand {
         @OptionGroup var jsonFlag: JSONFlag
 
         func run() throws {
-            var request = CommandRequest(command: "windowMove")
-            request.x = x
-            request.y = y
-            selector.apply(to: &request)
+            let request = CLIRequestBuilder.window(
+                command: "windowMove",
+                selector: selector.value,
+                x: x,
+                y: y
+            )
             executeRemote(request, json: jsonFlag.json)
         }
     }
@@ -393,10 +414,12 @@ struct Window: ParsableCommand {
         @OptionGroup var jsonFlag: JSONFlag
 
         func run() throws {
-            var request = CommandRequest(command: "windowResize")
-            request.width = width
-            request.height = height
-            selector.apply(to: &request)
+            let request = CLIRequestBuilder.window(
+                command: "windowResize",
+                selector: selector.value,
+                width: width,
+                height: height
+            )
             executeRemote(request, json: jsonFlag.json)
         }
     }
@@ -420,12 +443,14 @@ struct Window: ParsableCommand {
         @OptionGroup var jsonFlag: JSONFlag
 
         func run() throws {
-            var request = CommandRequest(command: "windowSet")
-            request.x = x
-            request.y = y
-            request.width = width
-            request.height = height
-            selector.apply(to: &request)
+            let request = CLIRequestBuilder.window(
+                command: "windowSet",
+                selector: selector.value,
+                x: x,
+                y: y,
+                width: width,
+                height: height
+            )
             executeRemote(request, json: jsonFlag.json)
         }
     }
@@ -441,9 +466,7 @@ struct Focus: ParsableCommand {
     @OptionGroup var jsonFlag: JSONFlag
 
     func run() throws {
-        var request = CommandRequest(command: "focus")
-        request.slot = slot
-        selector.apply(to: &request)
+        let request = CLIRequestBuilder.focus(slot: slot, selector: selector.value)
         executeRemote(request, json: jsonFlag.json)
     }
 }
@@ -464,8 +487,7 @@ struct Switcher: ParsableCommand {
         @OptionGroup var jsonFlag: JSONFlag
 
         func run() throws {
-            var request = CommandRequest(command: "switcherList")
-            request.includeAllSpaces = includeAllSpaces
+            let request = CLIRequestBuilder.switcherList(includeAllSpaces: includeAllSpaces)
             executeRemote(request, json: jsonFlag.json)
         }
     }
