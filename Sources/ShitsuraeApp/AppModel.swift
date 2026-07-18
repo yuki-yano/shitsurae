@@ -157,6 +157,7 @@ final class AppModel: ObservableObject {
     @Published var displays: [DisplayInfo] = []
     @Published var configErrors: [ValidateErrorItem] = []
     @Published var diagnostics: DiagnosticsJSON?
+    @Published private(set) var workspaceState: WorkspaceStateSnapshot?
     @Published var lastActionMessage: String?
     @Published var actionStatus: ActionStatus = .idle
 
@@ -193,6 +194,7 @@ final class AppModel: ObservableObject {
     private var observers: [NSObjectProtocol] = []
     private var shutdownInProgress = false
     private var shutdownCompletions: [() -> Void] = []
+    private var workspaceStateRefreshSequence: UInt64 = 0
 
     init() {
         let focusEventGate = FocusEventGate()
@@ -325,7 +327,8 @@ final class AppModel: ObservableObject {
         screenRecordingGranted = SystemProbe.screenRecordingGranted()
         displays = SystemProbe.displays()
 
-        Task { @MainActor in
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             let state = await engine.currentState
             activeLayoutName = state.activeLayoutName
             activeSpaceID = state.primaryActiveSpaceID
@@ -344,6 +347,31 @@ final class AppModel: ObservableObject {
                 selectedSpaceID = activeSpaceID
             }
             diagnostics = await router.diagnostics()
+            await refreshWorkspaceState()
+        }
+    }
+
+    func refreshWorkspaceState() async {
+        workspaceStateRefreshSequence &+= 1
+        let sequence = workspaceStateRefreshSequence
+        let config = configManager.configIfLoaded()
+        let snapshot = await engine.workspaceStateSnapshot(config: config)
+        guard sequence == workspaceStateRefreshSequence else { return }
+        if workspaceState != snapshot {
+            workspaceState = snapshot
+        }
+    }
+
+    /// Keeps live window flags current only while the read-only status screen
+    /// is mounted. SwiftUI cancels this task when the user navigates away.
+    func monitorWorkspaceState() async {
+        while !Task.isCancelled {
+            await refreshWorkspaceState()
+            do {
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+            } catch {
+                return
+            }
         }
     }
 

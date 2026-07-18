@@ -7,6 +7,7 @@ import ShitsuraeCore
 
 enum SidebarItem: Hashable {
     case arrange
+    case workspaceState
     case layout(String)
     case general
     case shortcuts
@@ -24,6 +25,8 @@ struct MainWindowView: View {
                 Section("Actions") {
                     Label("Arrange", systemImage: "play.rectangle")
                         .tag(SidebarItem.arrange)
+                    Label("Workspace State", systemImage: "rectangle.3.group")
+                        .tag(SidebarItem.workspaceState)
                 }
 
                 if !model.layouts.isEmpty {
@@ -56,6 +59,8 @@ struct MainWindowView: View {
                 switch selection {
                 case .arrange, nil:
                     ArrangeView()
+                case .workspaceState:
+                    WorkspaceStateSection()
                 case let .layout(name):
                     if let layout = model.configManager.configIfLoaded()?.config.layouts[name] {
                         LayoutDetailView(name: name, layout: layout)
