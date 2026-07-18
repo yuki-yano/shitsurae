@@ -214,10 +214,10 @@ struct VirtualSpaceEngineTests {
 
         #expect(outcome.focusedWindowID == 4)
         #expect(control.focusedWindowIDs.last == 4)
-        #expect(control.activatedBundles == ["com.apple.Notes", "com.apple.Notes"])
+        #expect(control.activatedBundles == ["com.apple.Notes"])
     }
 
-    @Test func switchSpaceReFocusesIntendedWindowAfterTransientFallback() async throws {
+    @Test func switchSpaceWaitsForTransientMRUFailureBeforeTryingFallback() async throws {
         let windows = [
             TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", isAXBacked: true, frontIndex: 0),
             TestFixtures.window(id: 3, bundleID: "com.apple.Notes", isAXBacked: true, frontIndex: 1),
@@ -255,11 +255,11 @@ struct VirtualSpaceEngineTests {
         let outcome = try await engine.switchSpace(to: 2, config: config)
 
         #expect(outcome.focusedWindowID == 3)
-        #expect(control.focusedWindowIDs == [4, 3])
+        #expect(control.focusedWindowIDs == [3])
         #expect(control.activatedBundles == ["com.apple.Notes"])
     }
 
-    @Test func switchSpaceReFocusesIntendedWindowWhenStolenDuringConvergence() async throws {
+    @Test func switchSpaceFocusesIntendedWindowOnceAfterConvergenceStealsFocus() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
@@ -270,19 +270,17 @@ struct VirtualSpaceEngineTests {
 
         // Reproduce the race: while returning to space 1, hiding the space-2
         // window (win3) keeps failing so convergence retries its position
-        // mutation, and each such mutation steals key focus to a *sibling* of
-        // the target workspace (win2). The early focus on win1 thus gets
-        // clobbered after it already succeeded.
+        // mutation, and each such mutation steals key focus to a sibling of
+        // the target workspace (win2).
         control.acceptedButPinnedFrameWindowIDs = [3: control.window(3)!.frame]
         control.stealFocusOnPositionAttempt = 2
 
         let outcome = try await engine.switchSpace(to: 1, config: config)
 
-        // The engine must notice focus drifted off the window it just focused
-        // and re-assert the intended MRU window after convergence settles —
-        // folding the user's manual "press the shortcut again" into one switch.
+        // The engine waits for convergence, then focuses the intended MRU once.
         #expect(outcome.focusedWindowID == 1)
         #expect(control.focusedWindowIDs.last == 1)
+        #expect(control.focusedWindowIDs.count(where: { $0 == 1 }) == 1)
     }
 
     @Test func switchSpaceKeepsUserChosenWindowWhenFocusLeavesTargetWorkspace() async throws {
@@ -293,20 +291,26 @@ struct VirtualSpaceEngineTests {
         await engine.markActivated(window: control.window(1)!)
         _ = try await engine.switchSpace(to: 2, config: config)
 
-        // During the return to space 1, focus drifts to win3 — a window that is
-        // NOT a candidate of the target workspace (models the user deliberately
-        // focusing another app while the switch is still settling). Only an OS
-        // steal *within* the target workspace should trigger re-focus, so the
-        // engine must leave the user's out-of-workspace choice alone.
+        // During the return to space 1, the user focuses a newly opened window
+        // in space 2 while the switch is still settling. It differs from the
+        // pre-switch focus and is not a target candidate, so the engine must
+        // leave that newer choice alone.
+        let userTarget = TestFixtures.window(
+            id: 9,
+            bundleID: "com.apple.Finder",
+            isAXBacked: true,
+            frontIndex: 3
+        )
+        control.addWindow(userTarget)
         control.acceptedButPinnedFrameWindowIDs = [3: control.window(3)!.frame]
-        control.stealFocusOnPositionAttempt = 3
+        control.stealFocusOnPositionAttempt = 9
 
         _ = try await engine.switchSpace(to: 1, config: config)
 
-        #expect(control.focusedWindowIDs.last == 3)
+        #expect(control.focusedWindowIDs.last == 9)
     }
 
-    @Test func switchSpaceDoesNotReFocusWhenEarlyFocusFailedAndUserLeavesTargetWorkspace() async throws {
+    @Test func switchSpaceDoesNotFocusMRUWhenUserLeavesTargetWorkspaceDuringConvergence() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
@@ -314,18 +318,22 @@ struct VirtualSpaceEngineTests {
         await engine.markActivated(window: control.window(1)!)
         _ = try await engine.switchSpace(to: 2, config: config)
 
-        // Make the early focus pass fail for both space-1 candidates. They
-        // would succeed on the post-convergence retry, so this catches the nil
-        // branch specifically: if focus has moved outside the target workspace,
-        // the engine must not take it back.
-        control.failFocusAttemptsRemainingByWindowID = [1: 2, 2: 2]
+        let userTarget = TestFixtures.window(
+            id: 9,
+            bundleID: "com.apple.Finder",
+            isAXBacked: true,
+            frontIndex: 3
+        )
+        control.addWindow(userTarget)
         control.failPositionWindowIDs = [3]
-        control.stealFocusOnPositionAttempt = 3
+        control.stealFocusOnPositionAttempt = 9
 
         let outcome = try await engine.switchSpace(to: 1, config: config)
 
         #expect(outcome.focusedWindowID == nil)
-        #expect(control.focusedWindowIDs.last == 3)
+        #expect(control.focusedWindowIDs.last == 9)
+        #expect(!control.focusedWindowIDs.contains(1))
+        #expect(!control.focusedWindowIDs.contains(2))
     }
 
     @Test func switchSpaceKeepsRecoveryPendingWhenWindowsRefuseDesiredVisibility() async throws {

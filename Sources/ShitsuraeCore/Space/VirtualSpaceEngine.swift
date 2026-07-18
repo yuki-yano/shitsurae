@@ -342,6 +342,7 @@ public actor VirtualSpaceEngine {
         }
 
         let observation = preflight.observation
+        let focusBeforeVisibilityMutation = observation.focusedIdentity
         let inventory = observation.inventory
         let allWindows = inventory.windows
         let windows = preflight.manageableWindows
@@ -447,13 +448,6 @@ public actor VirtualSpaceEngine {
             logger: logger
         )
 
-        // Focus the MRU window of the target workspace right away — the
-        // convergence retries below can take a few hundred ms and the user
-        // must not wait for them to get keyboard focus.
-        var focusedIdentity = focusedMainIsBlocked
-            ? nil
-            : focusTarget(from: plan.focusCandidates)
-
         let convergence = VisibilityApplier.converge(
             changes: applied,
             control: control,
@@ -462,25 +456,28 @@ public actor VirtualSpaceEngine {
         )
         updateQuarantine(plannedChanges: applied, convergence: convergence)
 
-        // The early focus can fail while the window is still settling, or it
-        // can succeed and then be clobbered: convergence (and the OS settling
-        // the shown/hidden windows) can steal key focus to a *sibling* window
-        // of the target workspace *after* we focused the intended one. Re-assert
-        // focus once the layout has settled — but only for that case (a steal
-        // within the workspace, or focus vanishing entirely), never when the
-        // user deliberately moved focus outside the workspace mid-switch. This
-        // folds the user's manual "press the shortcut again" into a single
-        // switch.
+        // Geometry retries can make AppKit activate a sibling application. Do
+        // not focus before those mutations settle: an early focus followed by
+        // this correction produces a visible app-to-app flash. Focus the MRU
+        // target once, after convergence. If focus changed from the pre-switch
+        // window to a non-target window while the switch was running, preserve
+        // that newer choice instead of taking focus back from the user.
+        var focusedIdentity: WindowIdentity?
         if !focusedMainIsBlocked, !plan.focusCandidates.isEmpty {
             let intendedTopIdentity = plan.focusCandidates[0].window.identity
             let liveFocus = control.focusedWindowObservation().focusedIdentity
-            let driftedWithinWorkspace = liveFocus
-                .map { identity in plan.focusCandidates.contains { $0.window.identity == identity } }
-                ?? true
-            let shouldReFocus = (liveFocus.map { $0 != intendedTopIdentity } ?? true)
-                && driftedWithinWorkspace
-            if shouldReFocus {
-                focusedIdentity = focusTarget(from: plan.focusCandidates)
+            let targetIdentities = Set(plan.focusCandidates.map(\.window.identity))
+            let focusMovedOutsideTarget = liveFocus.map { identity in
+                identity != focusBeforeVisibilityMutation && !targetIdentities.contains(identity)
+            } ?? false
+
+            if liveFocus == intendedTopIdentity {
+                focusedIdentity = intendedTopIdentity
+            } else if !focusMovedOutsideTarget {
+                focusedIdentity = focusTarget(
+                    from: plan.focusCandidates,
+                    retryPreferredTransientFailure: true
+                )
             }
         }
 
@@ -610,16 +607,22 @@ public actor VirtualSpaceEngine {
         }
     }
 
-    func focusTarget(from candidates: [BoundWindow]) -> WindowIdentity? {
-        for target in candidates {
-            if focusOneTarget(target) {
+    func focusTarget(
+        from candidates: [BoundWindow],
+        retryPreferredTransientFailure: Bool = false
+    ) -> WindowIdentity? {
+        for (index, target) in candidates.enumerated() {
+            if focusOneTarget(
+                target,
+                retryTransientFailure: retryPreferredTransientFailure && index == 0
+            ) {
                 return target.window.identity
             }
         }
         return nil
     }
 
-    private func focusOneTarget(_ target: BoundWindow) -> Bool {
+    private func focusOneTarget(_ target: BoundWindow, retryTransientFailure: Bool) -> Bool {
         let firstResult = control.focusWindow(
             windowID: target.window.windowID,
             pid: target.window.pid,
@@ -644,6 +647,25 @@ public actor VirtualSpaceEngine {
             )
             if retryResult.isSuccess, waitForFocusedWindow(identity: target.window.identity) {
                 return true
+            }
+
+            // Prefer waiting briefly for the MRU window over activating a
+            // fallback application and correcting back to MRU later. This is a
+            // third targeted attempt in the same final focus phase, so a
+            // transient AX rejection does not create an app-to-app flash.
+            if retryTransientFailure {
+                control.sleep(milliseconds: Self.focusVerificationDelaysMS[0])
+                let settledRetryResult = control.focusWindow(
+                    windowID: target.window.windowID,
+                    pid: target.window.pid,
+                    processStartTime: target.window.processStartTime,
+                    bundleID: target.window.bundleID
+                )
+                if settledRetryResult.isSuccess,
+                   waitForFocusedWindow(identity: target.window.identity)
+                {
+                    return true
+                }
             }
         }
 

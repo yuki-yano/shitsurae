@@ -26,8 +26,8 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     var failFocusAttemptsRemainingByWindowID: [UInt32: Int] = [:]
     /// When set, every setWindowPosition *attempt* (whether or not the write
     /// succeeds) re-points key focus to this window — models the real macOS
-    /// race where windows settling during convergence steal focus *after* the
-    /// engine's early focus call.
+    /// race where windows settling during convergence change key focus before
+    /// the engine performs its final focus decision.
     var stealFocusOnPositionAttempt: UInt32?
     private(set) var focusedWindowIDs: [UInt32] = []
     private var focusedWindowIdentity: WindowIdentity?
