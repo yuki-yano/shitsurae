@@ -9,10 +9,10 @@ public struct AppliedVisibilityChange: Equatable, Sendable {
     public var effectiveEntry: SlotEntry
     public let desiredEntry: SlotEntry
     public let restoredFromMinimized: Bool
-    /// Whether the initial geometry setter accepted the request. Rejected AX
-    /// writes are never retried in the same switch: some Chrome surfaces move
-    /// even while returning an error.
-    public let mutationAccepted: Bool
+    /// Latest geometry attempt. Safe pre-write failures remain retryable;
+    /// rejected AX writes do not because some Chrome surfaces move even while
+    /// returning an error.
+    public var geometryMutationResult: WindowGeometryMutationResult
 
     public init(
         window: WindowSnapshot,
@@ -20,14 +20,14 @@ public struct AppliedVisibilityChange: Equatable, Sendable {
         effectiveEntry: SlotEntry,
         desiredEntry: SlotEntry,
         restoredFromMinimized: Bool,
-        mutationAccepted: Bool = true
+        geometryMutationResult: WindowGeometryMutationResult = .applied
     ) {
         self.window = window
         self.originalEntry = originalEntry
         self.effectiveEntry = effectiveEntry
         self.desiredEntry = desiredEntry
         self.restoredFromMinimized = restoredFromMinimized
-        self.mutationAccepted = mutationAccepted
+        self.geometryMutationResult = geometryMutationResult
     }
 }
 
@@ -83,14 +83,14 @@ public enum VisibilityApplier {
         logger: ShitsuraeLogger
     ) -> [AppliedVisibilityChange] {
         plans.map { plan in
-            let succeeded = apply(plan: plan, control: control, logger: logger)
+            let result = apply(plan: plan, control: control, logger: logger)
             return AppliedVisibilityChange(
                 window: plan.window,
                 originalEntry: plan.originalEntry,
-                effectiveEntry: succeeded ? plan.desiredEntry : plan.originalEntry,
+                effectiveEntry: result.isApplied ? plan.desiredEntry : plan.originalEntry,
                 desiredEntry: plan.desiredEntry,
                 restoredFromMinimized: plan.restoreFromMinimized,
-                mutationAccepted: succeeded
+                geometryMutationResult: result
             )
         }
     }
@@ -99,7 +99,7 @@ public enum VisibilityApplier {
         plan: VisibilityPlan,
         control: WindowControl,
         logger: ShitsuraeLogger
-    ) -> Bool {
+    ) -> WindowGeometryMutationResult {
         // v2: unminimize before showing — without this a minimized window can
         // never come back through a space switch (v1 bug).
         if plan.restoreFromMinimized,
@@ -124,7 +124,7 @@ public enum VisibilityApplier {
 
         switch plan.mutation {
         case .none:
-            return true
+            return .applied
 
         case let .frame(frame):
             let tolerance = 2.0
@@ -134,52 +134,54 @@ public enum VisibilityApplier {
                abs(plan.window.frame.width - frame.width) <= tolerance,
                abs(plan.window.frame.height - frame.height) <= tolerance
             {
-                return true
+                return .applied
             }
-            guard control.setWindowFrame(
+            let result = control.setWindowFrame(
                 windowID: plan.window.windowID,
                 pid: plan.window.pid,
                 processStartTime: plan.window.processStartTime,
                 bundleID: plan.window.bundleID,
                 frame: frame
-            ) else {
+            )
+            if !result.isApplied {
                 logger.error(
                     event: "visibility.apply.setFrameFailed",
                     fields: [
                         "windowID": Int(plan.window.windowID),
                         "bundleID": plan.window.bundleID,
                         "action": plan.action,
+                        "result": String(describing: result),
                     ]
                 )
-                return false
             }
-            return true
+            return result
 
         case let .position(position):
             let tolerance: CGFloat = 2.0
             if abs(plan.window.frame.x - position.x) <= tolerance,
                abs(plan.window.frame.y - position.y) <= tolerance
             {
-                return true
+                return .applied
             }
-            guard control.setWindowPosition(
+            let result = control.setWindowPosition(
                 windowID: plan.window.windowID,
                 pid: plan.window.pid,
                 processStartTime: plan.window.processStartTime,
                 bundleID: plan.window.bundleID,
                 position: position
-            ) else {
+            )
+            if !result.isApplied {
                 logger.error(
                     event: "visibility.apply.setPositionFailed",
                     fields: [
                         "windowID": Int(plan.window.windowID),
                         "bundleID": plan.window.bundleID,
                         "action": plan.action,
+                        "result": String(describing: result),
                     ]
                 )
-                return false
             }
-            return true
+            return result
         }
     }
 
@@ -196,27 +198,34 @@ public enum VisibilityApplier {
             return ConvergenceOutcome(changes: [], hasPending: false, retryCount: 0, verifyCount: 0)
         }
 
+        var workingChanges = changes
         var latestInventory = control.windowInventory()
         var verifyCount = 1
         var retryCount = 0
-        var verification = desiredStateVerification(changes: changes, inventory: latestInventory)
+        var verification = desiredStateVerification(changes: workingChanges, inventory: latestInventory)
 
         for delayMS in retryDelaysMS where verification.values.contains(where: { $0 != .desired }) {
-            let retryable = changes.filter {
-                $0.mutationAccepted && verification[$0.window.identity] == .notDesired
+            let retryableIndices = workingChanges.indices.filter {
+                workingChanges[$0].geometryMutationResult.canRetry
+                    && verification[workingChanges[$0].window.identity] == .notDesired
             }
             let hasUnknown = verification.values.contains(.unknown)
-            if retryable.isEmpty && !hasUnknown {
+            if retryableIndices.isEmpty && !hasUnknown {
                 break
             }
-            if !retryable.isEmpty {
+            if !retryableIndices.isEmpty {
                 retryCount += 1
-                retry(changes: retryable, control: control, logger: logger)
+                retry(
+                    changes: &workingChanges,
+                    indices: retryableIndices,
+                    control: control,
+                    logger: logger
+                )
             }
             control.sleep(milliseconds: delayMS)
             latestInventory = control.windowInventory()
             verifyCount += 1
-            verification = desiredStateVerification(changes: changes, inventory: latestInventory)
+            verification = desiredStateVerification(changes: workingChanges, inventory: latestInventory)
         }
 
         let desiredUnresolvedWindowIdentities = Set(verification.compactMap { identity, result in
@@ -225,7 +234,7 @@ public enum VisibilityApplier {
         let unverifiedWindowIdentities = Set(verification.compactMap { identity, result in
             result == .unknown ? identity : nil
         })
-        let resolved = changes.map { change in
+        let resolved = workingChanges.map { change in
             var copy = change
             if desiredUnresolvedWindowIdentities.contains(change.window.identity) {
                 copy.effectiveEntry = change.originalEntry
@@ -388,11 +397,14 @@ public enum VisibilityApplier {
     }
 
     private static func retry(
-        changes: [AppliedVisibilityChange],
+        changes: inout [AppliedVisibilityChange],
+        indices: [Int],
         control: WindowControl,
         logger: ShitsuraeLogger
     ) {
-        for change in changes {
+        for index in indices {
+            let change = changes[index]
+            let result: WindowGeometryMutationResult
             switch change.desiredEntry.visibilityState {
             case .visible:
                 guard let frame = change.desiredEntry.lastVisibleFrame else {
@@ -407,44 +419,44 @@ public enum VisibilityApplier {
                         minimized: false
                     )
                 }
-                if !control.setWindowFrame(
+                result = control.setWindowFrame(
                     windowID: change.window.windowID,
                     pid: change.window.pid,
                     processStartTime: change.window.processStartTime,
                     bundleID: change.window.bundleID,
                     frame: frame
-                ) {
-                    logger.log(
-                        level: "warn",
-                        event: "visibility.retry.failed",
-                        fields: [
-                            "windowID": Int(change.window.windowID),
-                            "bundleID": change.window.bundleID,
-                            "action": "show",
-                        ]
-                    )
-                }
+                )
             case .hiddenOffscreen:
                 guard let frame = change.desiredEntry.lastHiddenFrame else {
                     continue
                 }
-                if !control.setWindowPosition(
+                result = control.setWindowPosition(
                     windowID: change.window.windowID,
                     pid: change.window.pid,
                     processStartTime: change.window.processStartTime,
                     bundleID: change.window.bundleID,
                     position: CGPoint(x: frame.x, y: frame.y)
-                ) {
-                    logger.log(
-                        level: "warn",
-                        event: "visibility.retry.failed",
-                        fields: [
-                            "windowID": Int(change.window.windowID),
-                            "bundleID": change.window.bundleID,
-                            "action": "hide",
-                        ]
-                    )
-                }
+                )
+            }
+
+            changes[index].geometryMutationResult = result
+            if result.isApplied {
+                changes[index].effectiveEntry = change.desiredEntry
+            } else if result == .rejected {
+                changes[index].effectiveEntry = change.originalEntry
+            }
+
+            if !result.isApplied {
+                logger.log(
+                    level: "warn",
+                    event: "visibility.retry.failed",
+                    fields: [
+                        "windowID": Int(change.window.windowID),
+                        "bundleID": change.window.bundleID,
+                        "action": change.desiredEntry.visibilityState == .visible ? "show" : "hide",
+                        "result": String(describing: result),
+                    ]
+                )
             }
         }
     }

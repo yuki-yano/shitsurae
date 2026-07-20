@@ -56,29 +56,29 @@ public struct LiveWindowControl: WindowControl {
         processStartTime: UInt64,
         bundleID: String,
         frame: ResolvedFrame
-    ) -> Bool {
+    ) -> WindowGeometryMutationResult {
         guard let running = Self.runningApplication(
             pid: pid,
             processStartTime: processStartTime,
             bundleID: bundleID
         ) else {
-            return false
+            return .notAttempted
         }
 
         let appElement = AXUIElementCreateApplication(running.processIdentifier)
-        let result = Self.withTemporarilyDisabledEnhancedUserInterface(appElement: appElement) {
+        return Self.withTemporarilyDisabledEnhancedUserInterface(appElement: appElement) {
             guard AXIsProcessTrusted() else {
-                return WindowInteractionResult.permissionDenied
+                return .notAttempted
             }
 
             Self.prepareForTargetedWindowInteraction(running)
 
             if Self.geometryBlockedAtMutationTime(windowID: windowID, appElement: appElement) {
-                return .failed
+                return .notAttempted
             }
 
             guard let windowElement = Self.matchingWindowElement(windowID: windowID, appElement: appElement) else {
-                return .failed
+                return .notAttempted
             }
 
             var sizeSettable = DarwinBoolean(false)
@@ -97,7 +97,7 @@ public struct LiveWindowControl: WindowControl {
                 positionSettable.boolValue,
                 let initial = Self.frame(of: windowElement)
             else {
-                return .failed
+                return .notAttempted
             }
 
             func applySize(_ target: CGSize) -> Bool {
@@ -131,9 +131,8 @@ public struct LiveWindowControl: WindowControl {
                 setPosition: applyPosition,
                 readFrame: { Self.frame(of: windowElement) }
             )
-            return outcome == .applied ? .success : .failed
+            return Self.mutationResult(for: outcome)
         }
-        return result.isSuccess
     }
 
     @discardableResult
@@ -143,29 +142,29 @@ public struct LiveWindowControl: WindowControl {
         processStartTime: UInt64,
         bundleID: String,
         position: CGPoint
-    ) -> Bool {
+    ) -> WindowGeometryMutationResult {
         guard let running = Self.runningApplication(
             pid: pid,
             processStartTime: processStartTime,
             bundleID: bundleID
         ) else {
-            return false
+            return .notAttempted
         }
 
         let appElement = AXUIElementCreateApplication(running.processIdentifier)
-        let result = Self.withTemporarilyDisabledEnhancedUserInterface(appElement: appElement) {
+        return Self.withTemporarilyDisabledEnhancedUserInterface(appElement: appElement) {
             guard AXIsProcessTrusted() else {
-                return WindowInteractionResult.permissionDenied
+                return .notAttempted
             }
 
             Self.prepareForTargetedWindowInteraction(running)
 
             if Self.geometryBlockedAtMutationTime(windowID: windowID, appElement: appElement) {
-                return .failed
+                return .notAttempted
             }
 
             guard let windowElement = Self.matchingWindowElement(windowID: windowID, appElement: appElement) else {
-                return .failed
+                return .notAttempted
             }
 
             var positionSettable = DarwinBoolean(false)
@@ -184,7 +183,7 @@ public struct LiveWindowControl: WindowControl {
                 sizeSettable.boolValue,
                 let initial = Self.frame(of: windowElement)
             else {
-                return .failed
+                return .notAttempted
             }
 
             func applyPosition(_ target: CGPoint) -> Bool {
@@ -218,9 +217,8 @@ public struct LiveWindowControl: WindowControl {
                 setSize: applySize,
                 readFrame: { Self.frame(of: windowElement) }
             )
-            return outcome == .applied ? .success : .failed
+            return Self.mutationResult(for: outcome)
         }
-        return result.isSuccess
     }
 
     // MARK: - Minimize
@@ -420,10 +418,10 @@ public struct LiveWindowControl: WindowControl {
         }
     }
 
-    static func withTemporarilyDisabledEnhancedUserInterface(
+    static func withTemporarilyDisabledEnhancedUserInterface<Result>(
         appElement: AXUIElement,
-        body: () -> WindowInteractionResult
-    ) -> WindowInteractionResult {
+        body: () -> Result
+    ) -> Result {
         let enhancedUserInterfaceAttribute = "AXEnhancedUserInterface" as CFString
         var currentValue: CFTypeRef?
         let readStatus = AXUIElementCopyAttributeValue(
@@ -441,6 +439,17 @@ public struct LiveWindowControl: WindowControl {
             }
         }
         return body()
+    }
+
+    private static func mutationResult(
+        for outcome: GeometryTransactionOutcome
+    ) -> WindowGeometryMutationResult {
+        switch outcome {
+        case .applied:
+            .applied
+        case .rejectedAndRestored, .failedToRestore:
+            .rejected
+        }
     }
 
     static func frame(of element: AXUIElement) -> CGRect? {

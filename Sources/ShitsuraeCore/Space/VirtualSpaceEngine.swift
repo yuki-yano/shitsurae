@@ -456,6 +456,19 @@ public actor VirtualSpaceEngine {
         )
         updateQuarantine(plannedChanges: applied, convergence: convergence)
 
+        // Never focus a target whose show could not be verified. Activating an
+        // offscreen/still-minimized MRU window can make AppKit briefly surface
+        // the wrong application, and it hides the useful fallback window from
+        // the same workspace. A safe transient geometry failure has already
+        // had the full convergence retry budget before this point.
+        let unresolvedVisibilityIdentities = Set(
+            convergence.unverifiedWindowIdentities
+                + convergence.desiredUnresolvedWindowIdentities
+        )
+        let focusCandidates = plan.focusCandidates.filter {
+            !unresolvedVisibilityIdentities.contains($0.window.identity)
+        }
+
         // Geometry retries can make AppKit activate a sibling application. Do
         // not focus before those mutations settle: an early focus followed by
         // this correction produces a visible app-to-app flash. Focus the MRU
@@ -463,10 +476,10 @@ public actor VirtualSpaceEngine {
         // window to a non-target window while the switch was running, preserve
         // that newer choice instead of taking focus back from the user.
         var focusedIdentity: WindowIdentity?
-        if !focusedMainIsBlocked, !plan.focusCandidates.isEmpty {
-            let intendedTopIdentity = plan.focusCandidates[0].window.identity
+        if !focusedMainIsBlocked, !focusCandidates.isEmpty {
+            let intendedTopIdentity = focusCandidates[0].window.identity
             let liveFocus = control.focusedWindowObservation().focusedIdentity
-            let targetIdentities = Set(plan.focusCandidates.map(\.window.identity))
+            let targetIdentities = Set(focusCandidates.map(\.window.identity))
             let focusMovedOutsideTarget = liveFocus.map { identity in
                 identity != focusBeforeVisibilityMutation && !targetIdentities.contains(identity)
             } ?? false
@@ -475,7 +488,7 @@ public actor VirtualSpaceEngine {
                 focusedIdentity = intendedTopIdentity
             } else if !focusMovedOutsideTarget {
                 focusedIdentity = focusTarget(
-                    from: plan.focusCandidates,
+                    from: focusCandidates,
                     retryPreferredTransientFailure: true
                 )
             }
@@ -498,7 +511,9 @@ public actor VirtualSpaceEngine {
             slotsByID[change.effectiveEntry.id] = change.effectiveEntry
         }
         if let focusedIdentity,
-           let focusEntry = plan.focusTarget?.entry,
+           let focusEntry = focusCandidates.first(where: {
+               $0.window.identity == focusedIdentity
+           })?.entry,
            var entry = slotsByID[focusEntry.id],
            entry.boundIdentity == focusedIdentity
         {
@@ -580,6 +595,7 @@ public actor VirtualSpaceEngine {
                 "converged": converged,
                 "intendedTop": plan.focusCandidates.first.map { Int($0.window.windowID) } ?? -1,
                 "intendedTopBundle": plan.focusCandidates.first?.window.bundleID ?? "",
+                "eligibleTop": focusCandidates.first.map { Int($0.window.windowID) } ?? -1,
                 "focused": focusedIdentity.map { Int($0.windowID) } ?? -1,
                 "actualFocused": diagnosticActualFocused.map { Int($0.windowID) } ?? -1,
                 "actualFocusedBundle": diagnosticActualFocused?.bundleID ?? "",

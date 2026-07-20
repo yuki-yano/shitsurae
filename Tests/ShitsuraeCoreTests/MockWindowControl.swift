@@ -12,6 +12,9 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
 
     var failFrameWindowIDs: Set<UInt32> = []
     var failPositionWindowIDs: Set<UInt32> = []
+    /// Safe transient failures that occur before a geometry setter runs.
+    var notAttemptedFrameAttemptsRemainingByWindowID: [UInt32: Int] = [:]
+    var notAttemptedPositionAttemptsRemainingByWindowID: [UInt32: Int] = [:]
     /// Models an app (e.g. Chrome's remote-debug popup) that refuses geometry
     /// writes and keeps the window pinned at its own frame: every set attempt
     /// forces the window back to this frame and reports failure, so the window
@@ -189,7 +192,7 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         processStartTime: UInt64,
         bundleID: String,
         frame: ResolvedFrame
-    ) -> Bool {
+    ) -> WindowGeometryMutationResult {
         lock.lock()
         defer { lock.unlock() }
         frameMutationAttemptWindowIDs.append(windowID)
@@ -200,21 +203,25 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
               window.processStartTime == processStartTime,
               window.bundleID == bundleID
         else {
-            return false
+            return .notAttempted
+        }
+        if let remaining = notAttemptedFrameAttemptsRemainingByWindowID[windowID], remaining > 0 {
+            notAttemptedFrameAttemptsRemainingByWindowID[windowID] = remaining - 1
+            return .notAttempted
         }
         if let pinned = acceptedButPinnedFrameWindowIDs[windowID] {
             windowsByID[windowID] = window.withFrame(pinned)
-            return true
+            return .applied
         }
         if let pinned = pinnedFrameWindowIDs[windowID] {
             windowsByID[windowID] = window.withFrame(pinned)
-            return false
+            return .rejected
         }
         guard !failFrameWindowIDs.contains(windowID) else {
-            return false
+            return .rejected
         }
         windowsByID[windowID] = window.withFrame(frame)
-        return true
+        return .applied
     }
 
     func setWindowPosition(
@@ -223,7 +230,7 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         processStartTime: UInt64,
         bundleID: String,
         position: CGPoint
-    ) -> Bool {
+    ) -> WindowGeometryMutationResult {
         lock.lock()
         defer { lock.unlock() }
         frameMutationAttemptWindowIDs.append(windowID)
@@ -234,7 +241,11 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
               window.processStartTime == processStartTime,
               window.bundleID == bundleID
         else {
-            return false
+            return .notAttempted
+        }
+        if let remaining = notAttemptedPositionAttemptsRemainingByWindowID[windowID], remaining > 0 {
+            notAttemptedPositionAttemptsRemainingByWindowID[windowID] = remaining - 1
+            return .notAttempted
         }
         if let thief = stealFocusOnPositionAttempt {
             focusedWindowIDs.append(thief)
@@ -242,19 +253,19 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         }
         if let pinned = acceptedButPinnedFrameWindowIDs[windowID] {
             windowsByID[windowID] = window.withFrame(pinned)
-            return true
+            return .applied
         }
         if let pinned = pinnedFrameWindowIDs[windowID] {
             windowsByID[windowID] = window.withFrame(pinned)
-            return false
+            return .rejected
         }
         guard !failPositionWindowIDs.contains(windowID) else {
-            return false
+            return .rejected
         }
         windowsByID[windowID] = window.withFrame(
             ResolvedFrame(x: position.x, y: position.y, width: window.frame.width, height: window.frame.height)
         )
-        return true
+        return .applied
     }
 
     func setWindowMinimized(

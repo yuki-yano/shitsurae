@@ -472,7 +472,7 @@ struct VisibilityApplierTests {
         ))
     }
 
-    @Test func convergeRollsBackUnconvergedChanges() {
+    @Test func convergeRollsBackAndStopsAfterRejectedRetry() {
         let window = TestFixtures.window(id: 1, bundleID: "app", isAXBacked: true)
         let control = MockWindowControl(windows: [window], displays: [TestFixtures.display])
         control.failPositionWindowIDs = [1]
@@ -510,7 +510,8 @@ struct VisibilityApplierTests {
         #expect(outcome.hasPending)
         #expect(outcome.changes.first?.effectiveEntry.visibilityState == .visible)
         #expect(outcome.desiredUnresolvedWindowIdentities == [window.identity])
-        #expect(outcome.retryCount == 2)
+        #expect(outcome.retryCount == 1)
+        #expect(control.setPositionAttemptWindowIDs == [1])
     }
 
     @Test func convergeAcceptsSuccessfulMutations() {

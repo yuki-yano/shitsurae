@@ -492,7 +492,7 @@ public extension VirtualSpaceEngine {
             processStartTime: window.processStartTime,
             bundleID: window.bundleID,
             frame: frame
-        ) else {
+        ).isApplied else {
             throw VirtualSpaceEngineError.stateError("failed to set window frame")
         }
 
@@ -534,7 +534,7 @@ public extension VirtualSpaceEngine {
             processStartTime: window.processStartTime,
             bundleID: window.bundleID,
             frame: frame
-        ) else {
+        ).isApplied else {
             throw VirtualSpaceEngineError.stateError("failed to snap window")
         }
 

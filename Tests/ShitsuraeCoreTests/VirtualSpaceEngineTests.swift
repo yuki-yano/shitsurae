@@ -259,6 +259,62 @@ struct VirtualSpaceEngineTests {
         #expect(control.activatedBundles == ["com.apple.Notes"])
     }
 
+    @Test func switchSpaceRetriesSafeRestoreFailureBeforeFocusingMRU() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        await engine.markActivated(window: try #require(control.window(1)))
+        _ = try await engine.switchSpace(to: 2, config: config)
+
+        let focusCountBeforeRestore = control.focusedWindowIDs.count
+        var focusedBeforeRestoreRetry = false
+        control.notAttemptedFrameAttemptsRemainingByWindowID = [1: 1]
+        control.onFrameMutationAttempt = {
+            let textEditAttempts = control.setFrameAttemptWindowIDs.count(where: { $0 == 1 })
+            if textEditAttempts > 1,
+               control.focusedWindowIDs.count > focusCountBeforeRestore
+            {
+                focusedBeforeRestoreRetry = true
+            }
+        }
+
+        let outcome = try await engine.switchSpace(to: 1, config: config)
+
+        #expect(outcome.converged)
+        #expect(outcome.focusedWindowID == 1)
+        #expect(control.setFrameAttemptWindowIDs.count(where: { $0 == 1 }) == 2)
+        #expect(!focusedBeforeRestoreRetry)
+        #expect(Array(control.focusedWindowIDs.dropFirst(focusCountBeforeRestore)) == [1])
+        #expect(!VisibilityPlanner.isHiddenWindowFrame(
+            frame: try #require(control.window(1)).frame,
+            displays: [TestFixtures.display]
+        ))
+    }
+
+    @Test func switchSpaceDoesNotRetryRejectedRestoreOrFocusHiddenMRU() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        await engine.markActivated(window: try #require(control.window(1)))
+        _ = try await engine.switchSpace(to: 2, config: config)
+
+        let focusCountBeforeRestore = control.focusedWindowIDs.count
+        control.failFrameWindowIDs = [1]
+
+        let outcome = try await engine.switchSpace(to: 1, config: config)
+
+        #expect(!outcome.converged)
+        #expect(outcome.focusedWindowID == 2)
+        #expect(control.setFrameAttemptWindowIDs.count(where: { $0 == 1 }) == 1)
+        #expect(Array(control.focusedWindowIDs.dropFirst(focusCountBeforeRestore)) == [2])
+        #expect(VisibilityPlanner.isHiddenWindowFrame(
+            frame: try #require(control.window(1)).frame,
+            displays: [TestFixtures.display]
+        ))
+    }
+
     @Test func switchSpaceFocusesIntendedWindowOnceAfterConvergenceStealsFocus() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -481,7 +537,11 @@ struct VirtualSpaceEngineTests {
 
         // The new identity is managed immediately:
         let arrival = try await engine.switchSpace(to: 1, config: config)
-        #expect(arrival.focusedWindowID == 1)
+        #expect(arrival.converged)
+        #expect(!VisibilityPlanner.isHiddenWindowFrame(
+            frame: try #require(control.window(1)).frame,
+            displays: [TestFixtures.display]
+        ))
         // switching away parks it offscreen instead of leaving it quarantined.
         let outcome = try await engine.switchSpace(to: 2, config: config)
         #expect(outcome.converged)
@@ -644,7 +704,7 @@ struct VirtualSpaceEngineTests {
             processStartTime: initialTextEdit.processStartTime,
             bundleID: "com.apple.TextEdit",
             frame: resizedFrame
-        ))
+        ).isApplied)
 
         _ = try await engine.switchSpace(to: 2, config: config)
         _ = try await engine.switchSpace(to: 1, config: config)

@@ -847,6 +847,6 @@ public extension VirtualSpaceEngine {
             processStartTime: window.processStartTime,
             bundleID: window.bundleID,
             frame: frame
-        )
+        ).isApplied
     }
 }

@@ -1,6 +1,24 @@
 import CoreGraphics
 import Foundation
 
+public enum WindowGeometryMutationResult: Equatable, Sendable {
+    case applied
+    /// No geometry setter ran, so retrying after a short delay is safe.
+    case notAttempted
+    /// A setter ran but the requested geometry was rejected or could not be
+    /// verified. Do not retry: some apps mutate a window while returning an
+    /// AX error.
+    case rejected
+
+    public var isApplied: Bool {
+        self == .applied
+    }
+
+    public var canRetry: Bool {
+        self != .rejected
+    }
+}
+
 /// Side-effecting window operations the engines depend on. The live AX-backed
 /// implementation is `LiveWindowControl`; tests inject mocks.
 public protocol WindowControl: Sendable {
@@ -25,7 +43,7 @@ public protocol WindowControl: Sendable {
         processStartTime: UInt64,
         bundleID: String,
         frame: ResolvedFrame
-    ) -> Bool
+    ) -> WindowGeometryMutationResult
     @discardableResult
     func setWindowPosition(
         windowID: UInt32,
@@ -33,7 +51,7 @@ public protocol WindowControl: Sendable {
         processStartTime: UInt64,
         bundleID: String,
         position: CGPoint
-    ) -> Bool
+    ) -> WindowGeometryMutationResult
     func setWindowMinimized(
         windowID: UInt32,
         pid: Int,
