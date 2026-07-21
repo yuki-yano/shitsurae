@@ -291,20 +291,23 @@ public final class CommandServer: @unchecked Sendable {
     }
 
     @discardableResult
-    static func writeAll(fd: Int32, data: Data) -> Bool {
-        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
+    static func writeAll(fd: Int32, data: Data) -> Int32 {
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Int32 in
             var offset = 0
             while offset < raw.count {
                 let written = write(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
                 if written < 0, errno == EINTR {
                     continue
                 }
-                if written <= 0 {
-                    return false
+                if written < 0 {
+                    return errno
+                }
+                if written == 0 {
+                    return EPIPE
                 }
                 offset += written
             }
-            return true
+            return 0
         }
     }
 
@@ -415,8 +418,9 @@ public enum CommandClient {
             throw CommandClientError.serverUnavailable
         }
 
-        guard CommandServer.writeAll(fd: fd, data: payload + Data("\n".utf8)) else {
-            if errno == EAGAIN || errno == EWOULDBLOCK {
+        let writeResult = CommandServer.writeAll(fd: fd, data: payload + Data("\n".utf8))
+        guard writeResult == 0 else {
+            if writeResult == EAGAIN || writeResult == EWOULDBLOCK {
                 throw CommandClientError.timedOut
             }
             throw CommandClientError.serverUnavailable

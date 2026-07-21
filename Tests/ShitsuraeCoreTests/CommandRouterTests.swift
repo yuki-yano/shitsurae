@@ -410,6 +410,16 @@ struct CommandServerTests {
         #expect(Date().timeIntervalSince(startedAt) < 0.5)
     }
 
+    @Test func socketWriteReturnsCapturedErrorCode() throws {
+        var sockets = [Int32](repeating: -1, count: 2)
+        try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0)
+        defer { close(sockets[0]) }
+        try #require(CommandServer.configureTimeouts(fd: sockets[0]))
+        close(sockets[1])
+
+        #expect(CommandServer.writeAll(fd: sockets[0], data: Data("request".utf8)) == EPIPE)
+    }
+
     private func readMessage(
         _ bytes: Data,
         maxBytes: Int,
@@ -421,7 +431,7 @@ struct CommandServerTests {
             close(sockets[0])
             close(sockets[1])
         }
-        try #require(CommandServer.writeAll(fd: sockets[1], data: bytes))
+        try #require(CommandServer.writeAll(fd: sockets[1], data: bytes) == 0)
         shutdown(sockets[1], SHUT_WR)
         return CommandServer.readMessage(fd: sockets[0], maxBytes: maxBytes, termination: termination)
     }
