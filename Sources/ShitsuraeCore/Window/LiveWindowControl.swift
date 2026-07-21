@@ -13,6 +13,8 @@ import Foundation
 ///   _SLPSSetFrontProcessWithOptions + synthesized key-window events; plain
 ///   AX focus cannot raise one window above its siblings
 public struct LiveWindowControl: WindowControl {
+    static let keyWindowEventRecordSize = 0xF8
+
     public init() {}
 
     public func listWindows() -> [WindowSnapshot] {
@@ -361,8 +363,9 @@ public struct LiveWindowControl: WindowControl {
             else {
                 return nil
             }
+            guard let element = checkedAXUIElement(ref) else { return nil }
             var resolved: CGWindowID = 0
-            guard AXUIElementGetWindowID(ref as! AXUIElement, &resolved) == .success else {
+            guard AXUIElementGetWindowID(element, &resolved) == .success else {
                 return nil
             }
             return UInt32(resolved)
@@ -399,9 +402,9 @@ public struct LiveWindowControl: WindowControl {
         for attribute in [kAXFocusedWindowAttribute, kAXMainWindowAttribute] {
             var ref: CFTypeRef?
             if AXUIElementCopyAttributeValue(appElement, attribute as CFString, &ref) == .success,
-               let ref
+               let ref,
+               let element = checkedAXUIElement(ref)
             {
-                let element = ref as! AXUIElement
                 guard !candidates.contains(where: { CFEqual($0, element) }) else {
                     continue
                 }
@@ -463,12 +466,18 @@ public struct LiveWindowControl: WindowControl {
             return nil
         }
 
-        let positionValue = positionRef as! AXValue
-        let sizeValue = sizeRef as! AXValue
+        guard let positionValue = checkedAXValue(positionRef, type: .cgPoint),
+              let sizeValue = checkedAXValue(sizeRef, type: .cgSize)
+        else {
+            return nil
+        }
         var position = CGPoint.zero
         var size = CGSize.zero
-        AXValueGetValue(positionValue, .cgPoint, &position)
-        AXValueGetValue(sizeValue, .cgSize, &size)
+        guard AXValueGetValue(positionValue, .cgPoint, &position),
+              AXValueGetValue(sizeValue, .cgSize, &size)
+        else {
+            return nil
+        }
         return CGRect(origin: position, size: size)
     }
 
@@ -524,8 +533,8 @@ public struct LiveWindowControl: WindowControl {
     }
 
     static func makeKeyWindowEventBytes(windowID: UInt32, eventType: UInt8) -> [UInt8] {
-        var bytes = [UInt8](repeating: 0, count: 0xF8)
-        bytes[0x04] = 0xF8
+        var bytes = [UInt8](repeating: 0, count: keyWindowEventRecordSize)
+        bytes[0x04] = UInt8(keyWindowEventRecordSize)
         bytes[0x08] = eventType
         bytes[0x3A] = 0x10
 

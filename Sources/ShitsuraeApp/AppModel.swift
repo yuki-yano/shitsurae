@@ -282,8 +282,21 @@ final class AppModel: ObservableObject {
                 restored = await engine.restoreAllForShutdown(config: config)
             }
             if restored {
-                await engine.clearRuntimeState()
-            } else {
+                do {
+                    try await engine.clearRuntimeState()
+                } catch {
+                    restored = false
+                    logger.log(
+                        level: "error",
+                        event: "app.shutdown.stateClearFailed",
+                        fields: [
+                            "error": String(describing: error),
+                            "keptState": true,
+                        ]
+                    )
+                }
+            }
+            if !restored {
                 logger.log(
                     level: "warn",
                     event: "app.shutdown.restoreIncomplete",
@@ -978,9 +991,37 @@ final class AppModel: ObservableObject {
     private func handleDisplayChange() {
         guard let config = configManager.configIfLoaded() else { return }
         let engine = engine
+        let logger = logger
         Task { [weak self] in
             if let activeSpaceID = await engine.activeSpaceID() {
-                _ = try? await engine.switchSpace(to: activeSpaceID, config: config, reconcile: true)
+                do {
+                    let outcome = try await engine.switchSpace(
+                        to: activeSpaceID,
+                        config: config,
+                        reconcile: true
+                    )
+                    if !outcome.converged {
+                        logger.log(
+                            level: "warn",
+                            event: "display.reconcileIncomplete",
+                            fields: [
+                                "activeSpace": activeSpaceID,
+                                "unresolvedSlots": outcome.unresolvedSlots.count,
+                            ]
+                        )
+                    }
+                } catch {
+                    let recoveryRequired = await engine.currentState.recoveryRequired
+                    logger.log(
+                        level: "error",
+                        event: "display.reconcileFailed",
+                        fields: [
+                            "activeSpace": activeSpaceID,
+                            "recoveryRequired": recoveryRequired,
+                            "error": String(describing: error),
+                        ]
+                    )
+                }
             }
             await MainActor.run { self?.refreshStatus() }
         }

@@ -1304,6 +1304,43 @@ struct VirtualSpaceEngineTests {
         #expect((await engine.currentState).primaryActiveSpaceID == 2)
     }
 
+    @Test func vanishedCompanionMainSuspensionIsPrunedOnNextSwitch() async throws {
+        let main = TestFixtures.window(
+            id: 9,
+            bundleID: "com.google.Chrome",
+            pid: 90,
+            processStartTime: 90_000_000,
+            title: "New Chrome window",
+            isAXBacked: true
+        )
+        let sheet = TestFixtures.window(
+            id: 10,
+            bundleID: "com.google.Chrome",
+            pid: 90,
+            processStartTime: 90_000_000,
+            title: "DevTools confirmation",
+            subrole: "AXSheet",
+            modal: true,
+            isAXBacked: true,
+            frontIndex: 0
+        )
+        let (engine, control, url) = makeEngine(windows: standardWindows() + [main, sheet])
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+
+        control.setFocusedWindowID(sheet.windowID)
+        control.setMainWindowID(main.windowID)
+        _ = try await engine.switchSpace(to: 2, config: config)
+        #expect(await engine.suspendedCompanionMainSpaces[main.identity] == 1)
+
+        control.removeWindow(main.windowID)
+        control.removeWindow(sheet.windowID)
+        control.setFocusedWindowID(nil)
+        _ = try await engine.switchSpace(to: 1, config: config)
+
+        #expect(await engine.suspendedCompanionMainSpaces.isEmpty)
+    }
+
     @Test func focusEventRejectsBackgroundOrStaleIdentityBeforeStateMutation() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -2171,6 +2208,20 @@ struct VirtualSpaceEngineTests {
         control.windowInventoryAvailable = false
         #expect(await engine.restoreAllForShutdown(config: config) == false)
         #expect(await engine.currentState == before)
+    }
+
+    @Test func shutdownRestoreReportsIncompleteWhenFinalStateCannotPersist() async throws {
+        let (engine, _, url) = makeEngine(windows: standardWindows())
+        let stateDirectory = url.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        _ = try await engine.switchSpace(to: 2, config: config)
+
+        try FileManager.default.removeItem(at: stateDirectory)
+        try Data("blocks state directory creation".utf8).write(to: stateDirectory)
+
+        #expect(await engine.restoreAllForShutdown(config: config) == false)
     }
 
     @Test func shutdownUnknownVerificationKeepsHiddenEntryRecoverable() async throws {

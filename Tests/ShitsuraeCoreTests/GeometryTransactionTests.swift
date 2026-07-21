@@ -1,9 +1,32 @@
+import ApplicationServices
 import CoreGraphics
 import Testing
 @testable import ShitsuraeCore
 
 @Suite("Geometry transaction")
 struct GeometryTransactionTests {
+    @Test func checkedAXTypesRejectUnexpectedAttributeValues() throws {
+        let unexpected = "not an accessibility value" as CFString
+        #expect(checkedAXUIElement(unexpected) == nil)
+        #expect(checkedAXValue(unexpected, type: .cgPoint) == nil)
+
+        var point = CGPoint(x: 10, y: 20)
+        let pointValue = try #require(AXValueCreate(.cgPoint, &point))
+        #expect(checkedAXValue(pointValue, type: .cgPoint) != nil)
+        #expect(checkedAXValue(pointValue, type: .cgSize) == nil)
+    }
+
+    @Test func privateKeyWindowEventRecordKeepsExpectedLayout() {
+        let windowID: UInt32 = 0x1234_ABCD
+        let bytes = LiveWindowControl.makeKeyWindowEventBytes(windowID: windowID, eventType: 0x02)
+
+        #expect(bytes.count == LiveWindowControl.keyWindowEventRecordSize)
+        #expect(bytes[0x04] == UInt8(LiveWindowControl.keyWindowEventRecordSize))
+        #expect(bytes[0x08] == 0x02)
+        #expect(bytes[0x3A] == 0x10)
+        #expect(Array(bytes[0x3C ..< 0x40]) == [0xCD, 0xAB, 0x34, 0x12])
+    }
+
     @Test func rollsBackSizeWhenPositionFailsAfterMutating() {
         let initial = CGRect(x: 100, y: 80, width: 1_200, height: 800)
         var actual = initial

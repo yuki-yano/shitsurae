@@ -347,7 +347,14 @@ public final class CommandRouter: Sendable {
                 configGeneration: state.configGeneration,
                 revision: state.revision
             ),
-            displays: SystemProbe.displays().map(DisplaySummaryJSON.init(display:))
+            displays: SystemProbe.displays().map(DisplaySummaryJSON.init(display:)),
+            privateAPIs: DiagnosticsJSON.PrivateAPIs(
+                operatingSystemVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+                targetedWindowFocusSymbolsAvailable: SkyLightSymbols.targetedWindowFocusAvailable,
+                symbolicHotKeySymbolAvailable: SymbolicHotKeyController.privateAPISymbolAvailable,
+                axWindowIDBridgeSymbolAvailable: axWindowIDBridgeAvailable(),
+                keyWindowEventRecordBytes: LiveWindowControl.keyWindowEventRecordSize
+            )
         )
     }
 

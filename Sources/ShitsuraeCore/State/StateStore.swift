@@ -149,13 +149,20 @@ public final class RuntimeStateStore: @unchecked Sendable {
         return normalized
     }
 
-    public func save(state: RuntimeState) {
-        _ = try? saveStrict(state: state, expecting: nil)
-    }
-
     /// Delete the runtime state file so the next load returns a fresh state.
-    public func clear() {
-        try? fileManager.removeItem(at: fileURL)
+    public func clear() throws {
+        do {
+            try fileManager.removeItem(at: fileURL)
+        } catch {
+            let nsError = error as NSError
+            if nsError.domain == NSCocoaErrorDomain, nsError.code == NSFileNoSuchFileError {
+                return
+            }
+            if Self.isPermissionDenied(error) {
+                throw RuntimeStateStoreError.writePermissionDenied(fileURL: fileURL)
+            }
+            throw RuntimeStateStoreError.writeFailed(fileURL: fileURL, reason: error.localizedDescription)
+        }
     }
 
     static func sortedSlots(_ slots: [SlotEntry]) -> [SlotEntry] {

@@ -10,6 +10,24 @@ func AXUIElementGetWindowID(_ element: AXUIElement, _ idOut: UnsafeMutablePointe
 @discardableResult
 func LegacyGetProcessForPID(_ pid: pid_t, _ psn: UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus
 
+func checkedAXUIElement(_ value: CFTypeRef) -> AXUIElement? {
+    guard CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+    return unsafeDowncast(value, to: AXUIElement.self)
+}
+
+func checkedAXValue(_ value: CFTypeRef, type: AXValueType) -> AXValue? {
+    guard CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+    let axValue = unsafeDowncast(value, to: AXValue.self)
+    guard AXValueGetType(axValue) == type else { return nil }
+    return axValue
+}
+
+func axWindowIDBridgeAvailable() -> Bool {
+    guard let handle = dlopen(nil, RTLD_LAZY) else { return false }
+    defer { dlclose(handle) }
+    return dlsym(handle, "_AXUIElementGetWindow") != nil
+}
+
 enum SLPSMode: UInt32 {
     case userGenerated = 0x200
 }
@@ -33,6 +51,11 @@ typealias PostEventRecordToCall = (UnsafeMutablePointer<ProcessSerialNumber>, Un
 /// raise one specific window without raising the app's other windows.
 enum SkyLightSymbols {
     private static let frameworkPath = "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight"
+    private nonisolated(unsafe) static let frameworkHandle = dlopen(frameworkPath, RTLD_LAZY)
+
+    static var targetedWindowFocusAvailable: Bool {
+        setFrontProcessWithOptions() != nil && postEventRecordTo() != nil
+    }
 
     static func setFrontProcessWithOptions() -> SetFrontProcessWithOptionsCall? {
         guard let function = resolve("_SLPSSetFrontProcessWithOptions", as: CSetFrontProcessWithOptionsFn.self) else {
@@ -55,8 +78,8 @@ enum SkyLightSymbols {
     }
 
     private static func resolve<T>(_ symbol: String, as _: T.Type) -> T? {
-        guard let handle = dlopen(frameworkPath, RTLD_LAZY),
-              let raw = dlsym(handle, symbol)
+        guard let frameworkHandle,
+              let raw = dlsym(frameworkHandle, symbol)
         else {
             return nil
         }
