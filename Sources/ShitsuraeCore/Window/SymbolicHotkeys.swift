@@ -19,6 +19,10 @@ public enum SymbolicHotKeyMutationResult: Equatable, Sendable {
 public enum SymbolicHotKeyController {
     public static let commandTabGroup: [NativeSymbolicHotKey] = [.commandTab, .commandShiftTab]
 
+    public static var privateAPISymbolAvailable: Bool {
+        setSymbolicHotKeyEnabled != nil
+    }
+
     private typealias CGSSetSymbolicHotKeyEnabledFn = @convention(c) (Int32, Bool) -> Int32
 
     private nonisolated(unsafe) static let skyLightHandle: UnsafeMutableRawPointer? = dlopen(

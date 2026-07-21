@@ -24,6 +24,7 @@ public final class CommandServer: @unchecked Sendable {
     private var listenFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
     private let queue = DispatchQueue(label: "shitsurae.command-server")
+    private let queueKey = DispatchSpecificKey<Void>()
     private var ownsSocket = false
 
     public init(
@@ -36,6 +37,7 @@ public final class CommandServer: @unchecked Sendable {
         self.logger = logger
         self.socketURL = socketURL
         self.auth = auth
+        queue.setSpecific(key: queueKey, value: ())
     }
 
     deinit {
@@ -44,7 +46,13 @@ public final class CommandServer: @unchecked Sendable {
 
     @discardableResult
     public func start() -> Bool {
-        stop()
+        performOnQueue {
+            startLocked()
+        }
+    }
+
+    private func startLocked() -> Bool {
+        stopLocked()
 
         try? FileManager.default.createDirectory(
             at: socketURL.deletingLastPathComponent(),
@@ -109,9 +117,6 @@ public final class CommandServer: @unchecked Sendable {
         source.setEventHandler { [weak self] in
             self?.acceptConnection()
         }
-        source.setCancelHandler { [listenFD = fd] in
-            close(listenFD)
-        }
         acceptSource = source
         source.resume()
 
@@ -120,9 +125,22 @@ public final class CommandServer: @unchecked Sendable {
     }
 
     public func stop() {
+        performOnQueue {
+            stopLocked()
+        }
+    }
+
+    private func stopLocked() {
         let shouldUnlink = ownsSocket
         acceptSource?.cancel()
         acceptSource = nil
+        if listenFD >= 0 {
+            // The event handler also runs on `queue`, so there can be no
+            // concurrent accept here. Close synchronously to prevent a
+            // delayed cancel handler from closing a reused descriptor after
+            // an immediate restart.
+            close(listenFD)
+        }
         listenFD = -1
         ownsSocket = false
         if shouldUnlink {
@@ -175,65 +193,133 @@ public final class CommandServer: @unchecked Sendable {
                 return
             }
 
-            guard let requestData = Self.readRequest(fd: clientFD) else {
+            guard case let .data(requestData) = Self.readMessage(fd: clientFD) else {
                 close(clientFD)
                 return
             }
 
             let response = await router.handle(requestData: requestData)
-            Self.writeAll(fd: clientFD, data: response + Data("\n".utf8))
+            _ = Self.writeAll(fd: clientFD, data: response + Data("\n".utf8))
             close(clientFD)
         }
     }
 
-    static func configureTimeouts(fd: Int32, seconds: Int = 5) {
-        var timeout = timeval(tv_sec: seconds, tv_usec: 0)
+    @discardableResult
+    static func configureTimeouts(fd: Int32, seconds: TimeInterval = 5) -> Bool {
+        let clamped = max(0.001, seconds)
+        let wholeSeconds = floor(clamped)
+        var timeout = timeval(
+            tv_sec: Int(wholeSeconds),
+            tv_usec: Int32((clamped - wholeSeconds) * 1_000_000)
+        )
         let size = socklen_t(MemoryLayout<timeval>.size)
-        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, size)
-        _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, size)
+        let receiveResult = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, size)
+        let sendResult = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, size)
+        var noSigPipe: Int32 = 1
+        let noSigPipeResult = setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_NOSIGPIPE,
+            &noSigPipe,
+            socklen_t(MemoryLayout<Int32>.size)
+        )
+        return receiveResult == 0 && sendResult == 0 && noSigPipeResult == 0
     }
 
-    static func readRequest(fd: Int32, maxBytes: Int = 1 << 20) -> Data? {
+    enum SocketReadResult: Equatable {
+        case data(Data)
+        case empty
+        case timedOut
+        case tooLarge
+        case failed(Int32)
+    }
+
+    enum SocketMessageTermination {
+        case newline
+        case endOfFile
+    }
+
+    static func readMessage(
+        fd: Int32,
+        maxBytes: Int = 1 << 20,
+        termination: SocketMessageTermination = .newline
+    ) -> SocketReadResult {
+        guard maxBytes >= 0 else { return .tooLarge }
         var data = Data()
         var buffer = [UInt8](repeating: 0, count: 4096)
 
-        while data.count < maxBytes {
-            let bytesRead = read(fd, &buffer, buffer.count)
-            if bytesRead <= 0 {
-                break
+        while true {
+            // Read one byte beyond the remaining payload capacity so an
+            // oversized message is rejected instead of truncated. EOF-framed
+            // responses may also carry one final framing newline.
+            let framingAllowance = termination == .endOfFile ? 1 : 0
+            let readLimit = min(
+                buffer.count,
+                max(1, maxBytes + framingAllowance - data.count + 1)
+            )
+            let bytesRead = read(fd, &buffer, readLimit)
+            if bytesRead == 0 {
+                if data.isEmpty { return .empty }
+                guard termination == .endOfFile else {
+                    return data.count == maxBytes ? .tooLarge : .failed(EPROTO)
+                }
+                if data.last == UInt8(ascii: "\n") {
+                    data.removeLast()
+                }
+                return data.count <= maxBytes ? .data(data) : .tooLarge
             }
-            data.append(contentsOf: buffer[0 ..< bytesRead])
-            if let last = data.last, last == UInt8(ascii: "\n") {
-                break
+            if bytesRead < 0 {
+                if errno == EINTR { continue }
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    return .timedOut
+                }
+                return .failed(errno)
             }
-        }
 
-        guard !data.isEmpty else {
-            return nil
+            let chunk = buffer[0 ..< bytesRead]
+            if termination == .newline,
+               let delimiter = chunk.firstIndex(of: UInt8(ascii: "\n"))
+            {
+                data.append(contentsOf: chunk[..<delimiter])
+                return data.count <= maxBytes ? .data(data) : .tooLarge
+            }
+            data.append(contentsOf: chunk)
+            guard data.count <= maxBytes + framingAllowance else {
+                return .tooLarge
+            }
         }
-        if let last = data.last, last == UInt8(ascii: "\n") {
-            data.removeLast()
-        }
-        return data
     }
 
-    static func writeAll(fd: Int32, data: Data) {
-        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+    @discardableResult
+    static func writeAll(fd: Int32, data: Data) -> Bool {
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
             var offset = 0
             while offset < raw.count {
                 let written = write(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                if written < 0, errno == EINTR {
+                    continue
+                }
                 if written <= 0 {
-                    break
+                    return false
                 }
                 offset += written
             }
+            return true
         }
+    }
+
+    private func performOnQueue<T>(_ body: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: queueKey) != nil {
+            return body()
+        }
+        return queue.sync(execute: body)
     }
 }
 
 public enum CommandClientError: Error, Equatable {
     case serverUnavailable
     case invalidResponse
+    case timedOut
 }
 
 /// CLI-side connector. When the app isn't running it launches it
@@ -248,9 +334,18 @@ public enum CommandClient {
         timeoutSeconds: TimeInterval = 8
     ) throws -> Data {
         let payload = try JSONEncoder().encode(request)
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
 
-        if let response = try? sendOnce(payload: payload, socketURL: socketURL) {
-            return response
+        do {
+            return try sendOnce(
+                payload: payload,
+                socketURL: socketURL,
+                timeoutSeconds: max(0.001, deadline.timeIntervalSinceNow)
+            )
+        } catch CommandClientError.timedOut {
+            throw CommandClientError.timedOut
+        } catch {
+            // A missing server is expected before auto-launch.
         }
 
         guard autoLaunch else {
@@ -259,23 +354,41 @@ public enum CommandClient {
 
         launchApp()
 
-        let deadline = Date().addingTimeInterval(timeoutSeconds)
         while Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.2)
-            if let response = try? sendOnce(payload: payload, socketURL: socketURL) {
+            Thread.sleep(forTimeInterval: min(0.2, max(0, deadline.timeIntervalSinceNow)))
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { break }
+            do {
+                let response = try sendOnce(
+                    payload: payload,
+                    socketURL: socketURL,
+                    timeoutSeconds: remaining
+                )
                 return response
+            } catch CommandClientError.timedOut {
+                throw CommandClientError.timedOut
+            } catch {
+                continue
             }
         }
 
         throw CommandClientError.serverUnavailable
     }
 
-    static func sendOnce(payload: Data, socketURL: URL) throws -> Data {
+    static func sendOnce(
+        payload: Data,
+        socketURL: URL,
+        timeoutSeconds: TimeInterval = 5
+    ) throws -> Data {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
             throw CommandClientError.serverUnavailable
         }
         defer { close(fd) }
+
+        guard CommandServer.configureTimeouts(fd: fd, seconds: timeoutSeconds) else {
+            throw CommandClientError.serverUnavailable
+        }
 
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
@@ -296,16 +409,32 @@ public enum CommandClient {
             }
         }
         guard connectResult == 0 else {
+            if errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT {
+                throw CommandClientError.timedOut
+            }
             throw CommandClientError.serverUnavailable
         }
 
-        CommandServer.writeAll(fd: fd, data: payload + Data("\n".utf8))
+        guard CommandServer.writeAll(fd: fd, data: payload + Data("\n".utf8)) else {
+            if errno == EAGAIN || errno == EWOULDBLOCK {
+                throw CommandClientError.timedOut
+            }
+            throw CommandClientError.serverUnavailable
+        }
         shutdown(fd, SHUT_WR)
 
-        guard let response = CommandServer.readRequest(fd: fd, maxBytes: 8 << 20) else {
+        switch CommandServer.readMessage(
+            fd: fd,
+            maxBytes: 8 << 20,
+            termination: .endOfFile
+        ) {
+        case let .data(response):
+            return response
+        case .timedOut:
+            throw CommandClientError.timedOut
+        case .tooLarge, .empty, .failed:
             throw CommandClientError.invalidResponse
         }
-        return response
     }
 
     static func launchApp() {

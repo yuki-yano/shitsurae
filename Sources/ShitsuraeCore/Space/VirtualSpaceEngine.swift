@@ -369,7 +369,8 @@ public actor VirtualSpaceEngine {
         // them on — adopt them into the *pre-switch* workspace so they hide
         // together with it instead of drifting to wherever the switcher is
         // first opened.
-        _ = try? adoptUntrackedWindows(
+        adoptUntrackedWindowsBestEffort(
+            context: "spaceSwitch",
             config: config,
             persistChanges: false,
             inventory: inventory,
@@ -382,6 +383,7 @@ public actor VirtualSpaceEngine {
         // freshly opened window (new windowID) always gets a clean slate.
         convergenceFailureCounts = convergenceFailureCounts.filter { inventory.mayContain($0.key) }
         quarantinedWindowIdentities = Set(quarantinedWindowIdentities.filter { inventory.mayContain($0) })
+        suspendedCompanionMainSpaces = suspendedCompanionMainSpaces.filter { inventory.mayContain($0.key) }
         let plan = SpaceSwitchPlanner.plan(
             slots: state.slots.filter { !protectedEntryIDs.contains($0.id) },
             layoutName: layoutName,
@@ -952,7 +954,19 @@ public actor VirtualSpaceEngine {
             return updated
         }
 
-        try? persist(newState)
+        do {
+            try persist(newState)
+        } catch {
+            logger.log(
+                level: "warn",
+                event: "state.markActivatedPersistFailed",
+                fields: [
+                    "windowID": Int(window.windowID),
+                    "bundleID": window.bundleID,
+                    "error": String(describing: error),
+                ]
+            )
+        }
     }
 
     // MARK: - State bootstrap / management
@@ -1079,9 +1093,13 @@ public actor VirtualSpaceEngine {
         try persist(newState)
     }
 
-    public func clearRuntimeState() {
-        store.clear()
-        state = RuntimeState()
+    public func clearRuntimeState() throws {
+        do {
+            try store.clear()
+            state = RuntimeState()
+        } catch {
+            throw VirtualSpaceEngineError.stateError(String(describing: error))
+        }
     }
 
     /// Shutdown path: restore every offscreen-hidden window of the active
@@ -1173,7 +1191,20 @@ public actor VirtualSpaceEngine {
         }
         // Keep the original slot order (dictionary value order is unspecified).
         newState.slots = newState.slots.compactMap { slotsByID[$0.id] }
-        try? persist(newState)
+        do {
+            try persist(newState)
+        } catch {
+            logger.log(
+                level: "error",
+                event: "app.shutdown.restorePersistFailed",
+                fields: [
+                    "layout": layoutName,
+                    "error": String(describing: error),
+                    "keptState": true,
+                ]
+            )
+            return false
+        }
 
         return !convergence.hasPending && unresolvedCount == 0
     }

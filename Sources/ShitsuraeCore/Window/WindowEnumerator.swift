@@ -177,7 +177,7 @@ public enum WindowEnumerator {
         let applications = pids.map {
             $0.compactMap { NSRunningApplication(processIdentifier: pid_t($0)) }
         } ?? NSWorkspace.shared.runningApplications
-        return Dictionary(uniqueKeysWithValues: applications.compactMap { app in
+        return Dictionary(applications.compactMap { app in
             let pid = Int(app.processIdentifier)
             guard !app.isTerminated,
                   let bundleID = app.bundleIdentifier,
@@ -192,7 +192,7 @@ public enum WindowEnumerator {
                 ),
                 isHidden: app.isHidden
             ))
-        })
+        }, uniquingKeysWith: { current, _ in current })
     }
 
     static func rawWindowHandles(
@@ -489,12 +489,13 @@ public enum WindowEnumerator {
             func processWindowIdentity(attribute: CFString) -> WindowIdentity? {
                 var ref: CFTypeRef?
                 guard AXUIElementCopyAttributeValue(appElement, attribute, &ref) == .success,
-                      let resolved = ref
+                      let resolved = ref,
+                      let element = checkedAXUIElement(resolved)
                 else {
                     return nil
                 }
                 var resolvedWindowID: CGWindowID = 0
-                guard AXUIElementGetWindowID((resolved as! AXUIElement), &resolvedWindowID) == .success else {
+                guard AXUIElementGetWindowID(element, &resolvedWindowID) == .success else {
                     return nil
                 }
                 return WindowIdentity(
@@ -582,13 +583,14 @@ public enum WindowEnumerator {
         let appElement = AXUIElementCreateApplication(pid)
         var ref: CFTypeRef?
         guard AXUIElementCopyAttributeValue(appElement, attribute, &ref) == .success,
-              let resolved = ref
+              let resolved = ref,
+              let element = checkedAXUIElement(resolved)
         else {
             return nil
         }
 
         var resolvedWindowID: CGWindowID = 0
-        guard AXUIElementGetWindowID((resolved as! AXUIElement), &resolvedWindowID) == .success else {
+        guard AXUIElementGetWindowID(element, &resolvedWindowID) == .success else {
             return nil
         }
         return UInt32(resolvedWindowID)

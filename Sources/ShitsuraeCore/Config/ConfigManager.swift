@@ -83,9 +83,14 @@ public final class ConfigManager: @unchecked Sendable {
 
     public func stop() {
         lock.lock()
-        watcher?.stop()
-        watcher = nil
+        let watcher = watcher
+        self.watcher = nil
         lock.unlock()
+
+        // ConfigWatcher invokes its reload callback on its private queue. Do
+        // not wait for that queue while holding ConfigManager's lock: a reload
+        // already in flight may be waiting to enter handleReload().
+        watcher?.stop()
     }
 
     @discardableResult

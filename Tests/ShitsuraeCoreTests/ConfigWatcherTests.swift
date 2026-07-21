@@ -71,4 +71,36 @@ struct ConfigWatcherTests {
         #expect(generations.count >= 2)
         #expect(generations[0] != generations[1])
     }
+
+    @Test func concurrentReloadAndStopNeverDeadlocks() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("shitsurae-manager-stop-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try config.write(
+            to: directory.appendingPathComponent("config.yaml"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        for _ in 0 ..< 100 {
+            let manager = ConfigManager(directoryURL: directory, logger: TestFixtures.nullLogger())
+            manager.start()
+
+            let group = DispatchGroup()
+            group.enter()
+            DispatchQueue.global().async {
+                _ = manager.reload(trigger: "concurrent-stop-test")
+                group.leave()
+            }
+            group.enter()
+            DispatchQueue.global().async {
+                manager.stop()
+                group.leave()
+            }
+
+            #expect(group.wait(timeout: .now() + 1) == .success)
+            manager.stop()
+        }
+    }
 }
