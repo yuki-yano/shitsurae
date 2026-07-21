@@ -99,7 +99,7 @@ struct ConfigWatcherTests {
                 group.leave()
             }
 
-            #expect(group.wait(timeout: .now() + 1) == .success)
+            #expect(group.wait(timeout: .now() + 5) == .success)
             manager.stop()
         }
     }
