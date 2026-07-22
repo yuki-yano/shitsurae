@@ -6,9 +6,10 @@ import Testing
 struct VirtualSpaceEngineTests {
     private func makeEngine(
         windows: [WindowSnapshot],
-        focusEventGate: FocusEventGate = FocusEventGate()
+        focusEventGate: FocusEventGate = FocusEventGate(),
+        displays: [DisplayInfo] = [TestFixtures.display]
     ) -> (engine: VirtualSpaceEngine, control: MockWindowControl, stateURL: URL) {
-        let control = MockWindowControl(windows: windows, displays: [TestFixtures.display])
+        let control = MockWindowControl(windows: windows, displays: displays)
         let (store, url) = TestFixtures.tempStateStore()
         let engine = try! VirtualSpaceEngine(
             store: store,
@@ -930,6 +931,116 @@ struct VirtualSpaceEngineTests {
         let entry = state.slots.first { $0.bundleID == "com.apple.TextEdit" }
         #expect(entry?.spaceID == 2)
         #expect(entry?.visibilityState == .hiddenOffscreen)
+    }
+
+    @Test func portraitWindowMoveAndRoundTripAvoidsVerticalAppKitClamp() async throws {
+        let display = DisplayInfo(
+            id: "large-main",
+            width: 5120,
+            height: 1968,
+            scale: 1,
+            isPrimary: true,
+            frame: CGRect(x: 0, y: 0, width: 5120, height: 1968),
+            visibleFrame: CGRect(x: 0, y: 0, width: 5120, height: 1966)
+        )
+        let chatGPTFrame = ResolvedFrame(x: 1794, y: 153, width: 1660, height: 1791)
+        let chatGPT = TestFixtures.window(
+            id: 9,
+            bundleID: "com.openai.codex",
+            pid: 90,
+            frame: chatGPTFrame,
+            displayID: display.id,
+            isAXBacked: true,
+            frontIndex: 0
+        )
+        let textEdit = TestFixtures.window(
+            id: 1,
+            bundleID: "com.apple.TextEdit",
+            frame: ResolvedFrame(x: 0, y: 0, width: 2560, height: 1966),
+            displayID: display.id,
+            isAXBacked: true,
+            frontIndex: 1
+        )
+        let terminal = TestFixtures.window(
+            id: 2,
+            bundleID: "com.apple.Terminal",
+            frame: ResolvedFrame(x: 2560, y: 0, width: 2560, height: 1966),
+            displayID: display.id,
+            isAXBacked: true,
+            frontIndex: 2
+        )
+        let notes = TestFixtures.window(
+            id: 3,
+            bundleID: "com.apple.Notes",
+            frame: ResolvedFrame(x: 0, y: 0, width: 5120, height: 1966),
+            displayID: display.id,
+            isAXBacked: true,
+            frontIndex: 3
+        )
+        let (engine, control, url) = makeEngine(
+            windows: [chatGPT, textEdit, terminal, notes],
+            displays: [display]
+        )
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        control.rejectVerticalOffscreenPositionWindowIDs = [chatGPT.windowID]
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: threeSpaceConfig)
+        control.setFocusedWindowID(chatGPT.windowID)
+        let moved = try await engine.windowWorkspace(
+            selector: WindowTargetSelector(
+                windowID: chatGPT.windowID,
+                pid: chatGPT.pid,
+                processStartTime: chatGPT.processStartTime,
+                bundleID: chatGPT.bundleID
+            ),
+            toSpaceID: 3,
+            config: threeSpaceConfig
+        )
+
+        #expect(moved.previousSpaceID == 1)
+        #expect(moved.spaceID == 3)
+        #expect(moved.didCreateTrackingEntry)
+        let parkedAfterMove = try #require(control.window(chatGPT.windowID))
+        #expect(parkedAfterMove.frame.x == display.frame.minX - chatGPTFrame.width + 1
+            || parkedAfterMove.frame.x == display.frame.maxX - 1)
+        let stateAfterMove = await engine.currentState
+        let entryAfterMove = try #require(stateAfterMove.slots.first { $0.windowID == chatGPT.windowID })
+        #expect(entryAfterMove.boundIdentity == chatGPT.identity)
+        #expect(entryAfterMove.spaceID == 3)
+        #expect(entryAfterMove.visibilityState == .hiddenOffscreen)
+        #expect(stateAfterMove.pendingVisibilityConvergence == nil)
+
+        let arrived = try await engine.switchSpace(to: 3, config: threeSpaceConfig)
+        #expect(arrived.converged)
+        #expect(control.window(chatGPT.windowID)?.frame == chatGPTFrame)
+        let stateOnThree = await engine.currentState
+        #expect(stateOnThree.pendingVisibilityConvergence == nil)
+        #expect(stateOnThree.slots.first { $0.windowID == chatGPT.windowID }?.boundIdentity == chatGPT.identity)
+        await engine.markActivated(window: try #require(control.window(chatGPT.windowID)))
+        control.setFocusedWindowID(chatGPT.windowID)
+
+        let left = try await engine.switchSpace(to: 1, config: threeSpaceConfig)
+        #expect(left.converged)
+        let parkedAfterLeaving = try #require(control.window(chatGPT.windowID))
+        #expect(parkedAfterLeaving.frame.x == display.frame.minX - chatGPTFrame.width + 1
+            || parkedAfterLeaving.frame.x == display.frame.maxX - 1)
+        let stateOnOne = await engine.currentState
+        #expect(stateOnOne.primaryActiveSpaceID == 1)
+        #expect(stateOnOne.pendingVisibilityConvergence == nil)
+        #expect(stateOnOne.slots.first { $0.windowID == chatGPT.windowID }?.boundIdentity == chatGPT.identity)
+        #expect(stateOnOne.slots.first { $0.windowID == chatGPT.windowID }?.spaceID == 3)
+        #expect(stateOnOne.slots.first { $0.windowID == chatGPT.windowID }?.visibilityState == .hiddenOffscreen)
+
+        let returned = try await engine.switchSpace(to: 3, config: threeSpaceConfig)
+        #expect(returned.converged)
+        #expect(returned.focusedWindowID == chatGPT.windowID)
+        #expect(control.window(chatGPT.windowID)?.frame == chatGPTFrame)
+        let chatGPTPositionAttempts = control.setPositionAttempts.filter { $0.windowID == chatGPT.windowID }
+        #expect(!chatGPTPositionAttempts.isEmpty)
+        #expect(chatGPTPositionAttempts.allSatisfy { attempt in
+            attempt.position.x == display.frame.minX - chatGPTFrame.width + 1
+                || attempt.position.x == display.frame.maxX - 1
+        })
     }
 
     @Test func visibilityPendingDoesNotBlockExplicitWorkspaceMove() async throws {

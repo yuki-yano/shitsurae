@@ -327,39 +327,36 @@ struct VisibilityPlannerTests {
         #expect(plan.desiredEntry.lastActivatedAt == nil)
     }
 
-    @Test func hideCornerAvoidsAdjacentDisplay() {
-        // Secondary display to the LEFT of main: hiding bottom-left would
-        // bleed into it, so the corner must be bottom-right.
-        let leftDisplay = DisplayInfo(
-            id: "uuid-left",
-            width: 1920,
-            height: 1080,
+    @Test func portraitWindowUsesHorizontalParkingOutsideDisplayArrangement() {
+        let display = DisplayInfo(
+            id: "large-main",
+            width: 5120,
+            height: 1968,
             scale: 1,
-            isPrimary: false,
-            frame: CGRect(x: -1920, y: 0, width: 1920, height: 1080),
-            visibleFrame: CGRect(x: -1920, y: 0, width: 1920, height: 1080)
+            isPrimary: true,
+            frame: CGRect(x: 0, y: 0, width: 5120, height: 1968),
+            visibleFrame: CGRect(x: 0, y: 0, width: 5120, height: 1966)
         )
-        let corner = VisibilityPlanner.optimalHideCorner(
-            for: TestFixtures.display,
-            displays: [TestFixtures.display, leftDisplay]
+        let frame = ResolvedFrame(x: 1794, y: 153, width: 1660, height: 1791)
+        let entry = makeEntry(spaceID: 1, lastVisibleFrame: frame)
+        let window = TestFixtures.window(
+            id: 1,
+            bundleID: "com.openai.codex",
+            frame: frame,
+            isAXBacked: true
         )
-        #expect(corner == .bottomRight)
 
-        // Mirror case: display to the right → hide bottom-left.
-        let rightDisplay = DisplayInfo(
-            id: "uuid-right",
-            width: 1920,
-            height: 1080,
-            scale: 1,
-            isPrimary: false,
-            frame: CGRect(x: 1440, y: 0, width: 1920, height: 1080),
-            visibleFrame: CGRect(x: 1440, y: 0, width: 1920, height: 1080)
+        let hidden = VisibilityPlanner.resolveHiddenFrame(
+            entry: entry,
+            window: window,
+            hostDisplay: display,
+            displays: [display]
         )
-        let mirrored = VisibilityPlanner.optimalHideCorner(
-            for: TestFixtures.display,
-            displays: [TestFixtures.display, rightDisplay]
-        )
-        #expect(mirrored == .bottomLeft)
+
+        #expect(hidden.x == display.frame.minX - frame.width + 1
+            || hidden.x == display.frame.maxX - 1)
+        #expect(hidden.y >= display.visibleFrame.minY)
+        #expect(hidden.y <= display.visibleFrame.maxY - frame.height)
     }
 
     @Test func hiddenFrameAvoidsBothNeighborsForMiddleDisplay() {
@@ -369,8 +366,8 @@ struct VisibilityPlannerTests {
             height: 900,
             scale: 1,
             isPrimary: true,
-            frame: CGRect(x: 0, y: 0, width: 1440, height: 900),
-            visibleFrame: CGRect(x: 0, y: 0, width: 1440, height: 900)
+            frame: CGRect(x: -1440, y: 120, width: 1440, height: 900),
+            visibleFrame: CGRect(x: -1390, y: 120, width: 1390, height: 875)
         )
         let middle = DisplayInfo(
             id: "middle",
@@ -378,8 +375,8 @@ struct VisibilityPlannerTests {
             height: 900,
             scale: 1,
             isPrimary: false,
-            frame: CGRect(x: 1440, y: 0, width: 1440, height: 900),
-            visibleFrame: CGRect(x: 1440, y: 0, width: 1440, height: 900)
+            frame: CGRect(x: 0, y: 0, width: 1440, height: 900),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1440, height: 875)
         )
         let right = DisplayInfo(
             id: "right",
@@ -387,19 +384,19 @@ struct VisibilityPlannerTests {
             height: 900,
             scale: 1,
             isPrimary: false,
-            frame: CGRect(x: 2880, y: 0, width: 1440, height: 900),
-            visibleFrame: CGRect(x: 2880, y: 0, width: 1440, height: 900)
+            frame: CGRect(x: 1440, y: -80, width: 1440, height: 900),
+            visibleFrame: CGRect(x: 1440, y: -80, width: 1390, height: 875)
         )
         let displays = [left, middle, right]
         var entry = makeEntry(
             spaceID: 1,
-            lastVisibleFrame: ResolvedFrame(x: 1600, y: 100, width: 700, height: 400)
+            lastVisibleFrame: ResolvedFrame(x: 160, y: 100, width: 700, height: 400)
         )
         entry.displayID = middle.id
         let window = TestFixtures.window(
             id: 1,
             bundleID: "com.apple.TextEdit",
-            frame: ResolvedFrame(x: 1600, y: 100, width: 700, height: 400),
+            frame: ResolvedFrame(x: 160, y: 100, width: 700, height: 400),
             isAXBacked: true
         )
 
@@ -409,7 +406,14 @@ struct VisibilityPlannerTests {
             hostDisplay: middle,
             displays: displays
         )
+        let reversed = VisibilityPlanner.resolveHiddenFrame(
+            entry: entry,
+            window: window,
+            hostDisplay: middle,
+            displays: Array(displays.reversed())
+        )
 
+        #expect(reversed == hidden)
         #expect(VisibilityPlanner.isHiddenWindowFrame(frame: hidden, displays: displays))
         let hiddenRect = CGRect(
             x: hidden.x,
@@ -422,9 +426,12 @@ struct VisibilityPlannerTests {
             return overlap.isNull || overlap.isEmpty ? nil : overlap
         }
         #expect(overlaps.allSatisfy { $0.width <= 1 || $0.height <= 1 })
+        #expect(overlaps.allSatisfy { $0.width <= 1 })
+        #expect(hidden.x == left.frame.minX - window.frame.width + 1
+            || hidden.x == right.frame.maxX - 1)
 
         let leakedIntoLeftNeighbor = ResolvedFrame(
-            x: 741,
+            x: -699,
             y: 100,
             width: 700,
             height: 400
@@ -433,6 +440,135 @@ struct VisibilityPlannerTests {
             frame: leakedIntoLeftNeighbor,
             displays: displays
         ))
+    }
+
+    @Test func horizontalParkingRanksAreaThenTravelThenLeftSide() {
+        let left = DisplayInfo(
+            id: "left",
+            width: 1000,
+            height: 1000,
+            scale: 1,
+            isPrimary: true,
+            frame: CGRect(x: -1000, y: 0, width: 1000, height: 1000),
+            visibleFrame: CGRect(x: -1000, y: 0, width: 1000, height: 1000)
+        )
+        let shortRight = DisplayInfo(
+            id: "right",
+            width: 1000,
+            height: 200,
+            scale: 1,
+            isPrimary: false,
+            frame: CGRect(x: 0, y: 0, width: 1000, height: 200),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1000, height: 200)
+        )
+        let frameNearLeft = ResolvedFrame(x: -900, y: 400, width: 400, height: 400)
+        let entryNearLeft = makeEntry(spaceID: 1, lastVisibleFrame: frameNearLeft)
+        let windowNearLeft = TestFixtures.window(
+            id: 1,
+            bundleID: "app",
+            frame: frameNearLeft,
+            displayID: left.id,
+            isAXBacked: true
+        )
+
+        let lowerArea = VisibilityPlanner.resolveHiddenFrame(
+            entry: entryNearLeft,
+            window: windowNearLeft,
+            hostDisplay: left,
+            displays: [left, shortRight]
+        )
+        #expect(abs(lowerArea.x - (shortRight.frame.maxX - 1)) <= 0.001)
+
+        let fullRight = DisplayInfo(
+            id: "right",
+            width: 1000,
+            height: 1000,
+            scale: 1,
+            isPrimary: false,
+            frame: CGRect(x: 0, y: 0, width: 1000, height: 1000),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1000, height: 1000)
+        )
+        let frameNearRight = ResolvedFrame(x: 500, y: 400, width: 400, height: 400)
+        let nearerRight = VisibilityPlanner.resolveHiddenFrame(
+            entry: makeEntry(spaceID: 1, lastVisibleFrame: frameNearRight),
+            window: TestFixtures.window(
+                id: 2,
+                bundleID: "app",
+                frame: frameNearRight,
+                displayID: fullRight.id,
+                isAXBacked: true
+            ),
+            hostDisplay: fullRight,
+            displays: [fullRight, left]
+        )
+        #expect(abs(nearerRight.x - (fullRight.frame.maxX - 1)) <= 0.001)
+
+        let centeredFrame = ResolvedFrame(x: -200, y: 400, width: 400, height: 400)
+        let tied = VisibilityPlanner.resolveHiddenFrame(
+            entry: makeEntry(spaceID: 1, lastVisibleFrame: centeredFrame),
+            window: TestFixtures.window(
+                id: 3,
+                bundleID: "app",
+                frame: centeredFrame,
+                displayID: left.id,
+                isAXBacked: true
+            ),
+            hostDisplay: left,
+            displays: [fullRight, left]
+        )
+        #expect(tied.x == left.frame.minX - centeredFrame.width + 1)
+    }
+
+    @Test func horizontalParkingKeepsAnchorInLShapedArrangement() {
+        let upper = DisplayInfo(
+            id: "upper",
+            width: 1000,
+            height: 1000,
+            scale: 1,
+            isPrimary: true,
+            frame: CGRect(x: 0, y: 0, width: 1000, height: 1000),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1000, height: 975)
+        )
+        let lowerLeft = DisplayInfo(
+            id: "lower-left",
+            width: 1000,
+            height: 1000,
+            scale: 1,
+            isPrimary: false,
+            frame: CGRect(x: -1000, y: 1000, width: 1000, height: 1000),
+            visibleFrame: CGRect(x: -1000, y: 1000, width: 1000, height: 975)
+        )
+        let lowestRight = DisplayInfo(
+            id: "lowest-right",
+            width: 1000,
+            height: 1000,
+            scale: 1,
+            isPrimary: false,
+            frame: CGRect(x: 1000, y: 2000, width: 1000, height: 1000),
+            visibleFrame: CGRect(x: 1000, y: 2000, width: 1000, height: 975)
+        )
+        let displays = [upper, lowerLeft, lowestRight]
+        let frame = ResolvedFrame(x: 100, y: 100, width: 600, height: 400)
+        let hidden = VisibilityPlanner.resolveHiddenFrame(
+            entry: makeEntry(spaceID: 1, lastVisibleFrame: frame),
+            window: TestFixtures.window(
+                id: 1,
+                bundleID: "app",
+                frame: frame,
+                displayID: upper.id,
+                isAXBacked: true
+            ),
+            hostDisplay: upper,
+            displays: displays
+        )
+        let hiddenRect = CGRect(x: hidden.x, y: hidden.y, width: hidden.width, height: hidden.height)
+        let overlaps = displays.compactMap { display -> CGRect? in
+            let overlap = hiddenRect.intersection(display.frame)
+            return overlap.isNull || overlap.isEmpty ? nil : overlap
+        }
+
+        #expect(!overlaps.isEmpty)
+        #expect(overlaps.allSatisfy { $0.width <= 1 })
     }
 }
 

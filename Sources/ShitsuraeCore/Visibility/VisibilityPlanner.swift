@@ -12,11 +12,6 @@ public enum VisibilityMutation: Equatable, Sendable {
     case position(CGPoint)
 }
 
-public enum HideCorner: Sendable {
-    case bottomLeft
-    case bottomRight
-}
-
 /// A planned show/hide for one bound window.
 public struct VisibilityPlan: Equatable, Sendable {
     public let entryID: String
@@ -35,7 +30,7 @@ public struct VisibilityPlan: Equatable, Sendable {
 /// Pure visibility planning: which frame to show at, where to park hidden
 /// windows. All geometry knowledge ported from v1 (proven in production):
 /// - hide = move 1px outside the display edge (never minimize / NSApp.hide)
-/// - hide corner auto-selected from the multi-display arrangement
+/// - hide horizontally beyond the complete multi-display arrangement
 /// - coordinates normalized into the CG (top-left origin) space
 public enum VisibilityPlanner {
     public static func plan(
@@ -215,54 +210,107 @@ public enum VisibilityPlanner {
 
     // MARK: - Hidden frame
 
+    /// - Precondition: `displays` is non-empty and contains `hostDisplay`.
     public static func resolveHiddenFrame(
         entry: SlotEntry,
         window: WindowSnapshot,
         hostDisplay: DisplayInfo,
         displays: [DisplayInfo]
     ) -> ResolvedFrame {
+        precondition(
+            displays.contains(where: { $0.id == hostDisplay.id }),
+            "hidden-window planning requires a display list containing the host display"
+        )
         let width = max(1, window.frame.width)
         let height = max(1, window.frame.height)
         let targetDisplay = resolveTargetDisplay(entry: entry, window: window, displays: displays) ?? hostDisplay
-        let targetVisibleFrame = targetDisplay.visibleFrame
         let referenceFrame = entry.lastVisibleFrame ?? window.frame
-        let minY = targetVisibleFrame.minY
-        let maxY = max(minY, targetVisibleFrame.maxY - height)
-        let y = min(max(referenceFrame.y, minY), maxY)
-        let minX = targetVisibleFrame.minX
-        let maxX = max(minX, targetVisibleFrame.maxX - width)
-        let x = min(max(referenceFrame.x, minX), maxX)
+        // AppKit keeps a titled window reachable when it is parked beyond a
+        // vertical edge, so top/bottom requests can be clamped by roughly one
+        // title-bar height. Horizontal parking is accepted, but it must use
+        // the outer edge of the complete arrangement to avoid another display.
+        let arrangementFrames = displays.map(\.frame)
+        let arrangementMinX = arrangementFrames.map(\.minX).min()!
+        let arrangementMaxX = arrangementFrames.map(\.maxX).max()!
+        let leftEdgeDisplays = displays.filter { $0.frame.minX == arrangementMinX }
+        let rightEdgeDisplays = displays.filter { $0.frame.maxX == arrangementMaxX }
         let candidates = [
             ResolvedFrame(
-                x: targetVisibleFrame.minX - width + 1,
-                y: y,
+                x: arrangementMinX - width + 1,
+                y: horizontalParkingY(
+                    edgeDisplays: leftEdgeDisplays,
+                    preferredDisplayID: targetDisplay.id,
+                    referenceY: referenceFrame.y,
+                    windowHeight: height
+                ),
                 width: width,
                 height: height
             ),
             ResolvedFrame(
-                x: targetVisibleFrame.maxX - 1,
-                y: y,
-                width: width,
-                height: height
-            ),
-            ResolvedFrame(
-                x: x,
-                y: targetVisibleFrame.minY - height + 1,
-                width: width,
-                height: height
-            ),
-            ResolvedFrame(
-                x: x,
-                y: targetVisibleFrame.maxY - 1,
+                x: arrangementMaxX - 1,
+                y: horizontalParkingY(
+                    edgeDisplays: rightEdgeDisplays,
+                    preferredDisplayID: targetDisplay.id,
+                    referenceY: referenceFrame.y,
+                    windowHeight: height
+                ),
                 width: width,
                 height: height
             ),
         ]
 
-        return candidates.min { lhs, rhs in
-            displayIntersectionArea(frame: lhs, displays: displays)
-                < displayIntersectionArea(frame: rhs, displays: displays)
-        } ?? candidates[0]
+        // Prefer the side with the least display overlap, then the shorter
+        // move from the current physical frame, which keeps repeated hides on
+        // the already-parked side. The reference frame above only chooses an
+        // anchor Y near the eventual restore location. Fixed array order makes
+        // a complete tie stable.
+        return candidates.enumerated().min { lhs, rhs in
+            let lhsArea = displayIntersectionArea(frame: lhs.element, displays: displays)
+            let rhsArea = displayIntersectionArea(frame: rhs.element, displays: displays)
+            if lhsArea != rhsArea {
+                return lhsArea < rhsArea
+            }
+            let lhsTravel = squaredDistance(from: window.frame, to: lhs.element)
+            let rhsTravel = squaredDistance(from: window.frame, to: rhs.element)
+            if lhsTravel != rhsTravel {
+                return lhsTravel < rhsTravel
+            }
+            return lhs.offset < rhs.offset
+        }!.element
+    }
+
+    private static func horizontalParkingY(
+        edgeDisplays: [DisplayInfo],
+        preferredDisplayID: String,
+        referenceY: CGFloat,
+        windowHeight: CGFloat
+    ) -> CGFloat {
+        precondition(!edgeDisplays.isEmpty)
+        return edgeDisplays.map { display in
+            let minY = display.visibleFrame.minY
+            let maxY = max(minY, display.visibleFrame.maxY - windowHeight)
+            let y = min(max(referenceY, minY), maxY)
+            return (
+                y: y,
+                travel: abs(y - referenceY),
+                preferredRank: display.id == preferredDisplayID ? 0 : 1,
+                displayID: display.id
+            )
+        }.min { lhs, rhs in
+            if lhs.travel != rhs.travel {
+                return lhs.travel < rhs.travel
+            }
+            if lhs.preferredRank != rhs.preferredRank {
+                return lhs.preferredRank < rhs.preferredRank
+            }
+            return lhs.displayID < rhs.displayID
+        }!.y
+    }
+
+    private static func squaredDistance(from source: ResolvedFrame, to destination: ResolvedFrame) -> CGFloat {
+        let deltaX = destination.x - source.x
+        let deltaY = destination.y - source.y
+        return deltaX * deltaX + deltaY * deltaY
     }
 
     static func resolveTargetDisplay(
@@ -284,36 +332,6 @@ public enum VisibilityPlanner {
             ),
             displays: displays
         )
-    }
-
-    /// Chooses the hide corner whose probe points overlap other displays the
-    /// least, so the parked window can't bleed into a neighboring screen.
-    /// The 1px outside margin is intentional — do not change.
-    public static func optimalHideCorner(for display: DisplayInfo, displays: [DisplayInfo]) -> HideCorner {
-        let normalizedDisplayFrame = display.frame
-        let normalizedDisplayFrames = displays.map(\.frame)
-        let xOffset = normalizedDisplayFrame.width * 0.1
-        let yOffset = normalizedDisplayFrame.height * 0.1
-
-        let bottomRightPrimary = CGPoint(x: normalizedDisplayFrame.maxX + 2, y: normalizedDisplayFrame.maxY - yOffset)
-        let bottomRightSecondary = CGPoint(x: normalizedDisplayFrame.maxX - xOffset, y: normalizedDisplayFrame.maxY + 2)
-        let bottomRightCritical = CGPoint(x: normalizedDisplayFrame.maxX + 2, y: normalizedDisplayFrame.maxY + 2)
-
-        let bottomLeftPrimary = CGPoint(x: normalizedDisplayFrame.minX - 2, y: normalizedDisplayFrame.maxY - yOffset)
-        let bottomLeftSecondary = CGPoint(x: normalizedDisplayFrame.minX + xOffset, y: normalizedDisplayFrame.maxY + 2)
-        let bottomLeftCritical = CGPoint(x: normalizedDisplayFrame.minX - 2, y: normalizedDisplayFrame.maxY + 2)
-
-        func containmentScore(for points: [CGPoint]) -> Int {
-            normalizedDisplayFrames.reduce(into: 0) { total, candidate in
-                total += candidate.contains(points[0]) ? 1 : 0
-                total += candidate.contains(points[1]) ? 1 : 0
-                total += candidate.contains(points[2]) ? 10 : 0
-            }
-        }
-
-        let leftScore = containmentScore(for: [bottomLeftPrimary, bottomLeftSecondary, bottomLeftCritical])
-        let rightScore = containmentScore(for: [bottomRightPrimary, bottomRightSecondary, bottomRightCritical])
-        return leftScore < rightScore ? .bottomLeft : .bottomRight
     }
 
     // MARK: - Geometry helpers
