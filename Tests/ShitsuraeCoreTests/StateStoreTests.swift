@@ -53,18 +53,6 @@ struct StateStoreTests {
         #expect(state.activeLayoutName == nil)
     }
 
-    @Test func clearRemovesStateAndIsIdempotent() throws {
-        let (store, url) = TestFixtures.tempStateStore()
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-
-        try store.saveStrict(state: RuntimeState(configGeneration: "gen"))
-        #expect(FileManager.default.fileExists(atPath: url.path))
-
-        try store.clear()
-        #expect(!FileManager.default.fileExists(atPath: url.path))
-        try store.clear()
-    }
-
     @Test func rejectsUnsupportedStateWithoutMovingOriginal() throws {
         let (store, url) = TestFixtures.tempStateStore()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

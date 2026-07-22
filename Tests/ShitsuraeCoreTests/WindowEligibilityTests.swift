@@ -135,14 +135,14 @@ struct WindowEligibilityTests {
         #expect(WindowEligibility.geometryCandidates(in: observation).isEmpty)
     }
 
-    @Test func stillExcludesOwnAndXPCWindowsRegardlessOfSubrole() {
-        #expect(!WindowEligibility.isManageableForVirtualWorkspace(
-            window(
-                subrole: "AXStandardWindow",
-                isAXBacked: true,
-                bundleID: "com.yuki-yano.shitsurae"
-            )
-        ))
+    @Test func managesOwnStandardWindowForExplicitWorkspaceAssignmentButStillExcludesXPC() {
+        let ownWindow = window(
+            subrole: "AXStandardWindow",
+            isAXBacked: true,
+            bundleID: "com.yuki-yano.shitsurae"
+        )
+        #expect(WindowEligibility.isShitsuraeApplication(bundleID: ownWindow.bundleID))
+        #expect(WindowEligibility.isManageableForVirtualWorkspace(ownWindow))
         #expect(!WindowEligibility.isManageableForVirtualWorkspace(
             window(
                 subrole: "AXStandardWindow",

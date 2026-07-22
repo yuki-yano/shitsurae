@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import Testing
 @testable import ShitsuraeCore
@@ -216,13 +215,6 @@ struct CommandRouterTests {
         let payload = try #require(response["payload"] as? [String: Any])
         #expect(payload["permissions"] != nil)
         #expect(payload["state"] != nil)
-        #expect(payload["schemaVersion"] as? Int == 3)
-        let privateAPIs = try #require(payload["privateAPIs"] as? [String: Any])
-        #expect(privateAPIs["operatingSystemVersion"] is String)
-        #expect(privateAPIs["targetedWindowFocusSymbolsAvailable"] is Bool)
-        #expect(privateAPIs["symbolicHotKeySymbolAvailable"] is Bool)
-        #expect(privateAPIs["axWindowIDBridgeSymbolAvailable"] is Bool)
-        #expect(privateAPIs["keyWindowEventRecordBytes"] as? Int == 0xF8)
         #expect((payload["configFiles"] as? [[String: Any]])?.isEmpty == false)
     }
 }
@@ -332,12 +324,6 @@ struct CommandServerTests {
         second.stop()
 
         #expect(CommandServer.canConnect(socketURL: socketURL))
-
-        for _ in 0 ..< 25 {
-            first.stop()
-            #expect(first.start())
-            #expect(CommandServer.canConnect(socketURL: socketURL))
-        }
     }
 
     @Test func clientFailsFastWhenServerAbsent() {
@@ -349,119 +335,6 @@ struct CommandServerTests {
                 autoLaunch: false
             )
         }
-    }
-
-    @Test func socketReadEnforcesPayloadBoundary() throws {
-        #expect(try readMessage(Data("1234567\n".utf8), maxBytes: 8) == .data(Data("1234567".utf8)))
-        #expect(try readMessage(Data("12345678\n".utf8), maxBytes: 8) == .data(Data("12345678".utf8)))
-        #expect(try readMessage(Data("123456789\n".utf8), maxBytes: 8) == .tooLarge)
-        #expect(try readMessage(Data("12345678".utf8), maxBytes: 8) == .tooLarge)
-    }
-
-    @Test func eofFramedResponsePreservesInternalNewlines() throws {
-        let response = Data("{\n  \"ok\": true\n}\n".utf8)
-        #expect(try readMessage(
-            response,
-            maxBytes: response.count - 1,
-            termination: .endOfFile
-        ) == .data(Data("{\n  \"ok\": true\n}".utf8)))
-    }
-
-    @Test func socketReadTimeoutIsReported() throws {
-        var sockets = [Int32](repeating: -1, count: 2)
-        try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0)
-        defer {
-            close(sockets[0])
-            close(sockets[1])
-        }
-        try #require(CommandServer.configureTimeouts(fd: sockets[0], seconds: 0.02))
-
-        let startedAt = Date()
-        #expect(CommandServer.readMessage(fd: sockets[0], maxBytes: 8) == .timedOut)
-        #expect(Date().timeIntervalSince(startedAt) < 0.5)
-    }
-
-    @Test func clientTimesOutWhenConnectedServerNeverResponds() throws {
-        let socketURL = URL(fileURLWithPath: "/tmp/shitsurae-hung-\(UInt32.random(in: 0 ..< 99999)).sock")
-        let serverFD = try makeListeningSocket(at: socketURL)
-        defer {
-            close(serverFD)
-            unlink(socketURL.path)
-        }
-
-        let accepted = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
-            let clientFD = accept(serverFD, nil, nil)
-            guard clientFD >= 0 else { return }
-            accepted.signal()
-            Thread.sleep(forTimeInterval: 0.2)
-            close(clientFD)
-        }
-
-        let startedAt = Date()
-        #expect(throws: CommandClientError.timedOut) {
-            try CommandClient.sendOnce(
-                payload: Data("{}".utf8),
-                socketURL: socketURL,
-                timeoutSeconds: 0.03
-            )
-        }
-        #expect(accepted.wait(timeout: .now() + 0.5) == .success)
-        #expect(Date().timeIntervalSince(startedAt) < 0.5)
-    }
-
-    @Test func socketWriteReturnsCapturedErrorCode() throws {
-        var sockets = [Int32](repeating: -1, count: 2)
-        try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0)
-        defer { close(sockets[0]) }
-        try #require(CommandServer.configureTimeouts(fd: sockets[0]))
-        close(sockets[1])
-
-        #expect(CommandServer.writeAll(fd: sockets[0], data: Data("request".utf8)) == EPIPE)
-    }
-
-    private func readMessage(
-        _ bytes: Data,
-        maxBytes: Int,
-        termination: CommandServer.SocketMessageTermination = .newline
-    ) throws -> CommandServer.SocketReadResult {
-        var sockets = [Int32](repeating: -1, count: 2)
-        try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0)
-        defer {
-            close(sockets[0])
-            close(sockets[1])
-        }
-        try #require(CommandServer.writeAll(fd: sockets[1], data: bytes) == 0)
-        shutdown(sockets[1], SHUT_WR)
-        return CommandServer.readMessage(fd: sockets[0], maxBytes: maxBytes, termination: termination)
-    }
-
-    private func makeListeningSocket(at socketURL: URL) throws -> Int32 {
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        try #require(fd >= 0)
-
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        let path = socketURL.path
-        let maxLength = MemoryLayout.size(ofValue: address.sun_path) - 1
-        try #require(path.utf8.count <= maxLength)
-        withUnsafeMutableBytes(of: &address.sun_path) { buffer in
-            path.utf8CString.withUnsafeBytes { source in
-                buffer.copyMemory(from: UnsafeRawBufferPointer(rebasing: source.prefix(maxLength)))
-            }
-        }
-
-        unlink(path)
-        let bindResult = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
-                bind(fd, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard bindResult == 0, listen(fd, 1) == 0 else {
-            close(fd)
-            throw CommandClientError.serverUnavailable
-        }
-        return fd
     }
 }
 

@@ -7,11 +7,6 @@ import ShitsuraeCore
 @_silgen_name("_AXUIElementGetWindow")
 private func AppAXUIElementGetWindowID(_ element: AXUIElement, _ idOut: UnsafeMutablePointer<CGWindowID>) -> AXError
 
-private func checkedAppAXUIElement(_ value: CFTypeRef) -> AXUIElement? {
-    guard CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
-    return unsafeDowncast(value, to: AXUIElement.self)
-}
-
 final class AXWindowEventMonitor {
     enum Event: Sendable, Equatable {
         case focusedWindowChanged(
@@ -243,8 +238,7 @@ final class AXWindowEventMonitor {
         ) == .success, let focusedRef else {
             return nil
         }
-        guard let focusedElement = checkedAppAXUIElement(focusedRef) else { return nil }
-        return windowID(of: focusedElement)
+        return windowID(of: focusedRef as! AXUIElement)
     }
 
     private static func windowID(of element: AXUIElement) -> UInt32? {

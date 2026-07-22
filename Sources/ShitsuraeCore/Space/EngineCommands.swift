@@ -195,11 +195,7 @@ public extension VirtualSpaceEngine {
         }
         let observation = control.focusedWindowObservation()
         guard observation.focusedIdentity == identity else { return nil }
-        return try switchSpace(
-            to: targetSpaceID,
-            config: config,
-            invalidateFocusEventsAfterSwitch: false
-        )
+        return try switchSpace(to: targetSpaceID, config: config)
     }
 
     func invalidateFocusEvents(upTo sequence: UInt64) {
@@ -372,8 +368,7 @@ public extension VirtualSpaceEngine {
                 ? window.identity
                 : nil
         })
-        adoptUntrackedWindowsBestEffort(
-            context: "terminationFocusRestore",
+        _ = try? adoptUntrackedWindows(
             config: config,
             inventory: inventory,
             excludedWindowIdentities: terminatingIdentities
@@ -403,10 +398,20 @@ public extension VirtualSpaceEngine {
             return BoundWindow(entry: entry, window: window)
         }
         let ordered = SpaceSwitchPlanner.preferredFocusCandidates(from: candidates)
-        // Termination recovery consumes the workspace MRU but must not rewrite
-        // it. In particular, a fallback selected after a transient preferred
-        // focus failure is not evidence of user activation.
-        return focusTarget(from: ordered)
+        guard let focusedIdentity = focusTarget(from: ordered) else { return nil }
+
+        if let focused = ordered.first(where: { $0.window.identity == focusedIdentity }) {
+            var newState = currentState
+            newState.slots = newState.slots.map { entry in
+                guard entry.id == focused.entry.id else { return entry }
+                var updated = entry.bound(to: focused.window)
+                updated.lastActivatedAt = Date.rfc3339UTC()
+                return updated
+            }
+            try replaceState(newState)
+        }
+
+        return focusedIdentity
     }
 
     func applyFocus(window: WindowSnapshot) throws {
@@ -638,6 +643,7 @@ public extension VirtualSpaceEngine {
                 && window.displayID == hostDisplay.id
                 && !window.minimized
                 && !excludedWindowIdentities.contains(window.identity)
+                && !WindowEligibility.isShitsuraeApplication(bundleID: window.bundleID)
                 && WindowEligibility.isManageableForVirtualWorkspace(window)
                 && !PolicyEngine.matchesIgnoreRule(window: window, rules: config.config.ignore?.focus)
                 && !PolicyEngine.matchesIgnoreRule(window: window, rules: additionalIgnoreRules)
@@ -671,38 +677,6 @@ public extension VirtualSpaceEngine {
             replaceStateInMemory(newState)
         }
         return adoptedCount
-    }
-
-    @discardableResult
-    func adoptUntrackedWindowsBestEffort(
-        context: String,
-        config: LoadedConfig,
-        persistChanges: Bool = true,
-        inventory: WindowInventory? = nil,
-        excludedWindowIdentities: Set<WindowIdentity> = [],
-        additionalIgnoreRules: IgnoreRuleSet? = nil
-    ) -> Int {
-        do {
-            return try adoptUntrackedWindows(
-                config: config,
-                persistChanges: persistChanges,
-                inventory: inventory,
-                excludedWindowIdentities: excludedWindowIdentities,
-                additionalIgnoreRules: additionalIgnoreRules
-            )
-        } catch {
-            logger.log(
-                level: "warn",
-                event: "window.adoptionFailed",
-                fields: [
-                    "context": context,
-                    "layout": currentState.activeLayoutName ?? "",
-                    "activeSpace": currentState.primaryActiveSpaceID ?? -1,
-                    "error": String(describing: error),
-                ]
-            )
-            return 0
-        }
     }
 
     /// Adopts one exact focused window into the currently active workspace.
@@ -875,7 +849,7 @@ public extension VirtualSpaceEngine {
         guard let layoutName = currentState.activeLayoutName else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
-        adoptUntrackedWindowsBestEffort(context: "switcherCandidates", config: config)
+        _ = try? adoptUntrackedWindows(config: config)
 
         let activeSpaceID = currentState.primaryActiveSpaceID
         let layoutSlots = currentState.slots(layoutName: layoutName)
@@ -935,7 +909,7 @@ public extension VirtualSpaceEngine {
         guard let layoutName = currentState.activeLayoutName else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
-        adoptUntrackedWindowsBestEffort(context: "cycleCandidates", config: config)
+        _ = try? adoptUntrackedWindows(config: config)
 
         let activeSpaceID = currentState.primaryActiveSpaceID
         let layoutSlots = currentState.slots(layoutName: layoutName)

@@ -311,8 +311,7 @@ public extension VirtualSpaceEngine {
 
         // Adopt windows no layout slot claimed into the active workspace so
         // they are tracked (and hidden/shown) from the start.
-        adoptUntrackedWindowsBestEffort(
-            context: "arrange",
+        _ = try? adoptUntrackedWindows(
             config: config,
             additionalIgnoreRules: config.config.ignore?.apply
         )

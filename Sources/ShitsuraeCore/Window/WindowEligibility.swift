@@ -20,6 +20,10 @@ public enum WindowEligibility {
         case unknown
     }
 
+    public static func isShitsuraeApplication(bundleID: String) -> Bool {
+        bundleID.hasPrefix("com.yuki-yano.shitsurae")
+    }
+
     public static func classification(of window: WindowSnapshot) -> Classification {
         guard window.isAXBacked else {
             return .unknown
@@ -46,9 +50,6 @@ public enum WindowEligibility {
             return .unknown
         }
 
-        guard !window.bundleID.hasPrefix("com.yuki-yano.shitsurae") else {
-            return .companion
-        }
         guard !window.bundleID.contains(".xpc.") else {
             return .companion
         }

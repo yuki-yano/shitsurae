@@ -13,8 +13,6 @@ import Foundation
 ///   _SLPSSetFrontProcessWithOptions + synthesized key-window events; plain
 ///   AX focus cannot raise one window above its siblings
 public struct LiveWindowControl: WindowControl {
-    static let keyWindowEventRecordSize = 0xF8
-
     public init() {}
 
     public func listWindows() -> [WindowSnapshot] {
@@ -53,6 +51,24 @@ public struct LiveWindowControl: WindowControl {
 
     @discardableResult
     public func setWindowFrame(
+        windowID: UInt32,
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String,
+        frame: ResolvedFrame
+    ) -> WindowGeometryMutationResult {
+        Self.performWindowInteractionOnRequiredThread(pid: pid, bundleID: bundleID) {
+            setWindowFrameOnCurrentThread(
+                windowID: windowID,
+                pid: pid,
+                processStartTime: processStartTime,
+                bundleID: bundleID,
+                frame: frame
+            )
+        }
+    }
+
+    private func setWindowFrameOnCurrentThread(
         windowID: UInt32,
         pid: Int,
         processStartTime: UInt64,
@@ -139,6 +155,24 @@ public struct LiveWindowControl: WindowControl {
 
     @discardableResult
     public func setWindowPosition(
+        windowID: UInt32,
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String,
+        position: CGPoint
+    ) -> WindowGeometryMutationResult {
+        Self.performWindowInteractionOnRequiredThread(pid: pid, bundleID: bundleID) {
+            setWindowPositionOnCurrentThread(
+                windowID: windowID,
+                pid: pid,
+                processStartTime: processStartTime,
+                bundleID: bundleID,
+                position: position
+            )
+        }
+    }
+
+    private func setWindowPositionOnCurrentThread(
         windowID: UInt32,
         pid: Int,
         processStartTime: UInt64,
@@ -232,6 +266,24 @@ public struct LiveWindowControl: WindowControl {
         bundleID: String,
         minimized: Bool
     ) -> WindowInteractionResult {
+        Self.performWindowInteractionOnRequiredThread(pid: pid, bundleID: bundleID) {
+            setWindowMinimizedOnCurrentThread(
+                windowID: windowID,
+                pid: pid,
+                processStartTime: processStartTime,
+                bundleID: bundleID,
+                minimized: minimized
+            )
+        }
+    }
+
+    private func setWindowMinimizedOnCurrentThread(
+        windowID: UInt32,
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String,
+        minimized: Bool
+    ) -> WindowInteractionResult {
         guard AXIsProcessTrusted() else {
             return .permissionDenied
         }
@@ -262,6 +314,22 @@ public struct LiveWindowControl: WindowControl {
     // MARK: - Focus / activation
 
     public func focusWindow(
+        windowID: UInt32,
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String
+    ) -> WindowInteractionResult {
+        Self.performWindowInteractionOnRequiredThread(pid: pid, bundleID: bundleID) {
+            focusWindowOnCurrentThread(
+                windowID: windowID,
+                pid: pid,
+                processStartTime: processStartTime,
+                bundleID: bundleID
+            )
+        }
+    }
+
+    private func focusWindowOnCurrentThread(
         windowID: UInt32,
         pid: Int,
         processStartTime: UInt64,
@@ -310,6 +378,20 @@ public struct LiveWindowControl: WindowControl {
 
     @discardableResult
     public func activateApplication(pid: Int, processStartTime: UInt64, bundleID: String) -> Bool {
+        Self.performWindowInteractionOnRequiredThread(pid: pid, bundleID: bundleID) {
+            activateApplicationOnCurrentThread(
+                pid: pid,
+                processStartTime: processStartTime,
+                bundleID: bundleID
+            )
+        }
+    }
+
+    private func activateApplicationOnCurrentThread(
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String
+    ) -> Bool {
         guard let running = Self.runningApplication(
             pid: pid,
             processStartTime: processStartTime,
@@ -328,6 +410,25 @@ public struct LiveWindowControl: WindowControl {
     }
 
     // MARK: - Internals
+
+    /// AX writes targeting this process synchronously enter AppKit. AppKit
+    /// traps when those window mutations originate from a background thread,
+    /// so every self-targeted interaction must execute on the main thread.
+    /// Other applications keep using the caller's thread and the existing AX
+    /// path.
+    static func performWindowInteractionOnRequiredThread<Result>(
+        pid: Int,
+        bundleID: String,
+        operation: () -> Result
+    ) -> Result {
+        guard pid == Int(ProcessInfo.processInfo.processIdentifier),
+              WindowEligibility.isShitsuraeApplication(bundleID: bundleID),
+              !Thread.isMainThread
+        else {
+            return operation()
+        }
+        return DispatchQueue.main.sync(execute: operation)
+    }
 
     private static func runningApplication(
         pid: Int,
@@ -363,9 +464,8 @@ public struct LiveWindowControl: WindowControl {
             else {
                 return nil
             }
-            guard let element = checkedAXUIElement(ref) else { return nil }
             var resolved: CGWindowID = 0
-            guard AXUIElementGetWindowID(element, &resolved) == .success else {
+            guard AXUIElementGetWindowID(ref as! AXUIElement, &resolved) == .success else {
                 return nil
             }
             return UInt32(resolved)
@@ -402,9 +502,9 @@ public struct LiveWindowControl: WindowControl {
         for attribute in [kAXFocusedWindowAttribute, kAXMainWindowAttribute] {
             var ref: CFTypeRef?
             if AXUIElementCopyAttributeValue(appElement, attribute as CFString, &ref) == .success,
-               let ref,
-               let element = checkedAXUIElement(ref)
+               let ref
             {
+                let element = ref as! AXUIElement
                 guard !candidates.contains(where: { CFEqual($0, element) }) else {
                     continue
                 }
@@ -466,18 +566,12 @@ public struct LiveWindowControl: WindowControl {
             return nil
         }
 
-        guard let positionValue = checkedAXValue(positionRef, type: .cgPoint),
-              let sizeValue = checkedAXValue(sizeRef, type: .cgSize)
-        else {
-            return nil
-        }
+        let positionValue = positionRef as! AXValue
+        let sizeValue = sizeRef as! AXValue
         var position = CGPoint.zero
         var size = CGSize.zero
-        guard AXValueGetValue(positionValue, .cgPoint, &position),
-              AXValueGetValue(sizeValue, .cgSize, &size)
-        else {
-            return nil
-        }
+        AXValueGetValue(positionValue, .cgPoint, &position)
+        AXValueGetValue(sizeValue, .cgSize, &size)
         return CGRect(origin: position, size: size)
     }
 
@@ -533,8 +627,8 @@ public struct LiveWindowControl: WindowControl {
     }
 
     static func makeKeyWindowEventBytes(windowID: UInt32, eventType: UInt8) -> [UInt8] {
-        var bytes = [UInt8](repeating: 0, count: keyWindowEventRecordSize)
-        bytes[0x04] = UInt8(keyWindowEventRecordSize)
+        var bytes = [UInt8](repeating: 0, count: 0xF8)
+        bytes[0x04] = 0xF8
         bytes[0x08] = eventType
         bytes[0x3A] = 0x10
 

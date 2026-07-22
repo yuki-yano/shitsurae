@@ -282,21 +282,8 @@ final class AppModel: ObservableObject {
                 restored = await engine.restoreAllForShutdown(config: config)
             }
             if restored {
-                do {
-                    try await engine.clearRuntimeState()
-                } catch {
-                    restored = false
-                    logger.log(
-                        level: "error",
-                        event: "app.shutdown.stateClearFailed",
-                        fields: [
-                            "error": String(describing: error),
-                            "keptState": true,
-                        ]
-                    )
-                }
-            }
-            if !restored {
+                await engine.clearRuntimeState()
+            } else {
                 logger.log(
                     level: "warn",
                     event: "app.shutdown.restoreIncomplete",
@@ -391,7 +378,32 @@ final class AppModel: ObservableObject {
     // MARK: - Actions
 
     func applyLayout(_ name: String, spaceID: Int?) {
+        applyLayout(name, spaceID: spaceID, shitsuraeWindow: nil)
+    }
+
+    func applyLayoutFromMainWindow(_ name: String, spaceID: Int?) {
+        let label = "arrange \(name)"
+        guard let shitsuraeWindow = shitsuraeMainWindowSelector() else {
+            let message = "Shitsurae main window is unavailable"
+            lastActionMessage = "\(label): \(message)"
+            actionStatus = .failed(label, message)
+            return
+        }
+        applyLayout(name, spaceID: spaceID, shitsuraeWindow: shitsuraeWindow)
+    }
+
+    private func applyLayout(
+        _ name: String,
+        spaceID: Int?,
+        shitsuraeWindow: WindowTargetSelector?
+    ) {
         runEngineAction("arrange \(name)", urgency: .interactive) { engine, config in
+            if shitsuraeWindow != nil,
+               let layout = config.config.layouts[name],
+               !layout.spaces.contains(where: { $0.spaceID == 1 })
+            {
+                throw VirtualSpaceEngineError.spaceNotFound(layoutName: name, spaceID: 1)
+            }
             let result = try await engine.arrange(layoutName: name, spaceID: spaceID, config: config)
             if result.result == "failed" {
                 let detail = result.hardErrors.map(\.message).joined(separator: "; ")
@@ -402,7 +414,34 @@ final class AppModel: ObservableObject {
                     message.isEmpty ? "arrange failed" : message
                 )
             }
+            if let shitsuraeWindow {
+                _ = try await engine.windowWorkspace(
+                    selector: shitsuraeWindow,
+                    toSpaceID: 1,
+                    config: config
+                )
+            }
         }
+    }
+
+    private func shitsuraeMainWindowSelector() -> WindowTargetSelector? {
+        let candidates = [NSApp.keyWindow, NSApp.mainWindow] + NSApp.windows.map(Optional.some)
+        guard let window = candidates.compactMap({ $0 }).first(where: {
+            $0.title == "Shitsurae" && $0.level == .normal && $0.windowNumber > 0
+        }), let bundleID = Bundle.main.bundleIdentifier
+        else {
+            return nil
+        }
+        let pid = Int(ProcessInfo.processInfo.processIdentifier)
+        guard let processStartTime = ProcessGenerationResolver.startTime(pid: pid) else {
+            return nil
+        }
+        return WindowTargetSelector(
+            windowID: UInt32(window.windowNumber),
+            pid: pid,
+            processStartTime: processStartTime,
+            bundleID: bundleID
+        )
     }
 
     func switchSpace(to spaceID: Int) {
@@ -991,37 +1030,9 @@ final class AppModel: ObservableObject {
     private func handleDisplayChange() {
         guard let config = configManager.configIfLoaded() else { return }
         let engine = engine
-        let logger = logger
         Task { [weak self] in
             if let activeSpaceID = await engine.activeSpaceID() {
-                do {
-                    let outcome = try await engine.switchSpace(
-                        to: activeSpaceID,
-                        config: config,
-                        reconcile: true
-                    )
-                    if !outcome.converged {
-                        logger.log(
-                            level: "warn",
-                            event: "display.reconcileIncomplete",
-                            fields: [
-                                "activeSpace": activeSpaceID,
-                                "unresolvedSlots": outcome.unresolvedSlots.count,
-                            ]
-                        )
-                    }
-                } catch {
-                    let recoveryRequired = await engine.currentState.recoveryRequired
-                    logger.log(
-                        level: "error",
-                        event: "display.reconcileFailed",
-                        fields: [
-                            "activeSpace": activeSpaceID,
-                            "recoveryRequired": recoveryRequired,
-                            "error": String(describing: error),
-                        ]
-                    )
-                }
+                _ = try? await engine.switchSpace(to: activeSpaceID, config: config, reconcile: true)
             }
             await MainActor.run { self?.refreshStatus() }
         }

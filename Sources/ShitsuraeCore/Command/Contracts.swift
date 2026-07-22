@@ -394,28 +394,6 @@ public struct DiagnosticsJSON: Codable, Equatable, Sendable {
         }
     }
 
-    public struct PrivateAPIs: Codable, Equatable, Sendable {
-        public let operatingSystemVersion: String
-        public let targetedWindowFocusSymbolsAvailable: Bool
-        public let symbolicHotKeySymbolAvailable: Bool
-        public let axWindowIDBridgeSymbolAvailable: Bool
-        public let keyWindowEventRecordBytes: Int
-
-        public init(
-            operatingSystemVersion: String,
-            targetedWindowFocusSymbolsAvailable: Bool,
-            symbolicHotKeySymbolAvailable: Bool,
-            axWindowIDBridgeSymbolAvailable: Bool,
-            keyWindowEventRecordBytes: Int
-        ) {
-            self.operatingSystemVersion = operatingSystemVersion
-            self.targetedWindowFocusSymbolsAvailable = targetedWindowFocusSymbolsAvailable
-            self.symbolicHotKeySymbolAvailable = symbolicHotKeySymbolAvailable
-            self.axWindowIDBridgeSymbolAvailable = axWindowIDBridgeSymbolAvailable
-            self.keyWindowEventRecordBytes = keyWindowEventRecordBytes
-        }
-    }
-
     public let schemaVersion: Int
     public let version: String
     public let permissions: Permissions
@@ -423,7 +401,6 @@ public struct DiagnosticsJSON: Codable, Equatable, Sendable {
     public let configReload: ConfigReloadStatus?
     public let state: StateSummary
     public let displays: [DisplaySummaryJSON]
-    public let privateAPIs: PrivateAPIs
 
     public init(
         version: String,
@@ -431,17 +408,15 @@ public struct DiagnosticsJSON: Codable, Equatable, Sendable {
         configFiles: [ConfigFileStatus],
         configReload: ConfigReloadStatus?,
         state: StateSummary,
-        displays: [DisplaySummaryJSON],
-        privateAPIs: PrivateAPIs
+        displays: [DisplaySummaryJSON]
     ) {
-        self.schemaVersion = 3
+        self.schemaVersion = 2
         self.version = version
         self.permissions = permissions
         self.configFiles = configFiles
         self.configReload = configReload
         self.state = state
         self.displays = displays
-        self.privateAPIs = privateAPIs
     }
 }
 

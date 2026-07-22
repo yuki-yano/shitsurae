@@ -12,10 +12,6 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
 
     var failFrameWindowIDs: Set<UInt32> = []
     var failPositionWindowIDs: Set<UInt32> = []
-    /// Models AppKit's refusal to place a titled window beyond the vertical
-    /// screen boundary. LiveWindowControl compensates that clamped write back
-    /// to the original frame and reports it as rejected.
-    var rejectVerticalOffscreenPositionWindowIDs: Set<UInt32> = []
     /// Safe transient failures that occur before a geometry setter runs.
     var notAttemptedFrameAttemptsRemainingByWindowID: [UInt32: Int] = [:]
     var notAttemptedPositionAttemptsRemainingByWindowID: [UInt32: Int] = [:]
@@ -31,7 +27,6 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     var failUnminimizeWindowIDs: Set<UInt32> = []
     var failFocusWindowIDs: Set<UInt32> = []
     var failFocusAttemptsRemainingByWindowID: [UInt32: Int] = [:]
-    var failActivationBundleIDs: Set<String> = []
     /// When set, every setWindowPosition *attempt* (whether or not the write
     /// succeeds) re-points key focus to this window — models the real macOS
     /// race where windows settling during convergence change key focus before
@@ -46,7 +41,6 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     private(set) var frameMutationAttemptWindowIDs: [UInt32] = []
     private(set) var setFrameAttemptWindowIDs: [UInt32] = []
     private(set) var setPositionAttemptWindowIDs: [UInt32] = []
-    private(set) var setPositionAttempts: [(windowID: UInt32, position: CGPoint)] = []
     private(set) var launchedRequests: [ApplicationLaunchRequest] = []
     private(set) var sleptMilliseconds: [Int] = []
     var onFrameMutationAttempt: (() -> Void)?
@@ -241,7 +235,6 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         defer { lock.unlock() }
         frameMutationAttemptWindowIDs.append(windowID)
         setPositionAttemptWindowIDs.append(windowID)
-        setPositionAttempts.append((windowID: windowID, position: position))
         onFrameMutationAttempt?()
         guard let window = windowsByID[windowID],
               window.pid == pid,
@@ -268,24 +261,6 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         }
         guard !failPositionWindowIDs.contains(windowID) else {
             return .rejected
-        }
-        if rejectVerticalOffscreenPositionWindowIDs.contains(windowID) {
-            let proposedFrame = CGRect(
-                x: position.x,
-                y: position.y,
-                width: window.frame.width,
-                height: window.frame.height
-            )
-            let overlaps = displayList.compactMap { display -> CGRect? in
-                let overlap = proposedFrame.intersection(display.frame)
-                return overlap.isNull || overlap.isEmpty ? nil : overlap
-            }
-            let isVerticalEdgeParking = !overlaps.isEmpty && overlaps.allSatisfy { overlap in
-                overlap.height <= 1 && overlap.width > 1
-            }
-            if isVerticalEdgeParking {
-                return .rejected
-            }
         }
         windowsByID[windowID] = window.withFrame(
             ResolvedFrame(x: position.x, y: position.y, width: window.frame.width, height: window.frame.height)
@@ -346,9 +321,6 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     func activateApplication(pid: Int, processStartTime: UInt64, bundleID: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        guard !failActivationBundleIDs.contains(bundleID) else {
-            return false
-        }
         guard windowsByID.values.contains(where: {
             $0.pid == pid
                 && $0.processStartTime == processStartTime
@@ -460,7 +432,6 @@ enum TestFixtures {
         processStartTime: UInt64? = nil,
         title: String = "win",
         frame: ResolvedFrame = ResolvedFrame(x: 10, y: 10, width: 700, height: 400),
-        displayID: String? = display.id,
         role: String? = "AXWindow",
         subrole: String? = "AXStandardWindow",
         modal: Bool? = false,
@@ -485,7 +456,7 @@ enum TestFixtures {
             minimized: minimized,
             hidden: false,
             frame: frame,
-            displayID: displayID,
+            displayID: display.id,
             isFullscreen: isFullscreen,
             frontIndex: frontIndex
         )

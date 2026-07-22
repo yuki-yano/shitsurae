@@ -1,30 +1,56 @@
-import ApplicationServices
 import CoreGraphics
+import Foundation
 import Testing
 @testable import ShitsuraeCore
 
 @Suite("Geometry transaction")
 struct GeometryTransactionTests {
-    @Test func checkedAXTypesRejectUnexpectedAttributeValues() throws {
-        let unexpected = "not an accessibility value" as CFString
-        #expect(checkedAXUIElement(unexpected) == nil)
-        #expect(checkedAXValue(unexpected, type: .cgPoint) == nil)
+    @Test
+    func selfTargetedWindowInteractionRunsOnMainThread() async {
+        let ranOnMainThread = await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                continuation.resume(returning:
+                    LiveWindowControl.performWindowInteractionOnRequiredThread(
+                        pid: Int(ProcessInfo.processInfo.processIdentifier),
+                        bundleID: "com.yuki-yano.shitsurae"
+                    ) {
+                        Thread.isMainThread
+                    }
+                )
+            }
+        }
 
-        var point = CGPoint(x: 10, y: 20)
-        let pointValue = try #require(AXValueCreate(.cgPoint, &point))
-        #expect(checkedAXValue(pointValue, type: .cgPoint) != nil)
-        #expect(checkedAXValue(pointValue, type: .cgSize) == nil)
+        #expect(ranOnMainThread)
     }
 
-    @Test func privateKeyWindowEventRecordKeepsExpectedLayout() {
-        let windowID: UInt32 = 0x1234_ABCD
-        let bytes = LiveWindowControl.makeKeyWindowEventBytes(windowID: windowID, eventType: 0x02)
+    @Test
+    func externalWindowInteractionStaysOnCallingThread() async {
+        let ranOnMainThread = await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                continuation.resume(returning:
+                    LiveWindowControl.performWindowInteractionOnRequiredThread(
+                        pid: Int(ProcessInfo.processInfo.processIdentifier),
+                        bundleID: "com.openai.chat"
+                    ) {
+                        Thread.isMainThread
+                    }
+                )
+            }
+        }
 
-        #expect(bytes.count == LiveWindowControl.keyWindowEventRecordSize)
-        #expect(bytes[0x04] == UInt8(LiveWindowControl.keyWindowEventRecordSize))
-        #expect(bytes[0x08] == 0x02)
-        #expect(bytes[0x3A] == 0x10)
-        #expect(Array(bytes[0x3C ..< 0x40]) == [0xCD, 0xAB, 0x34, 0x12])
+        #expect(!ranOnMainThread)
+    }
+
+    @Test @MainActor
+    func selfTargetedWindowInteractionAlreadyOnMainThreadRunsInline() {
+        let ranOnMainThread = LiveWindowControl.performWindowInteractionOnRequiredThread(
+            pid: Int(ProcessInfo.processInfo.processIdentifier),
+            bundleID: "com.yuki-yano.shitsurae"
+        ) {
+            Thread.isMainThread
+        }
+
+        #expect(ranOnMainThread)
     }
 
     @Test func rollsBackSizeWhenPositionFailsAfterMutating() {
