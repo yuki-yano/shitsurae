@@ -57,6 +57,24 @@ public struct LiveWindowControl: WindowControl {
         bundleID: String,
         frame: ResolvedFrame
     ) -> WindowGeometryMutationResult {
+        Self.performWindowInteractionOnRequiredThread(pid: pid, bundleID: bundleID) {
+            setWindowFrameOnCurrentThread(
+                windowID: windowID,
+                pid: pid,
+                processStartTime: processStartTime,
+                bundleID: bundleID,
+                frame: frame
+            )
+        }
+    }
+
+    private func setWindowFrameOnCurrentThread(
+        windowID: UInt32,
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String,
+        frame: ResolvedFrame
+    ) -> WindowGeometryMutationResult {
         guard let running = Self.runningApplication(
             pid: pid,
             processStartTime: processStartTime,
@@ -137,6 +155,24 @@ public struct LiveWindowControl: WindowControl {
 
     @discardableResult
     public func setWindowPosition(
+        windowID: UInt32,
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String,
+        position: CGPoint
+    ) -> WindowGeometryMutationResult {
+        Self.performWindowInteractionOnRequiredThread(pid: pid, bundleID: bundleID) {
+            setWindowPositionOnCurrentThread(
+                windowID: windowID,
+                pid: pid,
+                processStartTime: processStartTime,
+                bundleID: bundleID,
+                position: position
+            )
+        }
+    }
+
+    private func setWindowPositionOnCurrentThread(
         windowID: UInt32,
         pid: Int,
         processStartTime: UInt64,
@@ -230,6 +266,24 @@ public struct LiveWindowControl: WindowControl {
         bundleID: String,
         minimized: Bool
     ) -> WindowInteractionResult {
+        Self.performWindowInteractionOnRequiredThread(pid: pid, bundleID: bundleID) {
+            setWindowMinimizedOnCurrentThread(
+                windowID: windowID,
+                pid: pid,
+                processStartTime: processStartTime,
+                bundleID: bundleID,
+                minimized: minimized
+            )
+        }
+    }
+
+    private func setWindowMinimizedOnCurrentThread(
+        windowID: UInt32,
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String,
+        minimized: Bool
+    ) -> WindowInteractionResult {
         guard AXIsProcessTrusted() else {
             return .permissionDenied
         }
@@ -260,6 +314,22 @@ public struct LiveWindowControl: WindowControl {
     // MARK: - Focus / activation
 
     public func focusWindow(
+        windowID: UInt32,
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String
+    ) -> WindowInteractionResult {
+        Self.performWindowInteractionOnRequiredThread(pid: pid, bundleID: bundleID) {
+            focusWindowOnCurrentThread(
+                windowID: windowID,
+                pid: pid,
+                processStartTime: processStartTime,
+                bundleID: bundleID
+            )
+        }
+    }
+
+    private func focusWindowOnCurrentThread(
         windowID: UInt32,
         pid: Int,
         processStartTime: UInt64,
@@ -308,6 +378,20 @@ public struct LiveWindowControl: WindowControl {
 
     @discardableResult
     public func activateApplication(pid: Int, processStartTime: UInt64, bundleID: String) -> Bool {
+        Self.performWindowInteractionOnRequiredThread(pid: pid, bundleID: bundleID) {
+            activateApplicationOnCurrentThread(
+                pid: pid,
+                processStartTime: processStartTime,
+                bundleID: bundleID
+            )
+        }
+    }
+
+    private func activateApplicationOnCurrentThread(
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String
+    ) -> Bool {
         guard let running = Self.runningApplication(
             pid: pid,
             processStartTime: processStartTime,
@@ -326,6 +410,25 @@ public struct LiveWindowControl: WindowControl {
     }
 
     // MARK: - Internals
+
+    /// AX writes targeting this process synchronously enter AppKit. AppKit
+    /// traps when those window mutations originate from a background thread,
+    /// so every self-targeted interaction must execute on the main thread.
+    /// Other applications keep using the caller's thread and the existing AX
+    /// path.
+    static func performWindowInteractionOnRequiredThread<Result>(
+        pid: Int,
+        bundleID: String,
+        operation: () -> Result
+    ) -> Result {
+        guard pid == Int(ProcessInfo.processInfo.processIdentifier),
+              WindowEligibility.isShitsuraeApplication(bundleID: bundleID),
+              !Thread.isMainThread
+        else {
+            return operation()
+        }
+        return DispatchQueue.main.sync(execute: operation)
+    }
 
     private static func runningApplication(
         pid: Int,

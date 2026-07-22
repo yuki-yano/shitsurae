@@ -643,6 +643,7 @@ public extension VirtualSpaceEngine {
                 && window.displayID == hostDisplay.id
                 && !window.minimized
                 && !excludedWindowIdentities.contains(window.identity)
+                && !WindowEligibility.isShitsuraeApplication(bundleID: window.bundleID)
                 && WindowEligibility.isManageableForVirtualWorkspace(window)
                 && !PolicyEngine.matchesIgnoreRule(window: window, rules: config.config.ignore?.focus)
                 && !PolicyEngine.matchesIgnoreRule(window: window, rules: additionalIgnoreRules)

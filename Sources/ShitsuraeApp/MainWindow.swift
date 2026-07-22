@@ -247,7 +247,7 @@ struct ArrangeView: View {
             prominent: true
         ) {
             guard let layout = selectedLayout else { return }
-            model.applyLayout(layout, spaceID: selectedSpaceID)
+            model.applyLayoutFromMainWindow(layout, spaceID: selectedSpaceID)
         }
         .help("Launch, place and track windows, then re-hide inactive workspaces")
     }

@@ -362,6 +362,102 @@ struct VisibilityPlannerTests {
         #expect(mirrored == .bottomLeft)
     }
 
+    @Test func portraitWindowParksBeyondNearestHorizontalArrangementEdge() {
+        let leftDisplay = DisplayInfo(
+            id: "uuid-left",
+            width: 2624,
+            height: 1696,
+            scale: 1,
+            isPrimary: false,
+            frame: CGRect(x: -2624, y: 0, width: 2624, height: 1696),
+            visibleFrame: CGRect(x: -2624, y: 50, width: 2624, height: 1646)
+        )
+        let mainDisplay = DisplayInfo(
+            id: "uuid-main",
+            width: 5120,
+            height: 2160,
+            scale: 1,
+            isPrimary: true,
+            frame: CGRect(x: 0, y: 0, width: 5120, height: 2160),
+            visibleFrame: CGRect(x: 0, y: 30, width: 5120, height: 2130)
+        )
+        let frame = ResolvedFrame(x: 1794, y: 153, width: 1660, height: 1791)
+        var entry = makeEntry(
+            spaceID: 1,
+            bundleID: "com.openai.codex",
+            lastVisibleFrame: frame
+        )
+        entry.displayID = mainDisplay.id
+        let window = TestFixtures.window(
+            id: 9,
+            bundleID: "com.openai.codex",
+            frame: frame,
+            isAXBacked: true
+        )
+
+        let hidden = VisibilityPlanner.resolveHiddenFrame(
+            entry: entry,
+            window: window,
+            hostDisplay: mainDisplay,
+            displays: [leftDisplay, mainDisplay]
+        )
+
+        #expect(abs(hidden.x - (mainDisplay.frame.maxX - 1)) <= 0.5)
+        #expect(hidden.y == frame.y)
+        #expect(VisibilityPlanner.isHiddenWindowFrame(
+            frame: hidden,
+            displays: [leftDisplay, mainDisplay]
+        ))
+    }
+
+    @Test func portraitWindowAnchorsToTheDisplayOwningItsChosenOuterEdge() {
+        let upperRight = DisplayInfo(
+            id: "upper-right",
+            width: 1440,
+            height: 900,
+            scale: 1,
+            isPrimary: true,
+            frame: CGRect(x: 0, y: 0, width: 1440, height: 900),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1440, height: 875)
+        )
+        let lowerLeft = DisplayInfo(
+            id: "lower-left",
+            width: 200,
+            height: 800,
+            scale: 1,
+            isPrimary: false,
+            frame: CGRect(x: -200, y: 1200, width: 200, height: 800),
+            visibleFrame: CGRect(x: -200, y: 1200, width: 200, height: 800)
+        )
+        let frame = ResolvedFrame(x: 0, y: 100, width: 500, height: 700)
+        var entry = makeEntry(spaceID: 1, lastVisibleFrame: frame)
+        entry.displayID = upperRight.id
+        let window = TestFixtures.window(
+            id: 9,
+            bundleID: "com.openai.codex",
+            frame: frame,
+            isAXBacked: true
+        )
+
+        let hidden = VisibilityPlanner.resolveHiddenFrame(
+            entry: entry,
+            window: window,
+            hostDisplay: upperRight,
+            displays: [upperRight, lowerLeft]
+        )
+
+        #expect(abs(hidden.x - (-699)) <= 0.5)
+        #expect(abs(hidden.y - lowerLeft.visibleFrame.minY) <= 0.5)
+        let overlap = CGRect(
+            x: hidden.x,
+            y: hidden.y,
+            width: hidden.width,
+            height: hidden.height
+        ).intersection(lowerLeft.frame)
+        #expect(abs(overlap.width - 1) <= 0.5)
+        #expect(overlap.height > 1)
+    }
+
     @Test func hiddenFrameAvoidsBothNeighborsForMiddleDisplay() {
         let left = DisplayInfo(
             id: "left",

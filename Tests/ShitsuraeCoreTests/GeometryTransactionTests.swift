@@ -1,9 +1,58 @@
 import CoreGraphics
+import Foundation
 import Testing
 @testable import ShitsuraeCore
 
 @Suite("Geometry transaction")
 struct GeometryTransactionTests {
+    @Test
+    func selfTargetedWindowInteractionRunsOnMainThread() async {
+        let ranOnMainThread = await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                continuation.resume(returning:
+                    LiveWindowControl.performWindowInteractionOnRequiredThread(
+                        pid: Int(ProcessInfo.processInfo.processIdentifier),
+                        bundleID: "com.yuki-yano.shitsurae"
+                    ) {
+                        Thread.isMainThread
+                    }
+                )
+            }
+        }
+
+        #expect(ranOnMainThread)
+    }
+
+    @Test
+    func externalWindowInteractionStaysOnCallingThread() async {
+        let ranOnMainThread = await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                continuation.resume(returning:
+                    LiveWindowControl.performWindowInteractionOnRequiredThread(
+                        pid: Int(ProcessInfo.processInfo.processIdentifier),
+                        bundleID: "com.openai.chat"
+                    ) {
+                        Thread.isMainThread
+                    }
+                )
+            }
+        }
+
+        #expect(!ranOnMainThread)
+    }
+
+    @Test @MainActor
+    func selfTargetedWindowInteractionAlreadyOnMainThreadRunsInline() {
+        let ranOnMainThread = LiveWindowControl.performWindowInteractionOnRequiredThread(
+            pid: Int(ProcessInfo.processInfo.processIdentifier),
+            bundleID: "com.yuki-yano.shitsurae"
+        ) {
+            Thread.isMainThread
+        }
+
+        #expect(ranOnMainThread)
+    }
+
     @Test func rollsBackSizeWhenPositionFailsAfterMutating() {
         let initial = CGRect(x: 100, y: 80, width: 1_200, height: 800)
         var actual = initial

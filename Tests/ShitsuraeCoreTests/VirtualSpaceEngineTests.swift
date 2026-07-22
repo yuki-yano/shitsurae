@@ -840,6 +840,97 @@ struct VirtualSpaceEngineTests {
         #expect(entry?.visibilityState == .hiddenOffscreen)
     }
 
+    @Test func chatGPTPortraitWindowMovesAndRoundTripsBetweenWorkspaces() async throws {
+        let originalFrame = ResolvedFrame(x: 500, y: 100, width: 500, height: 700)
+        let chatGPT = TestFixtures.window(
+            id: 9,
+            bundleID: "com.openai.codex",
+            pid: 90,
+            frame: originalFrame,
+            isAXBacked: true,
+            frontIndex: 0
+        )
+        let (engine, control, url) = makeEngine(windows: standardWindows() + [chatGPT])
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        let moved = try await engine.windowWorkspace(
+            selector: WindowTargetSelector(
+                windowID: chatGPT.windowID,
+                pid: chatGPT.pid,
+                processStartTime: chatGPT.processStartTime,
+                bundleID: chatGPT.bundleID
+            ),
+            toSpaceID: 2,
+            config: config
+        )
+
+        #expect(moved.didCreateTrackingEntry)
+        #expect(moved.previousSpaceID == 1)
+        #expect(moved.spaceID == 2)
+        let parked = try #require(control.window(chatGPT.windowID))
+        #expect(abs(parked.frame.x - (TestFixtures.display.frame.maxX - 1)) <= 0.5)
+        #expect(parked.frame.y == originalFrame.y)
+
+        #expect(try await engine.switchSpace(to: 2, config: config).converged)
+        #expect(control.window(chatGPT.windowID)?.frame == originalFrame)
+        #expect(try await engine.switchSpace(to: 1, config: config).converged)
+        #expect(abs(try #require(control.window(chatGPT.windowID)?.frame.x)
+            - (TestFixtures.display.frame.maxX - 1)) <= 0.5)
+        #expect(try await engine.switchSpace(to: 2, config: config).converged)
+        #expect(control.window(chatGPT.windowID)?.frame == originalFrame)
+    }
+
+    @Test func ownWindowRequiresExplicitAssignmentAndStaysOnWorkspaceOne() async throws {
+        let originalFrame = ResolvedFrame(x: 200, y: 100, width: 500, height: 700)
+        let ownWindow = TestFixtures.window(
+            id: 9,
+            bundleID: "com.yuki-yano.shitsurae",
+            pid: 90,
+            title: "Shitsurae",
+            frame: originalFrame,
+            isAXBacked: true,
+            frontIndex: 0
+        )
+        let (engine, control, url) = makeEngine(windows: standardWindows() + [ownWindow])
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 2, config: config)
+        _ = try await engine.adoptUntrackedWindows(config: config)
+        #expect(!(await engine.currentState).slots.contains {
+            $0.boundIdentity == ownWindow.identity
+        })
+
+        let assigned = try await engine.windowWorkspace(
+            selector: WindowTargetSelector(
+                windowID: ownWindow.windowID,
+                pid: ownWindow.pid,
+                processStartTime: ownWindow.processStartTime,
+                bundleID: ownWindow.bundleID
+            ),
+            toSpaceID: 1,
+            config: config
+        )
+
+        #expect(assigned.didCreateTrackingEntry)
+        #expect(assigned.spaceID == 1)
+        #expect(VisibilityPlanner.isHiddenWindowFrame(
+            frame: try #require(control.window(ownWindow.windowID)).frame,
+            displays: [TestFixtures.display]
+        ))
+        #expect((await engine.currentState).slots.contains {
+            $0.boundIdentity == ownWindow.identity && $0.spaceID == 1
+        })
+
+        #expect(try await engine.switchSpace(to: 1, config: config).converged)
+        #expect(control.window(ownWindow.windowID)?.frame == originalFrame)
+        #expect(try await engine.switchSpace(to: 2, config: config).converged)
+        #expect(VisibilityPlanner.isHiddenWindowFrame(
+            frame: try #require(control.window(ownWindow.windowID)).frame,
+            displays: [TestFixtures.display]
+        ))
+    }
+
     @Test func visibilityPendingDoesNotBlockExplicitWorkspaceMove() async throws {
         let zoom = TestFixtures.window(
             id: 9,

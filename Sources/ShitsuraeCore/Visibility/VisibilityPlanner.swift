@@ -221,6 +221,10 @@ public enum VisibilityPlanner {
         hostDisplay: DisplayInfo,
         displays: [DisplayInfo]
     ) -> ResolvedFrame {
+        precondition(
+            displays.contains(where: { $0.id == hostDisplay.id }),
+            "hidden-window planning requires the host display in a non-empty display list"
+        )
         let width = max(1, window.frame.width)
         let height = max(1, window.frame.height)
         let targetDisplay = resolveTargetDisplay(entry: entry, window: window, displays: displays) ?? hostDisplay
@@ -232,6 +236,53 @@ public enum VisibilityPlanner {
         let minX = targetVisibleFrame.minX
         let maxX = max(minX, targetVisibleFrame.maxX - width)
         let x = min(max(referenceFrame.x, minX), maxX)
+        if height > width {
+            // AppKit keeps the title bar of a titled window reachable and
+            // clamps vertical offscreen requests back into the work area.
+            // The area-based choice below therefore fails specifically for
+            // portrait windows: their smaller top/bottom intersection makes
+            // it select a mutation macOS will not honor. Keep the proven v1
+            // planning for every other shape, and park only portrait windows
+            // beyond the nearest outer horizontal edge of the full display
+            // arrangement.
+            let arrangementFrames = displays.map(\.frame)
+            let arrangementMinX = arrangementFrames.map(\.minX).min() ?? targetVisibleFrame.minX
+            let arrangementMaxX = arrangementFrames.map(\.maxX).max() ?? targetVisibleFrame.maxX
+            let leftEdgeDisplays = displays.filter { $0.frame.minX == arrangementMinX }
+            let rightEdgeDisplays = displays.filter { $0.frame.maxX == arrangementMaxX }
+            let horizontalCandidates = [
+                ResolvedFrame(
+                    x: arrangementMinX - width + 1,
+                    y: horizontalParkingY(
+                        edgeDisplays: leftEdgeDisplays,
+                        preferredDisplayID: targetDisplay.id,
+                        referenceY: referenceFrame.y,
+                        windowHeight: height
+                    ),
+                    width: width,
+                    height: height
+                ),
+                ResolvedFrame(
+                    x: arrangementMaxX - 1,
+                    y: horizontalParkingY(
+                        edgeDisplays: rightEdgeDisplays,
+                        preferredDisplayID: targetDisplay.id,
+                        referenceY: referenceFrame.y,
+                        windowHeight: height
+                    ),
+                    width: width,
+                    height: height
+                ),
+            ]
+            return horizontalCandidates.enumerated().min { lhs, rhs in
+                let lhsTravel = squaredDistance(from: window.frame, to: lhs.element)
+                let rhsTravel = squaredDistance(from: window.frame, to: rhs.element)
+                if lhsTravel != rhsTravel {
+                    return lhsTravel < rhsTravel
+                }
+                return lhs.offset < rhs.offset
+            }?.element ?? horizontalCandidates[0]
+        }
         let candidates = [
             ResolvedFrame(
                 x: targetVisibleFrame.minX - width + 1,
@@ -263,6 +314,40 @@ public enum VisibilityPlanner {
             displayIntersectionArea(frame: lhs, displays: displays)
                 < displayIntersectionArea(frame: rhs, displays: displays)
         } ?? candidates[0]
+    }
+
+    private static func horizontalParkingY(
+        edgeDisplays: [DisplayInfo],
+        preferredDisplayID: String,
+        referenceY: CGFloat,
+        windowHeight: CGFloat
+    ) -> CGFloat {
+        precondition(!edgeDisplays.isEmpty)
+        return edgeDisplays.map { display in
+            let minY = display.visibleFrame.minY
+            let maxY = max(minY, display.visibleFrame.maxY - windowHeight)
+            let y = min(max(referenceY, minY), maxY)
+            return (
+                y: y,
+                travel: abs(y - referenceY),
+                preferredRank: display.id == preferredDisplayID ? 0 : 1,
+                displayID: display.id
+            )
+        }.min { lhs, rhs in
+            if lhs.travel != rhs.travel {
+                return lhs.travel < rhs.travel
+            }
+            if lhs.preferredRank != rhs.preferredRank {
+                return lhs.preferredRank < rhs.preferredRank
+            }
+            return lhs.displayID < rhs.displayID
+        }!.y
+    }
+
+    private static func squaredDistance(from source: ResolvedFrame, to destination: ResolvedFrame) -> CGFloat {
+        let deltaX = destination.x - source.x
+        let deltaY = destination.y - source.y
+        return deltaX * deltaX + deltaY * deltaY
     }
 
     static func resolveTargetDisplay(

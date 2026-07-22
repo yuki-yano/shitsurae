@@ -378,7 +378,32 @@ final class AppModel: ObservableObject {
     // MARK: - Actions
 
     func applyLayout(_ name: String, spaceID: Int?) {
+        applyLayout(name, spaceID: spaceID, shitsuraeWindow: nil)
+    }
+
+    func applyLayoutFromMainWindow(_ name: String, spaceID: Int?) {
+        let label = "arrange \(name)"
+        guard let shitsuraeWindow = shitsuraeMainWindowSelector() else {
+            let message = "Shitsurae main window is unavailable"
+            lastActionMessage = "\(label): \(message)"
+            actionStatus = .failed(label, message)
+            return
+        }
+        applyLayout(name, spaceID: spaceID, shitsuraeWindow: shitsuraeWindow)
+    }
+
+    private func applyLayout(
+        _ name: String,
+        spaceID: Int?,
+        shitsuraeWindow: WindowTargetSelector?
+    ) {
         runEngineAction("arrange \(name)", urgency: .interactive) { engine, config in
+            if shitsuraeWindow != nil,
+               let layout = config.config.layouts[name],
+               !layout.spaces.contains(where: { $0.spaceID == 1 })
+            {
+                throw VirtualSpaceEngineError.spaceNotFound(layoutName: name, spaceID: 1)
+            }
             let result = try await engine.arrange(layoutName: name, spaceID: spaceID, config: config)
             if result.result == "failed" {
                 let detail = result.hardErrors.map(\.message).joined(separator: "; ")
@@ -389,7 +414,34 @@ final class AppModel: ObservableObject {
                     message.isEmpty ? "arrange failed" : message
                 )
             }
+            if let shitsuraeWindow {
+                _ = try await engine.windowWorkspace(
+                    selector: shitsuraeWindow,
+                    toSpaceID: 1,
+                    config: config
+                )
+            }
         }
+    }
+
+    private func shitsuraeMainWindowSelector() -> WindowTargetSelector? {
+        let candidates = [NSApp.keyWindow, NSApp.mainWindow] + NSApp.windows.map(Optional.some)
+        guard let window = candidates.compactMap({ $0 }).first(where: {
+            $0.title == "Shitsurae" && $0.level == .normal && $0.windowNumber > 0
+        }), let bundleID = Bundle.main.bundleIdentifier
+        else {
+            return nil
+        }
+        let pid = Int(ProcessInfo.processInfo.processIdentifier)
+        guard let processStartTime = ProcessGenerationResolver.startTime(pid: pid) else {
+            return nil
+        }
+        return WindowTargetSelector(
+            windowID: UInt32(window.windowNumber),
+            pid: pid,
+            processStartTime: processStartTime,
+            bundleID: bundleID
+        )
     }
 
     func switchSpace(to spaceID: Int) {
