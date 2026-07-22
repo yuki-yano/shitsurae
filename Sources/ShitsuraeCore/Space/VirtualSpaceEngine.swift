@@ -46,8 +46,7 @@ private struct SpaceSwitchPreflightSnapshot {
     let targetAssignmentCount: Int
 
     var shouldReject: Bool {
-        (previousReservedCount > 0 && previousAssignmentCount == 0)
-            || (targetReservedCount > 0 && targetAssignmentCount == 0)
+        previousReservedCount > 0 || targetReservedCount > 0
     }
 }
 
@@ -69,16 +68,6 @@ public actor VirtualSpaceEngine {
     private var state: RuntimeState
     var latestFocusEventSequence: UInt64 = 0
     private static let focusVerificationDelaysMS = [20, 40, 80]
-
-    /// Windows an app refuses to move.
-    /// Tracked in memory only — a per-window count of consecutive switches
-    /// that left the window unconverged; once it reaches the threshold the
-    /// window is quarantined so it stops pinning convergence and dragging
-    /// every switch through the retry budget. A quarantined window is a hard
-    /// no-op until an explicit user move clears it or the exact window closes.
-    private var convergenceFailureCounts: [WindowIdentity: Int] = [:]
-    private var quarantinedWindowIdentities: Set<WindowIdentity> = []
-    private static let quarantineThreshold = 3
 
     /// Exact main windows temporarily kept on-screen because their focused
     /// companion surface must not be moved. The value is the workspace the
@@ -242,7 +231,8 @@ public actor VirtualSpaceEngine {
         to targetSpaceID: Int,
         config: LoadedConfig,
         reconcile: Bool = false,
-        adoptionIgnoreRules: IgnoreRuleSet? = nil
+        adoptionIgnoreRules: IgnoreRuleSet? = nil,
+        invalidateFocusEventsAfterSwitch: Bool = true
     ) throws -> SpaceSwitchOutcome {
         try ensureAccessibility()
         guard let layoutName = state.activeLayoutName else {
@@ -310,6 +300,13 @@ public actor VirtualSpaceEngine {
         }
 
         if preflight.shouldReject {
+            let reservedWindows = layoutSlots
+                .filter { preflight.reservedExactEntryIDs.contains($0.id) }
+                .map { entry in
+                    "\(entry.bundleID)#\(entry.windowID.map(String.init) ?? "?")"
+                }
+                .sorted()
+                .joined(separator: ";")
             logger.log(
                 level: "warn",
                 event: "space.switch.preflightRejected",
@@ -324,10 +321,11 @@ public actor VirtualSpaceEngine {
                     "previousAssignments": preflight.previousAssignmentCount,
                     "targetReserved": preflight.targetReservedCount,
                     "targetAssignments": preflight.targetAssignmentCount,
+                    "reservedWindows": reservedWindows,
                 ]
             )
             throw VirtualSpaceEngineError.stateError(
-                "window inventory temporarily lacks manageable bindings"
+                "window inventory has unresolved live exact bindings: \(reservedWindows)"
             )
         }
         if preflightAttempts > 1 {
@@ -342,7 +340,6 @@ public actor VirtualSpaceEngine {
         }
 
         let observation = preflight.observation
-        let focusBeforeVisibilityMutation = observation.focusedIdentity
         let inventory = observation.inventory
         let allWindows = inventory.windows
         let windows = preflight.manageableWindows
@@ -379,10 +376,6 @@ public actor VirtualSpaceEngine {
         )
 
         pruneIneligibleAdoptedEntriesInMemory(layoutName: layoutName, windows: allWindows)
-        // Drop quarantine bookkeeping for windows that no longer exist so a
-        // freshly opened window (new windowID) always gets a clean slate.
-        convergenceFailureCounts = convergenceFailureCounts.filter { inventory.mayContain($0.key) }
-        quarantinedWindowIdentities = Set(quarantinedWindowIdentities.filter { inventory.mayContain($0) })
         suspendedCompanionMainSpaces = suspendedCompanionMainSpaces.filter { inventory.mayContain($0.key) }
         let plan = SpaceSwitchPlanner.plan(
             slots: state.slots.filter { !protectedEntryIDs.contains($0.id) },
@@ -392,8 +385,7 @@ public actor VirtualSpaceEngine {
             manageableWindows: windows,
             fullInventory: inventory,
             hostDisplay: hostDisplay,
-            displays: displays,
-            quarantinedWindowIdentities: quarantinedWindowIdentities
+            displays: displays
         )
 
         let allVisibilityPlans = plan.shows + plan.hides
@@ -456,8 +448,6 @@ public actor VirtualSpaceEngine {
             logger: logger,
             retryDelaysMS: retryDelaysMS
         )
-        updateQuarantine(plannedChanges: applied, convergence: convergence)
-
         // Never focus a target whose show could not be verified. Activating an
         // offscreen/still-minimized MRU window can make AppKit briefly surface
         // the wrong application, and it hides the useful fallback window from
@@ -473,27 +463,28 @@ public actor VirtualSpaceEngine {
 
         // Geometry retries can make AppKit activate a sibling application. Do
         // not focus before those mutations settle: an early focus followed by
-        // this correction produces a visible app-to-app flash. Focus the MRU
-        // target once, after convergence. If focus changed from the pre-switch
-        // window to a non-target window while the switch was running, preserve
-        // that newer choice instead of taking focus back from the user.
+        // this correction produces a visible app-to-app flash. The switch owns
+        // its final focus decision, so an AppKit focus side effect during
+        // convergence must not override the target workspace MRU.
         var focusedIdentity: WindowIdentity?
         if !focusedMainIsBlocked, !focusCandidates.isEmpty {
             let intendedTopIdentity = focusCandidates[0].window.identity
             let liveFocus = control.focusedWindowObservation().focusedIdentity
-            let targetIdentities = Set(focusCandidates.map(\.window.identity))
-            let focusMovedOutsideTarget = liveFocus.map { identity in
-                identity != focusBeforeVisibilityMutation && !targetIdentities.contains(identity)
-            } ?? false
-
             if liveFocus == intendedTopIdentity {
                 focusedIdentity = intendedTopIdentity
-            } else if !focusMovedOutsideTarget {
+            } else {
                 focusedIdentity = focusTarget(
                     from: focusCandidates,
                     retryPreferredTransientFailure: true
                 )
             }
+        }
+        // Focus notifications caused by an explicit switch must not re-enter
+        // through AppModel later and turn an automatic fallback into user MRU.
+        // Follow-focus preserves its initiating sequence so AppModel can
+        // complete debounce and status updates after this method returns.
+        if invalidateFocusEventsAfterSwitch {
+            focusEventGate.invalidateCurrent()
         }
 
         // Persist: merge effective entries back by id, update active space,
@@ -501,7 +492,7 @@ public actor VirtualSpaceEngine {
         var newState = state
         var slotsByID = Dictionary(uniqueKeysWithValues: newState.slots.map { ($0.id, $0) })
         // `.none` is an intentional no-op (currently a manually minimized
-        // window). It has no physical state to converge or quarantine; merge
+        // window). It has no physical state to converge; merge
         // only its exact binding while preserving truthful visibility state.
         for visibilityPlan in mutationFreePlans {
             slotsByID[visibilityPlan.entryID] = visibilityPlan.desiredEntry
@@ -512,16 +503,10 @@ public actor VirtualSpaceEngine {
         for change in convergence.changes where !unsafeToMerge.contains(change.window.identity) {
             slotsByID[change.effectiveEntry.id] = change.effectiveEntry
         }
-        if let focusedIdentity,
-           let focusEntry = focusCandidates.first(where: {
-               $0.window.identity == focusedIdentity
-           })?.entry,
-           var entry = slotsByID[focusEntry.id],
-           entry.boundIdentity == focusedIdentity
-        {
-            entry.lastActivatedAt = Date.rfc3339UTC()
-            slotsByID[entry.id] = entry
-        }
+        // Workspace restoration consumes MRU but never produces it. Only a
+        // genuine focus event or an explicit focus command may update
+        // `lastActivatedAt`; otherwise a transient preferred-target failure
+        // would permanently promote the fallback window.
         // Adopted entries are exact-only bindings. If their concrete window
         // identity is gone, drop them instead of rebinding to another window
         // from the same application or polluting recovery state forever.
@@ -552,10 +537,6 @@ public actor VirtualSpaceEngine {
             !displays.contains(where: { $0.id == entry.displayID })
         }
         newState.activeLayoutName = layoutName
-        // Quarantined windows are an accepted degraded mode: their verified
-        // result is merged, while unknown/unsettled results keep the
-        // conservative WAL entry above. They must not pin global recovery;
-        // shutdown can still restore every WAL-hidden entry.
         let requiresRecovery = convergence.hasPending || !plan.unresolvedEntryIDs.isEmpty
         newState.pendingVisibilityConvergence = requiresRecovery
             ? PendingVisibilityConvergence(
@@ -656,34 +637,35 @@ public actor VirtualSpaceEngine {
             processStartTime: target.window.processStartTime,
             bundleID: target.window.bundleID
         )
-        if activated {
-            let retryResult = control.focusWindow(
+        // Activation may report false when the application is already
+        // frontmost or while AppKit is still settling. Retrying the exact
+        // preferred window is useful and safe regardless of that boolean.
+        let retryResult = control.focusWindow(
+            windowID: target.window.windowID,
+            pid: target.window.pid,
+            processStartTime: target.window.processStartTime,
+            bundleID: target.window.bundleID
+        )
+        if retryResult.isSuccess, waitForFocusedWindow(identity: target.window.identity) {
+            return true
+        }
+
+        // Prefer waiting briefly for the MRU window over activating a
+        // fallback application and correcting back to MRU later. This is a
+        // third targeted attempt in the same final focus phase, so a
+        // transient AX rejection does not create an app-to-app flash.
+        if retryTransientFailure {
+            control.sleep(milliseconds: Self.focusVerificationDelaysMS[0])
+            let settledRetryResult = control.focusWindow(
                 windowID: target.window.windowID,
                 pid: target.window.pid,
                 processStartTime: target.window.processStartTime,
                 bundleID: target.window.bundleID
             )
-            if retryResult.isSuccess, waitForFocusedWindow(identity: target.window.identity) {
+            if settledRetryResult.isSuccess,
+               waitForFocusedWindow(identity: target.window.identity)
+            {
                 return true
-            }
-
-            // Prefer waiting briefly for the MRU window over activating a
-            // fallback application and correcting back to MRU later. This is a
-            // third targeted attempt in the same final focus phase, so a
-            // transient AX rejection does not create an app-to-app flash.
-            if retryTransientFailure {
-                control.sleep(milliseconds: Self.focusVerificationDelaysMS[0])
-                let settledRetryResult = control.focusWindow(
-                    windowID: target.window.windowID,
-                    pid: target.window.pid,
-                    processStartTime: target.window.processStartTime,
-                    bundleID: target.window.bundleID
-                )
-                if settledRetryResult.isSuccess,
-                   waitForFocusedWindow(identity: target.window.identity)
-                {
-                    return true
-                }
             }
         }
 
@@ -874,11 +856,6 @@ public actor VirtualSpaceEngine {
             )]
         )
         try persist(intentState)
-
-        // An explicit user move is a fresh chance: drop quarantine bookkeeping
-        // after the write-ahead record is durable.
-        quarantinedWindowIdentities.remove(window.identity)
-        convergenceFailureCounts[window.identity] = 0
 
         let applied = VisibilityApplier.apply(plans: [plan], control: control, logger: logger)
         let convergence = VisibilityApplier.converge(
@@ -1249,41 +1226,6 @@ public actor VirtualSpaceEngine {
         var newState = state
         newState.slots.removeAll { ineligibleIDs.contains($0.id) }
         replaceStateInMemory(newState)
-    }
-
-    /// Counts consecutive unconverged switches per window and quarantines a
-    /// window once it crosses the threshold. A window that converges resets its
-    /// count; quarantined windows leave geometry planning until an explicit
-    /// workspace move clears them or they close.
-    private func updateQuarantine(
-        plannedChanges: [AppliedVisibilityChange],
-        convergence: ConvergenceOutcome
-    ) {
-        let desiredUnresolved = Set(convergence.desiredUnresolvedWindowIdentities)
-        let unverified = Set(convergence.unverifiedWindowIdentities)
-        for change in plannedChanges {
-            let identity = change.window.identity
-            // Unknown inventory state is not an application refusing geometry;
-            // preserve the existing count and wait for an authoritative pass.
-            guard !unverified.contains(identity) else { continue }
-            guard desiredUnresolved.contains(identity) else {
-                convergenceFailureCounts[identity] = 0
-                continue
-            }
-            let count = (convergenceFailureCounts[identity] ?? 0) + 1
-            convergenceFailureCounts[identity] = count
-            if count >= Self.quarantineThreshold, quarantinedWindowIdentities.insert(identity).inserted {
-                logger.log(
-                    level: "warn",
-                    event: "visibility.quarantine",
-                    fields: [
-                        "windowID": Int(identity.windowID),
-                        "bundleID": change.window.bundleID,
-                        "failures": count,
-                    ]
-                )
-            }
-        }
     }
 
     /// A write-ahead entry must be safe on both sides of the physical AX

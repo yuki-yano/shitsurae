@@ -256,7 +256,7 @@ layouts:
 
 `shitsurae arrange <layout>` を 1 回実行するだけです。ウィンドウの起動・配置・追跡・非アクティブ workspace の退避までまとめて行われます。GUI では *Apply All* が同じ操作です。
 
-- runtime state はアプリ終了時に毎回破棄されます。次回起動後も apply から始めてください
+- runtime state はアプリ終了時にすべての hidden window を復元できた場合に破棄されます。復元を確認できない場合は、次回の recovery のため保持されます
 - `--dry-run --json` で実行計画と `availableSpaceIDs` を事前確認できます
 - `--state-only` はウィンドウを動かさずに追跡状態だけ作る上級者向けオプションです(通常は不要)
 

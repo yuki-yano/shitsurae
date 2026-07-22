@@ -195,7 +195,11 @@ public extension VirtualSpaceEngine {
         }
         let observation = control.focusedWindowObservation()
         guard observation.focusedIdentity == identity else { return nil }
-        return try switchSpace(to: targetSpaceID, config: config)
+        return try switchSpace(
+            to: targetSpaceID,
+            config: config,
+            invalidateFocusEventsAfterSwitch: false
+        )
     }
 
     func invalidateFocusEvents(upTo sequence: UInt64) {
@@ -399,20 +403,10 @@ public extension VirtualSpaceEngine {
             return BoundWindow(entry: entry, window: window)
         }
         let ordered = SpaceSwitchPlanner.preferredFocusCandidates(from: candidates)
-        guard let focusedIdentity = focusTarget(from: ordered) else { return nil }
-
-        if let focused = ordered.first(where: { $0.window.identity == focusedIdentity }) {
-            var newState = currentState
-            newState.slots = newState.slots.map { entry in
-                guard entry.id == focused.entry.id else { return entry }
-                var updated = entry.bound(to: focused.window)
-                updated.lastActivatedAt = Date.rfc3339UTC()
-                return updated
-            }
-            try replaceState(newState)
-        }
-
-        return focusedIdentity
+        // Termination recovery consumes the workspace MRU but must not rewrite
+        // it. In particular, a fallback selected after a transient preferred
+        // focus failure is not evidence of user activation.
+        return focusTarget(from: ordered)
     }
 
     func applyFocus(window: WindowSnapshot) throws {

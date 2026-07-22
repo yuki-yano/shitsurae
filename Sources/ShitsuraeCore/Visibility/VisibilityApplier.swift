@@ -37,17 +37,15 @@ public struct ConvergenceOutcome: Equatable, Sendable {
     public let retryCount: Int
     public let verifyCount: Int
     /// Identities whose final state could not be verified authoritatively.
-    /// They remain pending, but are neither rolled back nor counted toward
-    /// quarantine because absence from a failed/partial inventory is unknown.
+    /// They remain pending because absence from a failed/partial inventory is
+    /// unknown.
     public let unverifiedWindowIdentities: [WindowIdentity]
     /// Identities that did not reach the requested visibility, even when an
     /// authoritative snapshot proves they safely remained at the original
-    /// state. Normal switching counts these failures toward quarantine.
+    /// state.
     public let desiredUnresolvedWindowIdentities: [WindowIdentity]
-    /// Exact window identities that never reached their effective state within the retry
-    /// budget. Callers use this to quarantine windows an app refuses to move
-    /// (e.g. Chrome remote-debug popups) so one stuck window can't keep every
-    /// space switch unconverged.
+    /// Exact window identities that never reached their effective state within
+    /// the retry budget.
     public let unconvergedWindowIdentities: [WindowIdentity]
 
     public init(

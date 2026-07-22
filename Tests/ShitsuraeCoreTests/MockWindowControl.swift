@@ -27,6 +27,7 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     var failUnminimizeWindowIDs: Set<UInt32> = []
     var failFocusWindowIDs: Set<UInt32> = []
     var failFocusAttemptsRemainingByWindowID: [UInt32: Int] = [:]
+    var failActivationBundleIDs: Set<String> = []
     /// When set, every setWindowPosition *attempt* (whether or not the write
     /// succeeds) re-points key focus to this window — models the real macOS
     /// race where windows settling during convergence change key focus before
@@ -321,6 +322,9 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     func activateApplication(pid: Int, processStartTime: UInt64, bundleID: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
+        guard !failActivationBundleIDs.contains(bundleID) else {
+            return false
+        }
         guard windowsByID.values.contains(where: {
             $0.pid == pid
                 && $0.processStartTime == processStartTime

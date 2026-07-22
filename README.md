@@ -240,7 +240,7 @@ layouts:
 
 Run `shitsurae arrange <layout>` once — it launches, places and tracks every window and parks inactive workspaces. *Apply All* in the GUI does the same.
 
-- The runtime state is discarded every time the app quits; start each session with an apply
+- The runtime state is discarded after the app restores every hidden window on quit. If restoration cannot be verified, it is retained for the next recovery attempt.
 - `--dry-run --json` previews the plan and `availableSpaceIDs`
 - `--state-only` builds tracking state without moving windows (advanced; normally unnecessary)
 

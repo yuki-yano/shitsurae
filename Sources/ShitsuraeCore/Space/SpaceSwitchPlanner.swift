@@ -54,8 +54,7 @@ public enum SpaceSwitchPlanner {
         manageableWindows: [WindowSnapshot],
         fullInventory: WindowInventory,
         hostDisplay: DisplayInfo,
-        displays: [DisplayInfo],
-        quarantinedWindowIdentities: Set<WindowIdentity> = []
+        displays: [DisplayInfo]
     ) -> SpaceSwitchPlan {
         let layoutSlots = slots.filter { $0.layoutName == layoutName }
         let entryByID = Dictionary(uniqueKeysWithValues: layoutSlots.map { ($0.id, $0) })
@@ -70,12 +69,6 @@ public enum SpaceSwitchPlanner {
         var others: [BoundWindow] = []
         for (entryID, window) in resolution.assignments {
             guard let entry = entryByID[entryID] else { continue }
-            // Quarantined windows are ones an app refused to move. Keep them
-            // out of geometry and focus planning until an explicit user move
-            // clears quarantine or the exact identity disappears.
-            if quarantinedWindowIdentities.contains(window.identity) {
-                continue
-            }
             if entry.spaceID == targetSpaceID {
                 targets.append(BoundWindow(entry: entry, window: window))
             } else {
