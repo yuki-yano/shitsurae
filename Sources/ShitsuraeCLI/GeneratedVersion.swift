@@ -1,3 +1,3 @@
 enum ShitsuraeCLIVersion {
-    static let current = "1.0.20"
+    static let current = "2.0.0"
 }
