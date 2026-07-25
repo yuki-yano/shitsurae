@@ -65,10 +65,10 @@ public struct ShitsuraeConfigFile: Decodable {
            let modeContainer = try? container.nestedContainer(keyedBy: ModeProbeKeys.self, forKey: .mode),
            modeContainer.contains(.space)
         {
-            removedKeyMessages.append("mode.space was removed in v2 (always virtual)")
+            removedKeyMessages.append("mode.space was removed in 1.1 (always virtual)")
         }
         if container.contains(.executionPolicy) {
-            removedKeyMessages.append("executionPolicy was removed in v2 (Mission Control support was dropped)")
+            removedKeyMessages.append("executionPolicy was removed in 1.1 (Mission Control support was dropped)")
         }
         if !removedKeyMessages.isEmpty {
             throw ShitsuraeError(
@@ -98,7 +98,7 @@ public struct AppDefinition: Codable, Equatable, Sendable {
     }
 }
 
-/// v2: only followFocus remains. `mode.space` was removed together with native
+/// Since 1.1, only followFocus remains. `mode.space` was removed together with native
 /// (Mission Control) mode; specifying it is a hard validation error.
 public struct ModeDefinition: Codable, Equatable, Sendable {
     public let followFocus: Bool?
@@ -117,7 +117,7 @@ public struct ModeDefinition: Codable, Equatable, Sendable {
         if container.contains(.space) {
             throw ShitsuraeError(
                 .validationError,
-                "mode.space was removed in v2 (always virtual); delete the mode.space key",
+                "mode.space was removed in 1.1 (always virtual); delete the mode.space key",
                 subcode: "removedConfigKey"
             )
         }

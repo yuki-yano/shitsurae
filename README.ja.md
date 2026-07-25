@@ -11,7 +11,7 @@
 名前の由来は *室礼(しつらえ)*——季節や行事に合わせて室内の調度品を整え、空間を美しく機能的に仕立てる日本の伝統文化です。物理的な部屋の室礼と同じように、デジタルの作業空間にも"しつらえ"の美学を持ち込むことがコンセプトです。
 
 > [!NOTE]
-> v2 で Mission Control / macOS ネイティブ Space 連携を廃止し、独自仮想デスクトップ専用に書き直しました。移行手順は [v1 からの移行](#v1-からの移行) を参照してください。
+> v1.1 で Mission Control / macOS ネイティブ Space 連携を廃止し、独自仮想デスクトップ専用に書き直しました。移行手順は [v1 からの移行](#v1-からの移行) を参照してください。
 
 ## 解決する課題
 
@@ -171,7 +171,7 @@ layouts:
 
 GUIのArrange画面では、接続displayごとにLayoutとSpaceを選び、行の**Apply**でそのdisplayだけを適用できます。同じ選択から**Apply Display Set**を押すと、選択した全displayの全workspaceを一括適用します。Virtual Workspaces欄にはactive workspaceごとのSpaceボタンが表示されるため、secondary側だけを切り替える操作も可能です。Workspace State画面も全active layoutを表示し、secondaryに所有されるwindowをUnmanagedとして扱いません。
 
-v2.0 からの移行: `spaces[].display` は削除されました。`layouts.<name>.display` へ移動してください（ホストディスプレイはレイアウトにつき 1 枚。従来から validator が強制していた不変条件です）。
+既存設定の`spaces[].display`は削除されました。`layouts.<name>.display`へ移動してください（ホストディスプレイはレイアウトにつき1枚。従来からvalidatorが強制していた不変条件です）。
 
 ### 9. 設定自動リロード
 
@@ -189,7 +189,7 @@ v2.0 からの移行: `spaces[].display` は削除されました。`layouts.<na
 
 ## アーキテクチャ
 
-v2 は 2 プロセス構成です:
+Shitsuraeは2プロセス構成です:
 
 - **Shitsurae.app** — メニューバー常駐 GUI。仮想 workspace 状態の唯一のオーナーで、ホットキー・スイッチャー・follow-focus・設定リロードを担当
 - **shitsurae CLI** — Unix ドメインソケット経由でアプリに接続する薄いクライアント
@@ -312,7 +312,7 @@ layouts:
 - `excludeTitleRegex` —— タイトルが一致するウィンドウを除外
 
 > [!IMPORTANT]
-> 同じ `bundleID` を複数のスロットで使う場合は、各スロットに `title` / `profile` / `index` のいずれかの区別子が必須です(設定ロード時に検証されます)。区別子なしの曖昧なマッチングは、ウィンドウの追跡破綻の原因になるため v2 ではエラーになります。
+> 同じ `bundleID` を複数のスロットで使う場合は、各スロットに `title` / `profile` / `index` のいずれかの区別子が必須です(設定ロード時に検証されます)。区別子なしの曖昧なマッチングは、ウィンドウの追跡破綻の原因になるためエラーになります。
 
 ### Chromium 系ブラウザの profile 指定
 
@@ -434,7 +434,7 @@ shortcuts:
 
 ## v1 からの移行
 
-v2 は Mission Control / ネイティブ Space 連携を廃止しました。互換性のための変更点:
+v1.1はMission Control / ネイティブSpace連携を廃止しました。移行時の変更点:
 
 1. **設定ファイル**: 次の 2 キーを削除してください(残っているとロード時エラーになります)
    - `mode.space`(常に virtual 動作になりました。`mode.followFocus` はそのまま使えます)

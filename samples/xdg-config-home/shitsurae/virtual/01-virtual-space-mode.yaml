@@ -1,7 +1,7 @@
 # arrange command: shitsurae arrange virtualWork --dry-run --json
 # bootstrap command: shitsurae arrange virtualWork --state-only --space 1 --json
 # expected exit code: 0
-# v2: mode.space is gone - Shitsurae always manages virtual workspaces.
+# Since v1.1, mode.space is gone - Shitsurae always manages virtual workspaces.
 
 shortcuts:
   moveCurrentWindowToSpace:

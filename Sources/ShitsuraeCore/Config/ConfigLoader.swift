@@ -299,14 +299,14 @@ public final class ConfigLoader: @unchecked Sendable {
             if text.contains("mode.space") {
                 return ShitsuraeError(
                     .validationError,
-                    "mode.space was removed in v2 (always virtual); delete the mode.space key",
+                    "mode.space was removed in 1.1 (always virtual); delete the mode.space key",
                     subcode: "removedConfigKey"
                 )
             }
             if text.contains("executionPolicy") {
                 return ShitsuraeError(
                     .validationError,
-                    "executionPolicy was removed in v2 (Mission Control support was dropped); delete the executionPolicy section",
+                    "executionPolicy was removed in 1.1 (Mission Control support was dropped); delete the executionPolicy section",
                     subcode: "removedConfigKey"
                 )
             }

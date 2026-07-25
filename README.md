@@ -11,7 +11,7 @@
 The name comes from *shitsurai* (室礼) — the Japanese tradition of arranging a room's furnishings to suit the season and the occasion, making the space both beautiful and functional. Shitsurae brings that aesthetic to your digital workspace.
 
 > [!NOTE]
-> v2 is a ground-up rewrite that drops Mission Control / native macOS Spaces integration entirely in favor of self-managed virtual workspaces. See [Migrating from v1](#migrating-from-v1).
+> v1.1 drops Mission Control / native macOS Spaces integration entirely in favor of self-managed virtual workspaces. See [Migrating from v1](#migrating-from-v1).
 
 ## Problems it solves
 
@@ -158,7 +158,7 @@ layouts:
 
 In the GUI Arrange screen, select a Layout and Space for each connected display. Use the row’s **Apply** button to apply only that display, or **Apply Display Set** to apply every selected display’s complete workspace set together. The Virtual Workspaces card exposes Space buttons for every active workspace, so a secondary workspace can be switched independently. Workspace State also lists every active layout and does not classify secondary-owned windows as unmanaged.
 
-Migrating from v2.0: `spaces[].display` was removed — move the block to `layouts.<name>.display` (one host display per layout; this was already enforced).
+For existing configs, `spaces[].display` was removed — move the block to `layouts.<name>.display` (one host display per layout; this was already enforced).
 
 ### 9. Config auto-reload
 
@@ -176,7 +176,7 @@ No network access is needed in normal operation.
 
 ## Architecture
 
-v2 is a two-process design:
+Shitsurae uses a two-process design:
 
 - **Shitsurae.app** — menu-bar resident GUI; the single owner of virtual workspace state; hotkeys, switcher, follow-focus, config reload
 - **shitsurae CLI** — a thin client connected over a unix domain socket
@@ -294,7 +294,7 @@ Run `shitsurae arrange <layout>` once — it launches, places and tracks every w
 - `excludeTitleRegex`
 
 > [!IMPORTANT]
-> When the same `bundleID` appears in multiple slots, every one of those slots must carry a discriminator (`title` / `profile` / `index`). Ambiguous matchers are a config-load error in v2 — they were the root cause of v1's window-tracking corruption.
+> When the same `bundleID` appears in multiple slots, every one of those slots must carry a discriminator (`title` / `profile` / `index`). Ambiguous matchers are a config-load error — they were the root cause of earlier window-tracking corruption.
 
 ### Chromium profiles
 
@@ -405,7 +405,7 @@ shortcuts:
 1. **Config**: delete these keys (they are load errors now):
    - `mode.space` (always virtual; `mode.followFocus` still works)
    - `executionPolicy` (whole section)
-2. **Runtime state**: unsupported or corrupt state is preserved and startup stops instead of assuming no windows are parked. Quit the previous version normally to restore its windows, then move `~/.local/state/shitsurae/runtime-state.json` aside and apply a v2 layout. The same applies when upgrading right after a crash / SIGKILL (a clean quit clears the state, so the normal update path never hits this): launch the previous version once and quit it cleanly, or rescue any parked windows by hand before deleting the state file.
+2. **Runtime state**: unsupported or corrupt state is preserved and startup stops instead of assuming no windows are parked. Quit the previous version normally to restore its windows, then move `~/.local/state/shitsurae/runtime-state.json` aside and apply the current layout. The same applies when upgrading right after a crash / SIGKILL (a clean quit clears the state, so the normal update path never hits this): launch the previous version once and quit it cleanly, or rescue any parked windows by hand before deleting the state file.
 3. **Same app in multiple slots**: each slot now needs a `title` / `profile` / `index` discriminator.
 4. **ShitsuraeAgent is gone**: you can delete `~/Library/LaunchAgents/com.yuki-yano.shitsurae.agent.plist` if it remains.
 
