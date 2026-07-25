@@ -31,7 +31,7 @@ struct WorkspaceStateSection: View {
                         )
                     }
 
-                    if snapshot.layoutName == nil {
+                    if snapshot.layoutNames.isEmpty {
                         ContentUnavailableView(
                             "No active layout",
                             systemImage: "rectangle.3.group",
@@ -106,8 +106,10 @@ private struct WorkspaceStateSummary: View {
         LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
             WorkspaceStateMetric(
                 systemImage: "square.grid.2x2",
-                label: "Layout",
-                value: snapshot.layoutName ?? "—"
+                label: "Layouts",
+                value: snapshot.layoutNames.isEmpty
+                    ? "—"
+                    : snapshot.layoutNames.joined(separator: ", ")
             )
             WorkspaceStateMetric(
                 systemImage: "square.3.layers.3d",
@@ -253,8 +255,10 @@ private struct WorkspaceStateCard: View {
         HStack(spacing: 8) {
             Image(systemName: workspace.isActive ? "square.3.layers.3d.top.filled" : "square.3.layers.3d")
                 .foregroundStyle(workspace.isActive ? Color.accentColor : .secondary)
-            Text("Space \(workspace.spaceID)")
+            Text(workspace.layoutName)
                 .font(.headline)
+            Text("Space \(workspace.spaceID)")
+                .font(.subheadline)
             if workspace.isActive {
                 WorkspaceStatePill(label: "Active", systemImage: "circle.fill", tint: .green)
             }

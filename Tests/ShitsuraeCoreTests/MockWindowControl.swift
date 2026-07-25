@@ -8,7 +8,7 @@ import Foundation
 final class MockWindowControl: WindowControl, @unchecked Sendable {
     private let lock = NSLock()
     private var windowsByID: [UInt32: WindowSnapshot]
-    private let displayList: [DisplayInfo]
+    private var displayList: [DisplayInfo]
 
     var failFrameWindowIDs: Set<UInt32> = []
     var failPositionWindowIDs: Set<UInt32> = []
@@ -183,7 +183,17 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     }
 
     func displays() -> [DisplayInfo] {
-        displayList
+        lock.lock()
+        defer { lock.unlock() }
+        return displayList
+    }
+
+    /// Simulates display connect/disconnect (and reconnects that change the
+    /// display UUID) for multi-display workspace tests.
+    func setDisplays(_ displays: [DisplayInfo]) {
+        lock.lock()
+        defer { lock.unlock() }
+        displayList = displays
     }
 
     func setWindowFrame(
@@ -425,6 +435,18 @@ enum TestFixtures {
         visibleFrame: CGRect(x: 0, y: 0, width: 1440, height: 875)
     )
 
+    static func secondaryDisplay(id: String = "uuid-sub") -> DisplayInfo {
+        DisplayInfo(
+            id: id,
+            width: 2560,
+            height: 1440,
+            scale: 2,
+            isPrimary: false,
+            frame: CGRect(x: 1440, y: 0, width: 1280, height: 720),
+            visibleFrame: CGRect(x: 1440, y: 0, width: 1280, height: 720)
+        )
+    }
+
     static func window(
         id: UInt32,
         bundleID: String,
@@ -439,7 +461,8 @@ enum TestFixtures {
         isAXBacked: Bool,
         minimized: Bool = false,
         isFullscreen: Bool = false,
-        frontIndex: Int = 0
+        frontIndex: Int = 0,
+        displayID: String? = nil
     ) -> WindowSnapshot {
         let resolvedPID = pid ?? Int(id) * 10
         return WindowSnapshot(
@@ -456,7 +479,7 @@ enum TestFixtures {
             minimized: minimized,
             hidden: false,
             frame: frame,
-            displayID: display.id,
+            displayID: displayID ?? display.id,
             isFullscreen: isFullscreen,
             frontIndex: frontIndex
         )

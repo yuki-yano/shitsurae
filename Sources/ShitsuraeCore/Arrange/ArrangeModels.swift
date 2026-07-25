@@ -115,3 +115,36 @@ public struct ArrangeExecutionJSON: Codable, Equatable, Sendable {
         self.exitCode = exitCode
     }
 }
+
+/// Logical batch result for layouts hosted by distinct displays.
+/// Window mutations are serialized by the engine actor; this contract reports
+/// every per-layout result without claiming physical atomicity.
+public struct ArrangeBatchExecutionJSON: Codable, Equatable, Sendable {
+    public let schemaVersion: Int
+    public let requestID: String
+    public let result: String
+    public let layouts: [ArrangeExecutionJSON]
+    public let exitCode: Int
+
+    public init(
+        requestID: String = UUID().uuidString.lowercased(),
+        layouts: [ArrangeExecutionJSON]
+    ) {
+        self.schemaVersion = 1
+        self.requestID = requestID
+        self.layouts = layouts
+
+        let successfulCount = layouts.filter { $0.result == "success" }.count
+        let failedCount = layouts.filter { $0.result == "failed" }.count
+        if failedCount == layouts.count {
+            self.result = "failed"
+            self.exitCode = layouts.first?.exitCode ?? ErrorCode.validationError.rawValue
+        } else if successfulCount == layouts.count {
+            self.result = "success"
+            self.exitCode = ErrorCode.success.rawValue
+        } else {
+            self.result = "partial"
+            self.exitCode = ErrorCode.partialSuccess.rawValue
+        }
+    }
+}

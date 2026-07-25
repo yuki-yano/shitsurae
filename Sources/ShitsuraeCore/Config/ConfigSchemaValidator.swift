@@ -116,11 +116,15 @@ enum ConfigSchemaValidator {
     ])
     private static let space = Schema.mapping(fields: [
         "spaceID": .scalar,
-        "display": display,
+        // Removed key kept in the schema so the dedicated removed-key
+        // diagnostic from SpaceDefinition decoding remains more actionable
+        // than "unknown key".
+        "display": .opaque,
         "windows": .sequence(window),
     ])
     private static let layout = Schema.mapping(fields: [
         "initialFocus": .mapping(fields: ["slot": .scalar]),
+        "display": display,
         "spaces": .sequence(space),
     ])
     private static let ignoreWindow = Schema.mapping(fields: [

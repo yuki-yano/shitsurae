@@ -107,17 +107,18 @@ public struct WorkspaceUnmanagedWindowState: Equatable, Sendable, Identifiable {
 }
 
 public struct WorkspaceStateGroup: Equatable, Sendable, Identifiable {
+    public let layoutName: String
     public let spaceID: Int
     public let activeDisplayIDs: [String]
     public let windows: [WorkspaceTrackedWindowState]
     public let pendingUnresolvedSlots: [PendingUnresolvedSlot]
 
-    public var id: Int { spaceID }
+    public var id: String { "\(layoutName)\u{0}\(spaceID)" }
     public var isActive: Bool { !activeDisplayIDs.isEmpty }
 }
 
 public struct WorkspaceStateSnapshot: Equatable, Sendable {
-    public let layoutName: String?
+    public let layoutNames: [String]
     public let revision: UInt64
     public let inventoryAvailability: WorkspaceInventoryAvailability
     public let recoveryRequired: Bool
@@ -155,89 +156,103 @@ public extension VirtualSpaceEngine {
         let inventory = observation.inventory
         let displays = control.displays()
         let blockedIdentities = WindowEligibility.geometryBlockedIdentities(in: observation)
-        let layoutName = state.activeLayoutName
-        let slots = layoutName.map { state.slots(layoutName: $0) } ?? []
-
-        let configuredSpaceIDs = layoutName.flatMap { name in
-            config?.config.layouts[name]?.spaces.map(\.spaceID)
-        } ?? []
-        let spaceIDs = Set(configuredSpaceIDs)
-            .union(slots.map(\.spaceID))
-            .union(state.activeSpaces.map(\.spaceID))
-            .union(state.pendingVisibilityConvergence?.unresolvedSlots.map(\.spaceID) ?? [])
-            .sorted()
+        var seenLayoutNames = Set<String>()
+        let layoutNames = state.activeWorkspaces.compactMap { workspace in
+            seenLayoutNames.insert(workspace.layoutName).inserted
+                ? workspace.layoutName
+                : nil
+        }
 
         let ownershipWindows = inventory.windows.filter {
             WindowEligibility.classification(of: $0) == .manageable
         }
         let resolution = inventory.isAuthoritative
             ? WindowRegistry.resolve(
-                entries: slots.map(\.registryEntry),
+                entries: state.slots.map(\.registryEntry),
                 manageableWindows: ownershipWindows,
                 fullInventory: inventory
             )
             : nil
 
-        let entriesBySpace = Dictionary(grouping: slots, by: \.spaceID)
-        let workspaces = spaceIDs.map { spaceID in
-            let trackedWindows = (entriesBySpace[spaceID] ?? []).map { entry in
-                let liveWindow = resolution?.assignments[entry.id].map {
-                    WorkspaceLiveWindowState(
-                        window: $0,
-                        displays: displays,
-                        focusedIdentity: observation.focusedIdentity,
-                        blockedIdentities: blockedIdentities
+        let workspaces = layoutNames.flatMap { layoutName -> [WorkspaceStateGroup] in
+            let activeWorkspaces = state.activeWorkspaces.filter {
+                $0.layoutName == layoutName
+            }
+            let pendingSlots = activeWorkspaces.compactMap {
+                state.pendingVisibilityConvergence(displayID: $0.displayID)
+            }.flatMap(\.unresolvedSlots)
+            let slots = state.slots(layoutName: layoutName)
+            let configuredSpaceIDs = config?.config.layouts[layoutName]?
+                .spaces.map(\.spaceID) ?? []
+            let spaceIDs = Set(configuredSpaceIDs)
+                .union(slots.map(\.spaceID))
+                .union(activeWorkspaces.map(\.spaceID))
+                .union(pendingSlots.map(\.spaceID))
+                .sorted()
+            let entriesBySpace = Dictionary(grouping: slots, by: \.spaceID)
+
+            return spaceIDs.map { spaceID in
+                let trackedWindows = (entriesBySpace[spaceID] ?? []).map { entry in
+                    let liveWindow = resolution?.assignments[entry.id].map {
+                        WorkspaceLiveWindowState(
+                            window: $0,
+                            displays: displays,
+                            focusedIdentity: observation.focusedIdentity,
+                            blockedIdentities: blockedIdentities
+                        )
+                    }
+                    let previewFrame: ResolvedFrame?
+                    let previewFrameSource: WorkspaceWindowPreviewFrameSource?
+                    if let liveWindow, liveWindow.actualVisibility != .hiddenOffscreen {
+                        previewFrame = liveWindow.frame
+                        previewFrameSource = .liveFrame
+                    } else if let lastVisibleFrame = entry.lastVisibleFrame {
+                        previewFrame = lastVisibleFrame
+                        previewFrameSource = .lastVisibleFrame
+                    } else {
+                        previewFrame = nil
+                        previewFrameSource = nil
+                    }
+                    return WorkspaceTrackedWindowState(
+                        entryID: entry.id,
+                        slot: entry.slot,
+                        origin: entry.origin,
+                        bundleID: entry.bundleID,
+                        trackedTitle: entry.title,
+                        profile: entry.profile,
+                        displayID: liveWindow?.displayID ?? entry.displayID,
+                        trackedVisibility: entry.visibilityState,
+                        bindingState: Self.workspaceBindingState(
+                            entryID: entry.id,
+                            resolution: resolution,
+                            inventoryAvailable: inventory.isAuthoritative
+                        ),
+                        liveWindow: liveWindow,
+                        previewFrame: previewFrame,
+                        previewFrameSource: previewFrameSource,
+                        pendingReasons: pendingSlots
+                            .filter { $0.spaceID == spaceID && $0.slot == entry.slot }
+                            .map(\.reason)
                     )
                 }
-                let previewFrame: ResolvedFrame?
-                let previewFrameSource: WorkspaceWindowPreviewFrameSource?
-                if let liveWindow, liveWindow.actualVisibility != .hiddenOffscreen {
-                    previewFrame = liveWindow.frame
-                    previewFrameSource = .liveFrame
-                } else if let lastVisibleFrame = entry.lastVisibleFrame {
-                    previewFrame = lastVisibleFrame
-                    previewFrameSource = .lastVisibleFrame
-                } else {
-                    previewFrame = nil
-                    previewFrameSource = nil
+                .sorted { lhs, rhs in
+                    if lhs.slot != rhs.slot { return lhs.slot < rhs.slot }
+                    if lhs.origin != rhs.origin { return lhs.origin == .layout }
+                    return lhs.entryID < rhs.entryID
                 }
-                return WorkspaceTrackedWindowState(
-                    entryID: entry.id,
-                    slot: entry.slot,
-                    origin: entry.origin,
-                    bundleID: entry.bundleID,
-                    trackedTitle: entry.title,
-                    profile: entry.profile,
-                    displayID: liveWindow?.displayID ?? entry.displayID,
-                    trackedVisibility: entry.visibilityState,
-                    bindingState: Self.workspaceBindingState(
-                        entryID: entry.id,
-                        resolution: resolution,
-                        inventoryAvailable: inventory.isAuthoritative
-                    ),
-                    liveWindow: liveWindow,
-                    previewFrame: previewFrame,
-                    previewFrameSource: previewFrameSource,
-                    pendingReasons: state.pendingVisibilityConvergence?.unresolvedSlots
-                        .filter { $0.spaceID == spaceID && $0.slot == entry.slot }
-                        .map(\.reason) ?? []
+
+                return WorkspaceStateGroup(
+                    layoutName: layoutName,
+                    spaceID: spaceID,
+                    activeDisplayIDs: activeWorkspaces
+                        .filter { $0.spaceID == spaceID }
+                        .map(\.displayID),
+                    windows: trackedWindows,
+                    pendingUnresolvedSlots: pendingSlots.filter {
+                        $0.spaceID == spaceID
+                    }
                 )
             }
-            .sorted { lhs, rhs in
-                if lhs.slot != rhs.slot { return lhs.slot < rhs.slot }
-                if lhs.origin != rhs.origin { return lhs.origin == .layout }
-                return lhs.entryID < rhs.entryID
-            }
-
-            return WorkspaceStateGroup(
-                spaceID: spaceID,
-                activeDisplayIDs: state.activeSpaces
-                    .filter { $0.spaceID == spaceID }
-                    .map(\.displayID),
-                windows: trackedWindows,
-                pendingUnresolvedSlots: state.pendingVisibilityConvergence?.unresolvedSlots
-                    .filter { $0.spaceID == spaceID } ?? []
-            )
         }
 
         let unassignedIdentities = Set(resolution?.unassignedWindows.map(\.identity) ?? [])
@@ -263,7 +278,7 @@ public extension VirtualSpaceEngine {
         }
 
         return WorkspaceStateSnapshot(
-            layoutName: layoutName,
+            layoutNames: layoutNames,
             revision: state.revision,
             inventoryAvailability: inventory.isAuthoritative ? .available : .unavailable,
             recoveryRequired: state.recoveryRequired,

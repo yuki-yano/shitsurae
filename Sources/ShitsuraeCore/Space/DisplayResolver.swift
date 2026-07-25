@@ -1,14 +1,19 @@
 import Foundation
 
-/// Resolves which physical display hosts a layout (v2.0: one host display per
-/// layout; per-display workspaces are the planned multi-display extension).
+/// Resolves which physical display hosts a layout (one host display per
+/// layout, declared as `layouts.<name>.display`).
 ///
 /// Resolution order:
-/// 1. explicit `display.id` on the layout's spaces
+/// 1. explicit `display.id`
 /// 2. `display.monitor` role, mapped through the `monitors` config section
 ///    when present (e.g. monitors.primary.id pins the role to a display UUID)
 /// 3. resolution (width/height) condition
-/// 4. fallback: the primary display
+/// 4. no declaration only: the primary display
+///
+/// A layout WITH a display declaration resolves to nil when the declared
+/// display is absent — it must never fall back to the primary display, or an
+/// arrange during disconnect would replace the primary workspace and the
+/// dormant/restore semantics would collapse.
 public enum DisplayResolver {
     public static func hostDisplay(
         layout: LayoutDefinition,
@@ -19,13 +24,18 @@ public enum DisplayResolver {
             return nil
         }
 
-        let definition = layout.spaces.compactMap(\.display).first
-
-        if let resolved = resolve(definition: definition, config: config, displays: displays) {
-            return resolved
+        guard let definition = layout.display, !isEmpty(definition) else {
+            return primaryDisplay(displays)
         }
 
-        return primaryDisplay(displays)
+        return resolve(definition: definition, config: config, displays: displays)
+    }
+
+    static func isEmpty(_ definition: DisplayDefinition) -> Bool {
+        definition.monitor == nil
+            && definition.id == nil
+            && definition.width == nil
+            && definition.height == nil
     }
 
     public static func resolve(

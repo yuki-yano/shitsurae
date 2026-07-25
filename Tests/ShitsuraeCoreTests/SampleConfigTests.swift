@@ -26,7 +26,8 @@ struct SampleConfigTests {
         try #require(FileManager.default.fileExists(atPath: dir.path))
 
         let loaded = try ConfigLoader().load(from: dir)
-        #expect(loaded.config.layouts.keys.sorted() == ["virtualWork"])
+        #expect(loaded.config.layouts.keys.sorted() == ["pinnedDashboard", "virtualWork"])
         #expect(loaded.config.layouts["virtualWork"]?.spaces.count == 2)
+        #expect(loaded.config.layouts["pinnedDashboard"]?.display?.monitor == .secondary)
     }
 }

@@ -15,14 +15,14 @@ struct RequestMappingTests {
 
     @Test func arrangeMapsEveryOption() {
         let request = CLIRequestBuilder.arrange(
-            layout: "work",
+            layouts: ["work", "calendar"],
             dryRun: true,
             stateOnly: true,
             spaceID: 3
         )
 
         #expect(request.command == "arrange")
-        #expect(request.layout == "work")
+        #expect(request.layouts == ["work", "calendar"])
         #expect(request.dryRun == true)
         #expect(request.stateOnly == true)
         #expect(request.spaceID == 3)
@@ -30,7 +30,7 @@ struct RequestMappingTests {
 
     @Test func disabledArrangeFlagsRemainAbsent() {
         let request = CLIRequestBuilder.arrange(
-            layout: "work",
+            layouts: ["work"],
             dryRun: false,
             stateOnly: false,
             spaceID: nil
@@ -41,15 +41,51 @@ struct RequestMappingTests {
         #expect(request.spaceID == nil)
     }
 
+    @Test func arrangeCommandParsesMultipleLayouts() throws {
+        let command = try Arrange.parse(["work", "calendar", "--json"])
+
+        #expect(command.layouts == ["work", "calendar"])
+        #expect(command.jsonFlag.json)
+    }
+
+    @Test func arrangeCommandRejectsSingleLayoutOptionsInBatch() {
+        #expect(throws: Error.self) {
+            _ = try Arrange.parse(["work", "calendar", "--space", "2"])
+        }
+    }
+
     @Test func spaceCommandsMapEveryOption() {
-        let switchRequest = CLIRequestBuilder.spaceSwitch(spaceID: 7, reconcile: true)
+        let listRequest = CLIRequestBuilder.spaceQuery(command: "spaceList", layout: "calendar")
+        let currentRequest = CLIRequestBuilder.spaceQuery(command: "spaceCurrent", layout: nil)
+        let switchRequest = CLIRequestBuilder.spaceSwitch(
+            spaceID: 7,
+            layout: "calendar",
+            reconcile: true
+        )
         let recoverRequest = CLIRequestBuilder.spaceRecover()
 
+        #expect(listRequest.command == "spaceList")
+        #expect(listRequest.layout == "calendar")
+        #expect(currentRequest.command == "spaceCurrent")
+        #expect(currentRequest.layout == nil)
         #expect(switchRequest.command == "spaceSwitch")
         #expect(switchRequest.spaceID == 7)
+        #expect(switchRequest.layout == "calendar")
         #expect(switchRequest.reconcile == true)
         #expect(recoverRequest.command == "spaceRecover")
         #expect(recoverRequest.forceClearPending == true)
+    }
+
+    @Test func spaceCommandsParseLayoutSelector() throws {
+        let list = try Space.List.parse(["--layout", "calendar"])
+        let current = try Space.Current.parse(["--layout", "calendar"])
+        let switchCommand = try Space.Switch.parse(["2", "--layout", "calendar", "--reconcile"])
+
+        #expect(list.layout == "calendar")
+        #expect(current.layout == "calendar")
+        #expect(switchCommand.layout == "calendar")
+        #expect(switchCommand.spaceID == 2)
+        #expect(switchCommand.reconcile)
     }
 
     @Test(arguments: [

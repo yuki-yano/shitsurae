@@ -55,6 +55,30 @@ struct ConfigLoaderTests {
         #expect(loaded.configFiles.allSatisfy { $0.loaded })
     }
 
+    @Test func loadsWindowWithoutFrame() throws {
+        let dir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try write(
+            """
+            layouts:
+              work:
+                spaces:
+                  - spaceID: 1
+                    windows:
+                      - slot: 1
+                        launch: false
+                        match:
+                          bundleID: com.apple.TextEdit
+            """,
+            as: "01-track-only.yaml",
+            in: dir
+        )
+
+        let loaded = try ConfigLoader().load(from: dir)
+        let window = try #require(loaded.config.layouts["work"]?.spaces.first?.windows.first)
+        #expect(window.frame == nil)
+    }
+
     @Test func rejectsModeSpaceKey() throws {
         let dir = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -99,6 +123,74 @@ struct ConfigLoaderTests {
         } catch {
             Issue.record("unexpected error type: \(error)")
         }
+    }
+
+    @Test func rejectsSpaceLevelDisplayKeyWithMigrationHint() throws {
+        let dir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try write(
+            """
+            layouts:
+              work:
+                spaces:
+                  - spaceID: 1
+                    display:
+                      monitor: primary
+                    windows:
+                      - slot: 1
+                        match:
+                          bundleID: com.apple.TextEdit
+                        frame:
+                          x: "0%"
+                          y: "0%"
+                          width: "100%"
+                          height: "100%"
+            """,
+            as: "01-legacy-display.yaml",
+            in: dir
+        )
+
+        do {
+            _ = try ConfigLoader().load(from: dir)
+            Issue.record("expected ConfigLoadError")
+        } catch let error as ConfigLoadError {
+            // The dedicated removed-key diagnostic (with the migration hint)
+            // must survive the Yams decoding path — a bare "unknown key"
+            // would leave users without the layouts.<name>.display pointer.
+            #expect(error.errors.contains { $0.message.contains("spaces[].display was removed") })
+            #expect(error.errors.contains { $0.message.contains("layouts.<name>.display") })
+        } catch {
+            Issue.record("unexpected error type: \(error)")
+        }
+    }
+
+    @Test func acceptsLayoutLevelDisplayDeclaration() throws {
+        let dir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try write(
+            """
+            layouts:
+              calendar:
+                display:
+                  monitor: secondary
+                spaces:
+                  - spaceID: 1
+                    windows:
+                      - slot: 1
+                        match:
+                          bundleID: com.example.Calendar
+                        frame:
+                          x: "0%"
+                          y: "0%"
+                          width: "100%"
+                          height: "100%"
+            """,
+            as: "01-layout-display.yaml",
+            in: dir
+        )
+
+        let loaded = try ConfigLoader().load(from: dir)
+        #expect(loaded.config.layouts["calendar"]?.display?.monitor == .secondary)
     }
 
     @Test func acceptsModeFollowFocus() throws {

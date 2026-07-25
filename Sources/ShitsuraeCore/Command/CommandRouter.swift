@@ -5,6 +5,7 @@ import Foundation
 public struct CommandRequest: Codable, Sendable {
     public var command: String
     public var layout: String?
+    public var layouts: [String]?
     public var spaceID: Int?
     public var dryRun: Bool?
     public var stateOnly: Bool?
@@ -105,8 +106,21 @@ public final class CommandRouter: Sendable {
     private func dispatch(_ request: CommandRequest) async throws -> Data {
         switch request.command {
         case "arrange":
-            let layoutName = try require(request.layout, "layout")
+            let layoutNames = try requireNonEmpty(request.layouts, "layouts")
             let config = try configManager.config()
+            if layoutNames.count > 1 {
+                guard request.dryRun != true, request.stateOnly != true, request.spaceID == nil else {
+                    throw ShitsuraeError(
+                        .validationError,
+                        "multi-display arrange does not accept --dry-run, --state-only, or --space",
+                        subcode: "invalidArrangeBatchOptions"
+                    )
+                }
+                let result = try await engine.arrange(layoutNames: layoutNames, config: config)
+                return Self.encodeSuccess(result, exitCode: result.exitCode)
+            }
+
+            let layoutName = layoutNames[0]
             if request.dryRun == true {
                 let result = try await engine.arrangeDryRun(
                     layoutName: layoutName,
@@ -169,20 +183,36 @@ public final class CommandRouter: Sendable {
 
         case "spaceList":
             let config = try configManager.config()
+            if let layoutName = request.layout {
+                return Self.encodeSuccess(try await engine.spaceList(layoutName: layoutName, config: config))
+            }
             return Self.encodeSuccess(await engine.spaceList(config: config))
 
         case "spaceCurrent":
             let config = try configManager.config()
+            if let layoutName = request.layout {
+                return Self.encodeSuccess(try await engine.spaceCurrent(layoutName: layoutName, config: config))
+            }
             return Self.encodeSuccess(await engine.spaceCurrent(config: config))
 
         case "spaceSwitch":
             let spaceID = try require(request.spaceID, "spaceID")
             let config = try configManager.config()
-            let outcome = try await engine.switchSpace(
-                to: spaceID,
-                config: config,
-                reconcile: request.reconcile ?? false
-            )
+            let outcome: SpaceSwitchOutcome
+            if let layoutName = request.layout {
+                outcome = try await engine.switchSpace(
+                    layoutName: layoutName,
+                    to: spaceID,
+                    config: config,
+                    reconcile: request.reconcile ?? false
+                )
+            } else {
+                outcome = try await engine.switchSpace(
+                    to: spaceID,
+                    config: config,
+                    reconcile: request.reconcile ?? false
+                )
+            }
             let result = SpaceSwitchJSON(requestID: UUID().uuidString.lowercased(), outcome: outcome)
             // Visibility that did not converge (or unresolved slots) is a
             // partial success — scripts must be able to detect it.
@@ -193,13 +223,14 @@ public final class CommandRouter: Sendable {
             guard request.forceClearPending == true else {
                 throw ShitsuraeError(.validationError, "space recover requires --force-clear-pending")
             }
-            let state = await engine.currentState
+            let previousLayoutName = await engine.activeLayoutName()
+            let previousSpaceID = await engine.activeSpaceID()
             try await engine.clearPending()
             let result = SpaceRecoveryJSON(
                 requestID: UUID().uuidString.lowercased(),
                 clearedPending: true,
-                previousActiveLayoutName: state.activeLayoutName,
-                previousActiveSpaceID: state.primaryActiveSpaceID,
+                previousActiveLayoutName: previousLayoutName,
+                previousActiveSpaceID: previousSpaceID,
                 warning: "pending state cleared; run 'shitsurae space switch <id> --reconcile' to reconcile visibility"
             )
             return Self.encodeSuccess(result)
@@ -328,6 +359,7 @@ public final class CommandRouter: Sendable {
 
     public func diagnostics() async -> DiagnosticsJSON {
         let state = await engine.currentState
+        let workspaces = await engine.workspaceSummaries()
         let config = configManager.configIfLoaded()
         return DiagnosticsJSON(
             version: Self.appVersion,
@@ -338,12 +370,11 @@ public final class CommandRouter: Sendable {
             configFiles: config?.configFiles ?? [],
             configReload: configManager.reloadStatus(),
             state: DiagnosticsJSON.StateSummary(
-                activeLayoutName: state.activeLayoutName,
-                activeSpaces: state.activeSpaces,
+                activeWorkspaces: workspaces,
                 slotCount: state.slots.count,
                 hiddenCount: state.slots.filter { $0.visibilityState == .hiddenOffscreen }.count,
                 recoveryRequired: state.recoveryRequired,
-                pendingUnresolvedSlots: state.pendingVisibilityConvergence?.unresolvedSlots ?? [],
+                pendingUnresolvedSlots: state.pendingVisibilityConvergences.flatMap(\.unresolvedSlots),
                 configGeneration: state.configGeneration,
                 revision: state.revision
             ),
@@ -391,6 +422,18 @@ public final class CommandRouter: Sendable {
                 "spaceID \(spaceID) is not defined in layout \(layoutName)",
                 subcode: "spaceNotFound"
             )
+        case let .workspaceNotActive(layoutName):
+            return ShitsuraeError(
+                .validationError,
+                "workspace is not active: \(layoutName); run 'shitsurae arrange \(layoutName)' first",
+                subcode: "workspaceNotActive"
+            )
+        case let .invalidArrangeBatch(message):
+            return ShitsuraeError(
+                .validationError,
+                message,
+                subcode: "invalidArrangeBatch"
+            )
         case .hostDisplayUnavailable:
             return ShitsuraeError(.validationError, "host display is unavailable", subcode: "hostDisplayUnavailable")
         case .windowNotTracked:
@@ -410,6 +453,13 @@ public final class CommandRouter: Sendable {
 
     private func require<T>(_ value: T?, _ name: String) throws -> T {
         guard let value else {
+            throw ShitsuraeError(.validationError, "missing argument: \(name)")
+        }
+        return value
+    }
+
+    private func requireNonEmpty<T>(_ value: [T]?, _ name: String) throws -> [T] {
+        guard let value, !value.isEmpty else {
             throw ShitsuraeError(.validationError, "missing argument: \(name)")
         }
         return value

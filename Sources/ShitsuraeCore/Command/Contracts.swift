@@ -191,15 +191,35 @@ public struct SpaceSummaryJSON: Codable, Equatable, Sendable {
     }
 }
 
+/// One display's active workspace as reported by reference commands.
+/// `dormant` marks a workspace whose host display is currently disconnected.
+public struct WorkspaceSummaryJSON: Codable, Equatable, Sendable {
+    public let displayID: String
+    public let layoutName: String
+    public let spaceID: Int
+    public let dormant: Bool
+
+    public init(displayID: String, layoutName: String, spaceID: Int, dormant: Bool) {
+        self.displayID = displayID
+        self.layoutName = layoutName
+        self.spaceID = spaceID
+        self.dormant = dormant
+    }
+}
+
 public struct SpaceListJSON: Codable, Equatable, Sendable {
     public let schemaVersion: Int
+    /// Queried layout; defaults to the primary display's active layout.
     public let layoutName: String?
     public let spaces: [SpaceSummaryJSON]
+    /// Every display's active workspace, dormant ones included.
+    public let workspaces: [WorkspaceSummaryJSON]
 
-    public init(layoutName: String?, spaces: [SpaceSummaryJSON]) {
-        self.schemaVersion = 2
+    public init(layoutName: String?, spaces: [SpaceSummaryJSON], workspaces: [WorkspaceSummaryJSON]) {
+        self.schemaVersion = 3
         self.layoutName = layoutName
         self.spaces = spaces
+        self.workspaces = workspaces
     }
 }
 
@@ -207,12 +227,19 @@ public struct SpaceCurrentJSON: Codable, Equatable, Sendable {
     public let schemaVersion: Int
     public let layoutName: String?
     public let space: SpaceSummaryJSON?
+    public let workspaces: [WorkspaceSummaryJSON]
     public let recoveryRequired: Bool
 
-    public init(layoutName: String?, space: SpaceSummaryJSON?, recoveryRequired: Bool) {
-        self.schemaVersion = 2
+    public init(
+        layoutName: String?,
+        space: SpaceSummaryJSON?,
+        workspaces: [WorkspaceSummaryJSON],
+        recoveryRequired: Bool
+    ) {
+        self.schemaVersion = 3
         self.layoutName = layoutName
         self.space = space
+        self.workspaces = workspaces
         self.recoveryRequired = recoveryRequired
     }
 }
@@ -364,8 +391,7 @@ public struct DiagnosticsJSON: Codable, Equatable, Sendable {
     }
 
     public struct StateSummary: Codable, Equatable, Sendable {
-        public let activeLayoutName: String?
-        public let activeSpaces: [ActiveSpace]
+        public let activeWorkspaces: [WorkspaceSummaryJSON]
         public let slotCount: Int
         public let hiddenCount: Int
         public let recoveryRequired: Bool
@@ -374,8 +400,7 @@ public struct DiagnosticsJSON: Codable, Equatable, Sendable {
         public let revision: UInt64
 
         public init(
-            activeLayoutName: String?,
-            activeSpaces: [ActiveSpace],
+            activeWorkspaces: [WorkspaceSummaryJSON],
             slotCount: Int,
             hiddenCount: Int,
             recoveryRequired: Bool,
@@ -383,8 +408,7 @@ public struct DiagnosticsJSON: Codable, Equatable, Sendable {
             configGeneration: String,
             revision: UInt64
         ) {
-            self.activeLayoutName = activeLayoutName
-            self.activeSpaces = activeSpaces
+            self.activeWorkspaces = activeWorkspaces
             self.slotCount = slotCount
             self.hiddenCount = hiddenCount
             self.recoveryRequired = recoveryRequired

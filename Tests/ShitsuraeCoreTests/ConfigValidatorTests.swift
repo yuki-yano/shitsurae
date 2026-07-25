@@ -145,20 +145,94 @@ struct ConfigValidatorTests {
         #expect(errors.isEmpty)
     }
 
-    @Test func rejectsMixedImplicitAndExplicitDisplays() {
+    @Test func rejectsMonitorAndIDTogetherInLayoutDisplay() {
         let config = makeConfig(layouts: [
-            "work": LayoutDefinition(spaces: [
-                SpaceDefinition(
-                    spaceID: 1,
-                    display: DisplayDefinition(monitor: .primary),
-                    windows: [makeWindow(bundleID: "a.b.c", slot: 1)]
-                ),
-                SpaceDefinition(spaceID: 2, windows: [makeWindow(bundleID: "d.e.f", slot: 1)]),
-            ]),
+            "work": LayoutDefinition(
+                display: DisplayDefinition(monitor: .primary, id: "uuid-x"),
+                spaces: [
+                    SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
+                ]
+            ),
         ])
 
         let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
-        #expect(errors.contains { $0.message.contains("cannot mix implicit and explicit displays") })
+        #expect(errors.contains { $0.message.contains("mutually exclusive") })
+    }
+
+    @Test func rejectsEmptyLayoutDisplayDeclaration() {
+        let config = makeConfig(layouts: [
+            "work": LayoutDefinition(
+                display: DisplayDefinition(),
+                spaces: [
+                    SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
+                ]
+            ),
+        ])
+
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.contains { $0.message.contains("display must declare monitor, id, or a resolution") })
+    }
+
+    @Test func rejectsIdenticalMatcherAcrossSimultaneouslyActiveLayouts() {
+        let config = makeConfig(layouts: [
+            "work": LayoutDefinition(spaces: [
+                SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
+            ]),
+            "calendar": LayoutDefinition(
+                display: DisplayDefinition(monitor: .secondary),
+                spaces: [
+                    SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
+                ]
+            ),
+        ])
+
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.contains { $0.message.contains("identical window matcher") })
+    }
+
+    @Test func allowsIdenticalMatcherBetweenSameHostLayouts() {
+        // Layouts sharing one host replace each other on arrange and are
+        // never active simultaneously — sharing a matcher is the standard
+        // v2.0 multi-layout workflow and must stay legal. An undeclared
+        // display and monitor: primary are the same host while
+        // monitors.primary.id is unset.
+        let config = makeConfig(layouts: [
+            "work": LayoutDefinition(spaces: [
+                SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
+            ]),
+            "focus": LayoutDefinition(
+                display: DisplayDefinition(monitor: .primary),
+                spaces: [
+                    SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
+                ]
+            ),
+        ])
+
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(!errors.contains { $0.message.contains("identical window matcher") })
+    }
+
+    @Test func pinnedPrimaryRoleBreaksImplicitEquivalence() {
+        // monitors.primary.id pins the primary role to an arbitrary display,
+        // so a monitor: primary layout and an undeclared layout can be active
+        // simultaneously and must be validated as a normal pair.
+        let config = ShitsuraeConfig(
+            monitors: MonitorsDefinition(primary: MonitorTargetDefinition(id: "uuid-x")),
+            layouts: [
+                "work": LayoutDefinition(spaces: [
+                    SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
+                ]),
+                "focus": LayoutDefinition(
+                    display: DisplayDefinition(monitor: .primary),
+                    spaces: [
+                        SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
+                    ]
+                ),
+            ]
+        )
+
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.contains { $0.message.contains("identical window matcher") })
     }
 
     @Test func rejectsInvalidShortcutKey() {

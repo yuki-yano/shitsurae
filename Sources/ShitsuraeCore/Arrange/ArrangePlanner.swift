@@ -4,7 +4,7 @@ import Foundation
 public struct ArrangeStep: Equatable, Sendable {
     public let spaceID: Int
     public let definition: WindowDefinition
-    public let resolvedFrame: ResolvedFrame
+    public let resolvedFrame: ResolvedFrame?
 }
 
 public struct ArrangePlan: Equatable, Sendable {
@@ -104,20 +104,26 @@ public enum ArrangePlanner {
                     }
                 }
 
-                guard let resolvedFrame = try? LengthParser.resolveFrame(
-                    definition.frame,
-                    basis: basis,
-                    scale: hostDisplay.scale
-                ) else {
-                    skipped.append(
-                        SkippedItem(
-                            spaceID: space.spaceID,
-                            slot: definition.slot,
-                            reason: "frameUnresolvable",
-                            detail: "frame could not be resolved for the host display"
+                let resolvedFrame: ResolvedFrame?
+                if let frame = definition.frame {
+                    guard let frame = try? LengthParser.resolveFrame(
+                        frame,
+                        basis: basis,
+                        scale: hostDisplay.scale
+                    ) else {
+                        skipped.append(
+                            SkippedItem(
+                                spaceID: space.spaceID,
+                                slot: definition.slot,
+                                reason: "frameUnresolvable",
+                                detail: "frame could not be resolved for the host display"
+                            )
                         )
-                    )
-                    continue
+                        continue
+                    }
+                    resolvedFrame = frame
+                } else {
+                    resolvedFrame = nil
                 }
 
                 if launch {
@@ -158,16 +164,18 @@ public enum ArrangePlanner {
                         launch: launch
                     )
                 )
-                planItems.append(
-                    PlanItem(
-                        spaceID: space.spaceID,
-                        slot: definition.slot,
-                        bundleID: definition.match.bundleID,
-                        action: "setFrame",
-                        frame: resolvedFrame,
-                        launch: launch
+                if let resolvedFrame {
+                    planItems.append(
+                        PlanItem(
+                            spaceID: space.spaceID,
+                            slot: definition.slot,
+                            bundleID: definition.match.bundleID,
+                            action: "setFrame",
+                            frame: resolvedFrame,
+                            launch: launch
+                        )
                     )
-                )
+                }
                 planItems.append(
                     PlanItem(
                         spaceID: space.spaceID,

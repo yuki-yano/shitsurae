@@ -114,10 +114,12 @@ struct WorkspaceStatePreviewLayout: Equatable {
 }
 
 struct WorkspaceStatePreview: View {
+    let layoutName: String
     let spaceID: Int
     let layout: WorkspaceStatePreviewLayout?
 
     init(workspace: WorkspaceStateGroup, displays: [DisplayInfo]) {
+        layoutName = workspace.layoutName
         spaceID = workspace.spaceID
         layout = WorkspaceStatePreviewLayout(displays: displays, windows: workspace.windows)
     }
@@ -161,7 +163,7 @@ struct WorkspaceStatePreview: View {
             }
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Space \(spaceID) placement preview")
+        .accessibilityLabel("\(layoutName) space \(spaceID) placement preview")
     }
 
     private func drawDisplays(

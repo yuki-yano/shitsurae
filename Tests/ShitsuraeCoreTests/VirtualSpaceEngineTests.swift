@@ -116,7 +116,7 @@ struct VirtualSpaceEngineTests {
         #expect(state.primaryActiveSpaceID == 2)
         let hidden = state.slots.filter { $0.visibilityState == .hiddenOffscreen }
         #expect(hidden.count == 2)
-        #expect(state.pendingVisibilityConvergence == nil)
+        #expect(state.firstPendingVisibilityConvergence == nil)
     }
 
     @Test func terminationFocusRestoreKeepsActiveWorkspaceAndUsesMRU() async throws {
@@ -407,7 +407,7 @@ struct VirtualSpaceEngineTests {
 
         #expect(!outcome.converged)
         let state = await engine.currentState
-        #expect(state.pendingVisibilityConvergence != nil)
+        #expect(state.firstPendingVisibilityConvergence != nil)
         #expect(state.recoveryRequired)
         #expect(state.slots.first { $0.bundleID == "com.apple.TextEdit" }?.visibilityState == .visible)
         #expect(state.slots.first { $0.bundleID == "com.apple.Terminal" }?.visibilityState == .visible)
@@ -431,7 +431,7 @@ struct VirtualSpaceEngineTests {
         let outcome = try await engine.switchSpace(to: 2, config: config)
 
         #expect(!outcome.converged)
-        #expect((await engine.currentState).pendingVisibilityConvergence != nil)
+        #expect((await engine.currentState).firstPendingVisibilityConvergence != nil)
         #expect(control.window(1)?.frame == windows[0].frame)
     }
 
@@ -466,7 +466,7 @@ struct VirtualSpaceEngineTests {
 
         #expect(!outcome.converged)
         let state = await engine.currentState
-        #expect(state.pendingVisibilityConvergence != nil)
+        #expect(state.firstPendingVisibilityConvergence != nil)
         #expect(state.slots.filter { $0.spaceID == 1 }
             .allSatisfy { $0.visibilityState == .hiddenOffscreen })
     }
@@ -500,7 +500,7 @@ struct VirtualSpaceEngineTests {
         let recovered = try await engine.switchSpace(to: 2, config: config)
         #expect(recovered.converged)
         let state = await engine.currentState
-        #expect(state.pendingVisibilityConvergence == nil)
+        #expect(state.firstPendingVisibilityConvergence == nil)
         #expect(!state.recoveryRequired)
 
         let afterAgain = try await engine.switchSpace(to: 1, config: config)
@@ -816,7 +816,7 @@ struct VirtualSpaceEngineTests {
         ))
         let state = await engine.currentState
         #expect(state.primaryActiveSpaceID == 2)
-        #expect(state.pendingVisibilityConvergence != nil)
+        #expect(state.firstPendingVisibilityConvergence != nil)
         #expect(state.recoveryRequired)
     }
 
@@ -947,6 +947,7 @@ struct VirtualSpaceEngineTests {
         let previousPending = PendingVisibilityConvergence(
             requestID: "unrelated-unresolved-slot",
             startedAt: Date.rfc3339UTC(),
+            displayID: "uuid-main",
             layoutName: "work",
             targetSpaceID: 1,
             unresolvedSlots: [PendingUnresolvedSlot(
@@ -955,7 +956,7 @@ struct VirtualSpaceEngineTests {
                 reason: "windowUnresolved"
             )]
         )
-        state.pendingVisibilityConvergence = previousPending
+        state.firstPendingVisibilityConvergence = previousPending
         try await engine.replaceState(state)
         control.setFocusedWindowID(zoom.windowID)
 
@@ -974,7 +975,7 @@ struct VirtualSpaceEngineTests {
             displays: [TestFixtures.display]
         ))
         state = await engine.currentState
-        #expect(state.pendingVisibilityConvergence == previousPending)
+        #expect(state.firstPendingVisibilityConvergence == previousPending)
         #expect(state.slots.first { $0.boundIdentity == zoom.identity }?.spaceID == 2)
     }
 
@@ -1233,6 +1234,7 @@ struct VirtualSpaceEngineTests {
         #expect(try await engine.switchSpaceForFocusEvent(
             sequence: 2,
             identity: main.identity,
+            layoutName: "work",
             to: 2,
             config: config
         ) == nil)
@@ -1241,6 +1243,7 @@ struct VirtualSpaceEngineTests {
         let switchOutcome = try #require(await engine.switchSpaceForFocusEvent(
             sequence: 2,
             identity: confirmationSheet.identity,
+            layoutName: "work",
             to: 2,
             config: config
         ))
@@ -1265,7 +1268,7 @@ struct VirtualSpaceEngineTests {
         #expect(state.primaryActiveSpaceID == 2)
         #expect(state.slots.first { $0.boundIdentity == main.identity }?.spaceID == 1)
         #expect(state.slots.first { $0.boundIdentity == main.identity }?.visibilityState == .visible)
-        #expect(state.pendingVisibilityConvergence == nil)
+        #expect(state.firstPendingVisibilityConvergence == nil)
         let otherEntry = try #require(state.slots.first {
             $0.boundIdentity == otherOrdinaryWindow.identity
         })
@@ -1385,7 +1388,7 @@ struct VirtualSpaceEngineTests {
         #expect(mainEntry.spaceID == 1)
         #expect(mainEntry.visibilityState == .hiddenOffscreen)
         #expect(state.primaryActiveSpaceID == 2)
-        #expect(state.pendingVisibilityConvergence == nil)
+        #expect(state.firstPendingVisibilityConvergence == nil)
         #expect(VisibilityPlanner.isHiddenWindowFrame(
             frame: try #require(control.window(main.windowID)).frame,
             displays: [TestFixtures.display]
@@ -1439,6 +1442,7 @@ struct VirtualSpaceEngineTests {
         let staleSwitch = try await engine.switchSpaceForFocusEvent(
             sequence: 3,
             identity: control.window(3)!.identity,
+            layoutName: "work",
             to: 2,
             config: config
         )
@@ -1452,6 +1456,7 @@ struct VirtualSpaceEngineTests {
         #expect(try await engine.switchSpaceForFocusEvent(
             sequence: 3,
             identity: control.window(3)!.identity,
+            layoutName: "work",
             to: 2,
             config: config
         ) == nil)
@@ -1756,7 +1761,7 @@ struct VirtualSpaceEngineTests {
         #expect(outcome.focusedWindowID == 3)
         let state = await engine.currentState
         #expect(state.primaryActiveSpaceID == 2)
-        #expect(state.pendingVisibilityConvergence != nil)
+        #expect(state.firstPendingVisibilityConvergence != nil)
         #expect(control.window(4)?.frame == safariFrame)
         #expect(!control.frameMutationAttemptWindowIDs.dropFirst(mutationAttemptsBefore).contains(4))
     }
@@ -1931,7 +1936,7 @@ struct VirtualSpaceEngineTests {
         )
         #expect(result.didCreateTrackingEntry)
         #expect(result.spaceID == 2)
-        #expect(writeAheadState?.pendingVisibilityConvergence != nil)
+        #expect(writeAheadState?.firstPendingVisibilityConvergence != nil)
         #expect(writeAheadState?.slots.contains {
             $0.bundleID == backed.bundleID
                 && $0.boundIdentity == backed.identity
@@ -1980,7 +1985,7 @@ struct VirtualSpaceEngineTests {
         #expect(entry?.boundIdentity == finder.identity)
         #expect(entry?.spaceID == 1)
         #expect(entry?.visibilityState == .visible)
-        #expect(state.pendingVisibilityConvergence == nil)
+        #expect(state.firstPendingVisibilityConvergence == nil)
         #expect(control.window(finder.windowID)?.frame == finder.frame)
     }
 
@@ -2073,7 +2078,7 @@ struct VirtualSpaceEngineTests {
         let entry = state.slots.first { $0.bundleID == finder.bundleID }
         #expect(entry?.spaceID == 2)
         #expect(entry?.visibilityState == .hiddenOffscreen)
-        #expect(state.pendingVisibilityConvergence != nil)
+        #expect(state.firstPendingVisibilityConvergence != nil)
     }
 
     @Test func workspaceMovePreservesPendingVisibilityRecovery() async throws {
@@ -2084,10 +2089,11 @@ struct VirtualSpaceEngineTests {
         let previousPending = PendingVisibilityConvergence(
             requestID: "pending",
             startedAt: Date.rfc3339UTC(),
+            displayID: "uuid-main",
             layoutName: "work",
             targetSpaceID: 1
         )
-        pending.pendingVisibilityConvergence = previousPending
+        pending.firstPendingVisibilityConvergence = previousPending
         try await engine.replaceState(pending)
 
         let outcome = try await engine.moveWindowToWorkspace(
@@ -2099,7 +2105,7 @@ struct VirtualSpaceEngineTests {
         #expect(outcome.fromSpaceID == 1)
         #expect(outcome.toSpaceID == 2)
         let state = await engine.currentState
-        #expect(state.pendingVisibilityConvergence == previousPending)
+        #expect(state.firstPendingVisibilityConvergence == previousPending)
         #expect(state.slots.first { $0.windowID == 1 }?.spaceID == 2)
         #expect(control.frameMutationAttemptWindowIDs == [1])
     }
@@ -2385,7 +2391,7 @@ struct VirtualSpaceEngineTests {
 
         let after = await engine.currentState
         #expect(after.revision == before.revision + 2)
-        #expect(writeAheadState?.pendingVisibilityConvergence != nil)
+        #expect(writeAheadState?.firstPendingVisibilityConvergence != nil)
         #expect(writeAheadState?.slots.contains {
             $0.origin == .adopted
                 && $0.windowID == 9
@@ -2409,7 +2415,7 @@ struct VirtualSpaceEngineTests {
         _ = try await engine.switchSpace(to: 1, config: config)
 
         let captured = try #require(writeAheadState)
-        #expect(captured.pendingVisibilityConvergence != nil)
+        #expect(captured.firstPendingVisibilityConvergence != nil)
         #expect(captured.slots.filter { $0.bundleID != "com.apple.Notes" }
             .allSatisfy { $0.visibilityState == .hiddenOffscreen })
 
@@ -2456,7 +2462,7 @@ struct VirtualSpaceEngineTests {
 
         #expect(outcome.converged)
         let finalState = await engine.currentState
-        #expect(finalState.pendingVisibilityConvergence == nil)
+        #expect(finalState.firstPendingVisibilityConvergence == nil)
         #expect(finalState.slots.first { $0.bundleID == "com.apple.Terminal" }?.visibilityState == .visible)
         #expect(control.window(2)?.minimized == true)
 
@@ -2529,9 +2535,10 @@ struct VirtualSpaceEngineTests {
         try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
 
         var pending = await engine.currentState
-        pending.pendingVisibilityConvergence = PendingVisibilityConvergence(
+        pending.firstPendingVisibilityConvergence = PendingVisibilityConvergence(
             requestID: "old-target-1",
             startedAt: Date.rfc3339UTC(),
+            displayID: "uuid-main",
             layoutName: "work",
             targetSpaceID: 1
         )
@@ -2546,8 +2553,8 @@ struct VirtualSpaceEngineTests {
 
         let captured = try #require(writeAheadState)
         #expect(captured.primaryActiveSpaceID == 2)
-        #expect(captured.pendingVisibilityConvergence?.targetSpaceID == 2)
-        #expect(captured.pendingVisibilityConvergence?.requestID != "old-target-1")
+        #expect(captured.firstPendingVisibilityConvergence?.targetSpaceID == 2)
+        #expect(captured.firstPendingVisibilityConvergence?.requestID != "old-target-1")
     }
 
     @Test func shutdownKeepsPendingStateWhenNoHiddenEntryCanBeVerified() async throws {
@@ -2555,16 +2562,17 @@ struct VirtualSpaceEngineTests {
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
         var pending = await engine.currentState
-        pending.pendingVisibilityConvergence = PendingVisibilityConvergence(
+        pending.firstPendingVisibilityConvergence = PendingVisibilityConvergence(
             requestID: "pending-visible",
             startedAt: Date.rfc3339UTC(),
+            displayID: "uuid-main",
             layoutName: "work",
             targetSpaceID: 1
         )
         try await engine.replaceState(pending)
 
         #expect(await engine.restoreAllForShutdown(config: config) == false)
-        #expect((await engine.currentState).pendingVisibilityConvergence != nil)
+        #expect((await engine.currentState).firstPendingVisibilityConvergence != nil)
     }
 
     @Test func focusedUntrackedWindowIsAdoptedIntoCurrentActiveSpace() async throws {
@@ -3039,6 +3047,7 @@ struct VirtualSpaceEngineTests {
         let stale = try await engine.switchSpaceForFocusEvent(
             sequence: 1,
             identity: control.window(1)!.identity,
+            layoutName: "work",
             to: 1,
             config: config
         )

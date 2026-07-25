@@ -158,6 +158,27 @@ public final class RuntimeStateStore: @unchecked Sendable {
         try? fileManager.removeItem(at: fileURL)
     }
 
+    /// Moves an unreadable (unsupported-schema or corrupt) state file aside
+    /// as a timestamped sibling so the app can start with fresh state after
+    /// EXPLICIT user consent — loading stays fail-closed and nothing is ever
+    /// discarded silently. Returns the backup URL, nil when no file existed
+    /// or the move failed (the original is left in place then).
+    public func moveStateFileAside(label: String) -> URL? {
+        guard fileManager.fileExists(atPath: fileURL.path) else {
+            return nil
+        }
+
+        let backupURL = fileURL.deletingLastPathComponent().appendingPathComponent(
+            "runtime-state.\(label)-\(Self.backupTimestamp()).json"
+        )
+        do {
+            try fileManager.moveItem(at: fileURL, to: backupURL)
+            return backupURL
+        } catch {
+            return nil
+        }
+    }
+
     static func sortedSlots(_ slots: [SlotEntry]) -> [SlotEntry] {
         RuntimeState(slots: slots).canonicalized().slots
     }

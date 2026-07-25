@@ -1,6 +1,60 @@
 import Foundation
 
 public extension VirtualSpaceEngine {
+    /// Applies layouts hosted by distinct displays as one logical request.
+    /// Structural validation completes before the first window mutation.
+    /// Physical mutations are serialized in caller order; only the
+    /// primary-hosted layout may apply its initial focus.
+    func arrange(
+        layoutNames: [String],
+        config: LoadedConfig
+    ) throws -> ArrangeBatchExecutionJSON {
+        guard layoutNames.count >= 2 else {
+            throw VirtualSpaceEngineError.invalidArrangeBatch(
+                "multi-display arrange requires at least two layouts"
+            )
+        }
+        guard Set(layoutNames).count == layoutNames.count else {
+            throw VirtualSpaceEngineError.invalidArrangeBatch(
+                "multi-display arrange contains duplicate layout names"
+            )
+        }
+
+        let displays = control.displays()
+        var hostDisplayIDByLayout: [String: String] = [:]
+        var hostLayoutByDisplayID: [String: String] = [:]
+        for layoutName in layoutNames {
+            guard let layout = config.config.layouts[layoutName] else {
+                throw VirtualSpaceEngineError.layoutNotFound(layoutName)
+            }
+            guard let hostDisplay = DisplayResolver.hostDisplay(
+                layout: layout,
+                config: config.config,
+                displays: displays
+            ) else {
+                throw VirtualSpaceEngineError.hostDisplayUnavailable
+            }
+            if let existing = hostLayoutByDisplayID[hostDisplay.id] {
+                throw VirtualSpaceEngineError.invalidArrangeBatch(
+                    "layouts \(existing) and \(layoutName) resolve to the same display \(hostDisplay.id)"
+                )
+            }
+            hostDisplayIDByLayout[layoutName] = hostDisplay.id
+            hostLayoutByDisplayID[hostDisplay.id] = layoutName
+        }
+
+        let primaryDisplayID = DisplayResolver.primaryDisplay(displays)?.id
+        let results = try layoutNames.map { layoutName in
+            try arrange(
+                layoutName: layoutName,
+                spaceID: nil,
+                config: config,
+                applyInitialFocus: hostDisplayIDByLayout[layoutName] == primaryDisplayID
+            )
+        }
+        return ArrangeBatchExecutionJSON(layouts: results)
+    }
+
     // MARK: - Dry run
 
     func arrangeDryRun(
@@ -45,6 +99,7 @@ public extension VirtualSpaceEngine {
         let activeSpaceID = resolvedActiveSpaceID(
             requestedSpaceID: spaceID,
             layout: layout,
+            layoutName: layoutName,
             hostDisplay: hostDisplay
         )
 
@@ -76,7 +131,8 @@ public extension VirtualSpaceEngine {
     func arrange(
         layoutName: String,
         spaceID: Int?,
-        config: LoadedConfig
+        config: LoadedConfig,
+        applyInitialFocus: Bool = true
     ) throws -> ArrangeExecutionJSON {
         logger.log(event: "arrange.start", fields: ["layout": layoutName])
 
@@ -108,10 +164,13 @@ public extension VirtualSpaceEngine {
         )
         let arrangeObservation = control.focusedWindowObservation()
 
-        if let previousLayoutName = currentState.activeLayoutName,
-           previousLayoutName != layoutName
+        // Restore only the layout this arrange replaces on ITS display —
+        // never another display's workspace (arrange calendar must not
+        // restore the primary layout's hidden windows).
+        if let replacedLayoutName = currentState.activeWorkspace(displayID: hostDisplay.id)?.layoutName,
+           replacedLayoutName != layoutName
         {
-            let previousEntries = currentState.slots(layoutName: previousLayoutName)
+            let previousEntries = currentState.slots(layoutName: replacedLayoutName)
             let previousHiddenEntries = previousEntries.filter {
                 $0.visibilityState == .hiddenOffscreen
             }
@@ -180,6 +239,16 @@ public extension VirtualSpaceEngine {
             return restoreIncompleteResult(layoutName: layoutName)
         }
 
+        // Arrange is the user-initiated takeover: display affinity does not
+        // apply, but windows bound to a *different-display* workspace's
+        // layout slots stay untouchable.
+        let arrangeExcludedIdentities = crossLayoutExcludedIdentities(
+            layoutName: layoutName,
+            hostDisplayID: hostDisplay.id,
+            windows: [],
+            includeDisplayAffinity: false
+        )
+
         var softErrors: [ErrorItem] = []
         var boundWindows: [String: WindowSnapshot] = [:] // fingerprint → window
         var provisionalBindings: [String: WindowSnapshot] = [:]
@@ -229,6 +298,7 @@ public extension VirtualSpaceEngine {
                 alreadyBound: Set(boundWindows.values.map(\.identity)),
                 registryEntries: arrangeRegistryEntries,
                 ignoreRules: config.config.ignore?.apply,
+                excludedIdentities: arrangeExcludedIdentities,
                 provisionalBindings: &provisionalBindings
             ) else {
                 softErrors.append(
@@ -242,23 +312,26 @@ public extension VirtualSpaceEngine {
                 continue
             }
 
-            if !setFrame(window: window, frame: step.resolvedFrame) {
-                softErrors.append(
-                    ErrorItem(
-                        code: ErrorCode.operationTimedOut.rawValue,
-                        message: "failed to apply frame",
-                        spaceID: step.spaceID,
-                        slot: definition.slot
+            if let resolvedFrame = step.resolvedFrame {
+                if !setFrame(window: window, frame: resolvedFrame) {
+                    softErrors.append(
+                        ErrorItem(
+                            code: ErrorCode.operationTimedOut.rawValue,
+                            message: "failed to apply frame",
+                            spaceID: step.spaceID,
+                            slot: definition.slot
+                        )
                     )
-                )
-                // Still bind the window: placement failed but tracking works.
+                    // Still bind the window: placement failed but tracking works.
+                }
             }
 
             boundWindows[fingerprint] = window
-            frames[fingerprint] = step.resolvedFrame
+            frames[fingerprint] = step.resolvedFrame ?? window.frame
         }
 
-        if let initialFocusSlot = layout.initialFocus?.slot,
+        if applyInitialFocus,
+           let initialFocusSlot = layout.initialFocus?.slot,
            let focusStep = plan.steps.first(where: { $0.definition.slot == initialFocusSlot })
         {
             let fingerprint = SlotEntry.fingerprint(
@@ -316,17 +389,20 @@ public extension VirtualSpaceEngine {
             additionalIgnoreRules: config.config.ignore?.apply
         )
 
-        // Re-hide everything outside the active workspace.
+        // Re-hide everything outside the active workspace of THIS layout.
         let activeSpaceID = resolvedActiveSpaceID(
             requestedSpaceID: spaceID,
             layout: layout,
+            layoutName: layoutName,
             hostDisplay: hostDisplay
         )
         let switchOutcome = try switchSpace(
+            layoutName: layoutName,
             to: activeSpaceID,
             config: config,
             reconcile: true,
-            adoptionIgnoreRules: config.config.ignore?.apply
+            adoptionIgnoreRules: config.config.ignore?.apply,
+            shouldFocusTarget: applyInitialFocus
         )
 
         let unresolvedSlots = switchOutcome.unresolvedSlots
@@ -387,21 +463,25 @@ public extension VirtualSpaceEngine {
     private func resolvedActiveSpaceID(
         requestedSpaceID: Int?,
         layout: LayoutDefinition,
+        layoutName: String,
         hostDisplay: DisplayInfo
     ) -> Int {
         let layoutSpaceIDs = Set(layout.spaces.map(\.spaceID))
         if let requestedSpaceID {
             return requestedSpaceID
         }
-        if let current = currentState.activeSpaceID(displayID: hostDisplay.id),
-           layoutSpaceIDs.contains(current)
+        // Re-arranging the layout that is already active on this display (or
+        // dormant elsewhere after a declaration change) keeps its space.
+        if let workspace = currentState.activeWorkspace(displayID: hostDisplay.id),
+           workspace.layoutName == layoutName,
+           layoutSpaceIDs.contains(workspace.spaceID)
         {
-            return current
+            return workspace.spaceID
         }
-        if let current = currentState.primaryActiveSpaceID,
-           layoutSpaceIDs.contains(current)
+        if let workspace = currentState.activeWorkspace(layoutName: layoutName),
+           layoutSpaceIDs.contains(workspace.spaceID)
         {
-            return current
+            return workspace.spaceID
         }
         return layout.spaces.map(\.spaceID).min() ?? 1
     }
@@ -632,14 +712,26 @@ public extension VirtualSpaceEngine {
 
         var newState = currentState
         newState.slots = newState.slots.filter { $0.layoutName != layoutName } + entries + adopted
-        newState.activeLayoutName = layoutName
+        // Layout rules beat other workspaces' adopted bindings: a window this
+        // arrange claimed leaves any adopted entry another workspace held for
+        // it (the reclaim half of the cross-layout ownership rules).
+        newState.slots.removeAll { entry in
+            entry.layoutName != layoutName
+                && entry.origin == .adopted
+                && (entry.boundIdentity.map { claimedIdentities.contains($0) } ?? false)
+        }
         newState.configGeneration = config.configGeneration
         let activeSpaceID = resolvedActiveSpaceID(
             requestedSpaceID: arrangedSpaceID,
             layout: layout,
+            layoutName: layoutName,
             hostDisplay: hostDisplay
         )
-        newState.setActiveSpace(displayID: hostDisplay.id, spaceID: activeSpaceID)
+        newState.upsertActiveWorkspace(
+            displayID: hostDisplay.id,
+            layoutName: layoutName,
+            spaceID: activeSpaceID
+        )
         newState.liveArrangeRecoveryRequired = false
 
         try replaceState(newState)
@@ -654,6 +746,7 @@ public extension VirtualSpaceEngine {
         alreadyBound: Set<WindowIdentity>,
         registryEntries: [(fingerprint: String, entry: WindowRegistry.Entry)],
         ignoreRules: IgnoreRuleSet?,
+        excludedIdentities: Set<WindowIdentity>,
         provisionalBindings: inout [String: WindowSnapshot]
     ) -> WindowSnapshot? {
         let deadline = Date().addingTimeInterval(TimeInterval(arrangeWaitTimeoutMS) / 1000)
@@ -673,7 +766,8 @@ public extension VirtualSpaceEngine {
                 continue
             }
             let manageable = WindowEligibility.geometryCandidates(in: observation).filter {
-                !PolicyEngine.matchesIgnoreRule(window: $0, rules: ignoreRules)
+                !excludedIdentities.contains($0.identity)
+                    && !PolicyEngine.matchesIgnoreRule(window: $0, rules: ignoreRules)
             }
             let entries = registryEntries.map { item -> WindowRegistry.Entry in
                 guard let bound = provisionalBindings[item.fingerprint] else {

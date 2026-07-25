@@ -19,22 +19,29 @@ struct CLIWindowSelector: Equatable {
 
 enum CLIRequestBuilder {
     static func arrange(
-        layout: String,
+        layouts: [String],
         dryRun: Bool,
         stateOnly: Bool,
         spaceID: Int?
     ) -> CommandRequest {
         var request = CommandRequest(command: "arrange")
-        request.layout = layout
+        request.layouts = layouts
         request.dryRun = dryRun ? true : nil
         request.stateOnly = stateOnly ? true : nil
         request.spaceID = spaceID
         return request
     }
 
-    static func spaceSwitch(spaceID: Int, reconcile: Bool) -> CommandRequest {
+    static func spaceQuery(command: String, layout: String?) -> CommandRequest {
+        var request = CommandRequest(command: command)
+        request.layout = layout
+        return request
+    }
+
+    static func spaceSwitch(spaceID: Int, layout: String?, reconcile: Bool) -> CommandRequest {
         var request = CommandRequest(command: "spaceSwitch")
         request.spaceID = spaceID
+        request.layout = layout
         request.reconcile = reconcile ? true : nil
         return request
     }

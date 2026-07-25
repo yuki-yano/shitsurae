@@ -262,12 +262,15 @@ public struct PendingUnresolvedSlot: Codable, Equatable, Sendable {
     }
 }
 
-/// The single pending structure in v2 (PendingSwitchTransaction was removed).
-/// Non-nil means the last visibility application did not fully converge; the
-/// engine retries reconciliation and diagnostics report recoveryRequired.
+/// Recovery metadata of one display's workspace. An entry means the last
+/// visibility application on that display did not fully converge; the engine
+/// retries reconciliation and diagnostics report recoveryRequired. At most
+/// one entry exists per display so concurrent per-display switches never
+/// clobber each other's unresolved recovery.
 public struct PendingVisibilityConvergence: Codable, Equatable, Sendable {
     public let requestID: String
     public let startedAt: String
+    public var displayID: String
     public let layoutName: String
     public let targetSpaceID: Int
     public let unresolvedSlots: [PendingUnresolvedSlot]
@@ -275,42 +278,47 @@ public struct PendingVisibilityConvergence: Codable, Equatable, Sendable {
     public init(
         requestID: String,
         startedAt: String,
+        displayID: String,
         layoutName: String,
         targetSpaceID: Int,
         unresolvedSlots: [PendingUnresolvedSlot] = []
     ) {
         self.requestID = requestID
         self.startedAt = startedAt
+        self.displayID = displayID
         self.layoutName = layoutName
         self.targetSpaceID = targetSpaceID
         self.unresolvedSlots = unresolvedSlots
     }
 }
 
-/// Active workspace per display. v2.0 keeps exactly one element (the host
-/// display); the schema is a map so per-display workspaces can ship without a
-/// schema migration.
-public struct ActiveSpace: Codable, Equatable, Sendable {
+/// Active workspace of one display: which layout is active there and which of
+/// its spaces is currently shown. Invariants (enforced by upsert): at most
+/// one entry per displayID and at most one entry per layoutName. Array order
+/// is the registration order and is the deterministic tie-breaker when
+/// several dormant entries re-resolve to the same reconnected display.
+public struct ActiveWorkspace: Codable, Equatable, Sendable {
     public var displayID: String
+    public var layoutName: String
     public var spaceID: Int
 
-    public init(displayID: String, spaceID: Int) {
+    public init(displayID: String, layoutName: String, spaceID: Int) {
         self.displayID = displayID
+        self.layoutName = layoutName
         self.spaceID = spaceID
     }
 }
 
 public struct RuntimeState: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 4
+    public static let currentSchemaVersion = 5
 
     public var schemaVersion: Int
     public var updatedAt: String
     public var revision: UInt64
     public var configGeneration: String
     public var liveArrangeRecoveryRequired: Bool
-    public var activeLayoutName: String?
-    public var activeSpaces: [ActiveSpace]
-    public var pendingVisibilityConvergence: PendingVisibilityConvergence?
+    public var activeWorkspaces: [ActiveWorkspace]
+    public var pendingVisibilityConvergences: [PendingVisibilityConvergence]
     public var slots: [SlotEntry]
 
     public init(
@@ -319,9 +327,8 @@ public struct RuntimeState: Codable, Equatable, Sendable {
         revision: UInt64 = 0,
         configGeneration: String = "",
         liveArrangeRecoveryRequired: Bool = false,
-        activeLayoutName: String? = nil,
-        activeSpaces: [ActiveSpace] = [],
-        pendingVisibilityConvergence: PendingVisibilityConvergence? = nil,
+        activeWorkspaces: [ActiveWorkspace] = [],
+        pendingVisibilityConvergences: [PendingVisibilityConvergence] = [],
         slots: [SlotEntry] = []
     ) {
         self.schemaVersion = schemaVersion
@@ -329,26 +336,60 @@ public struct RuntimeState: Codable, Equatable, Sendable {
         self.revision = revision
         self.configGeneration = configGeneration
         self.liveArrangeRecoveryRequired = liveArrangeRecoveryRequired
-        self.activeLayoutName = activeLayoutName
-        self.activeSpaces = activeSpaces
-        self.pendingVisibilityConvergence = pendingVisibilityConvergence
+        self.activeWorkspaces = activeWorkspaces
+        self.pendingVisibilityConvergences = pendingVisibilityConvergences
         self.slots = slots
     }
 
-    /// v2.0 single-host-display accessor.
-    public var primaryActiveSpaceID: Int? {
-        activeSpaces.first?.spaceID
+    public func activeWorkspace(displayID: String) -> ActiveWorkspace? {
+        activeWorkspaces.first(where: { $0.displayID == displayID })
     }
 
-    public func activeSpaceID(displayID: String) -> Int? {
-        activeSpaces.first(where: { $0.displayID == displayID })?.spaceID
+    public func activeWorkspace(layoutName: String) -> ActiveWorkspace? {
+        activeWorkspaces.first(where: { $0.layoutName == layoutName })
     }
 
-    public mutating func setActiveSpace(displayID: String, spaceID: Int) {
-        if let index = activeSpaces.firstIndex(where: { $0.displayID == displayID }) {
-            activeSpaces[index].spaceID = spaceID
+    /// Installs (layoutName, spaceID) as the active workspace of displayID,
+    /// enforcing both uniqueness invariants: the display hosts one workspace
+    /// and a layout is active on at most one display. When the layout moves
+    /// to a new displayID (reconnect can change the display UUID) its pending
+    /// recovery metadata migrates along so it can still be cleared.
+    public mutating func upsertActiveWorkspace(displayID: String, layoutName: String, spaceID: Int) {
+        let previousDisplayIDs = activeWorkspaces
+            .filter { $0.layoutName == layoutName && $0.displayID != displayID }
+            .map(\.displayID)
+        activeWorkspaces.removeAll { $0.layoutName == layoutName && $0.displayID != displayID }
+
+        if let index = activeWorkspaces.firstIndex(where: { $0.displayID == displayID }) {
+            activeWorkspaces[index].layoutName = layoutName
+            activeWorkspaces[index].spaceID = spaceID
         } else {
-            activeSpaces.append(ActiveSpace(displayID: displayID, spaceID: spaceID))
+            activeWorkspaces.append(ActiveWorkspace(displayID: displayID, layoutName: layoutName, spaceID: spaceID))
+        }
+
+        for previousDisplayID in previousDisplayIDs {
+            for index in pendingVisibilityConvergences.indices
+                where pendingVisibilityConvergences[index].displayID == previousDisplayID
+                && pendingVisibilityConvergences[index].layoutName == layoutName
+            {
+                pendingVisibilityConvergences[index].displayID = displayID
+            }
+        }
+    }
+
+    public func pendingVisibilityConvergence(displayID: String) -> PendingVisibilityConvergence? {
+        pendingVisibilityConvergences.first(where: { $0.displayID == displayID })
+    }
+
+    /// Replaces (or clears, when nil) the recovery metadata of one display
+    /// without touching other displays' entries.
+    public mutating func setPendingVisibilityConvergence(
+        displayID: String,
+        _ value: PendingVisibilityConvergence?
+    ) {
+        pendingVisibilityConvergences.removeAll { $0.displayID == displayID }
+        if let value {
+            pendingVisibilityConvergences.append(value)
         }
     }
 
@@ -357,7 +398,7 @@ public struct RuntimeState: Codable, Equatable, Sendable {
     }
 
     public var recoveryRequired: Bool {
-        pendingVisibilityConvergence != nil || liveArrangeRecoveryRequired
+        !pendingVisibilityConvergences.isEmpty || liveArrangeRecoveryRequired
     }
 
     /// Canonical in-memory and on-disk ordering. Only immutable layout
@@ -365,9 +406,9 @@ public struct RuntimeState: Codable, Equatable, Sendable {
     /// and must never change rule-assignment priority after a move.
     public func canonicalized() -> RuntimeState {
         var copy = self
-        // The first element is the v2 primary-host accessor; preserve that
-        // semantic order. Sorting by display UUID silently changed which
-        // display primaryActiveSpaceID referred to in multi-display state.
+        // activeWorkspaces / pendingVisibilityConvergences keep their append
+        // order: it is the registration order used as the deterministic
+        // tie-breaker for dormant-workspace restore priority.
         copy.slots.sort { lhs, rhs in
             if lhs.layoutName != rhs.layoutName { return lhs.layoutName < rhs.layoutName }
             if lhs.origin != rhs.origin { return lhs.origin == .layout }

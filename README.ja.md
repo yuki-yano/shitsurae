@@ -109,14 +109,17 @@ Shitsurae は通常の macOS アプリとして起動し、メニューバーに
 ```bash
 shitsurae arrange <layout> --dry-run --json    # 実行計画の確認(変更なし)
 shitsurae arrange <layout> --json              # レイアウト適用
+shitsurae arrange <primary> <secondary> --json # 別displayのレイアウトを一括適用
 shitsurae arrange <layout> --space 2 --json    # 特定 workspace に適用
 shitsurae arrange <layout> --state-only --json # runtime state のみ更新
 shitsurae layouts list                         # 定義済みレイアウト一覧
 shitsurae validate --json                      # 設定ファイルの検証
 shitsurae diagnostics --json                   # 診断情報
 shitsurae space current --json                 # アクティブ workspace 情報
+shitsurae space current --layout <layout> --json # 指定layoutのworkspace
 shitsurae space list --json                    # workspace 一覧
 shitsurae space switch 2 --json                # アクティブ workspace 切替
+shitsurae space switch 2 --layout <layout> --json # 指定layoutだけ切替
 shitsurae space recover --force-clear-pending --yes --json # recovery state の強制解除
 shitsurae window current --json                # 現在フォーカスウィンドウの情報
 shitsurae window workspace 2 --json            # window を workspace 2 へ再割り当て
@@ -131,9 +134,44 @@ shitsurae switcher list --json --include-all-spaces true  # 全 workspace の候
 
 ### 8. マルチディスプレイ対応
 
-- `primary` / `secondary` のロール指定、解像度条件でディスプレイをマッチ
-- ディスプレイの接続/切断を検知してウィンドウ配置を自動再調整
-- ディスプレイの識別はディスプレイ UUID ベースで、再接続後も安定
+- ディスプレイごとに独立した workspace を持てます。`layouts.<name>.display` でレイアウトのホストディスプレイを宣言し、arrange は「そのディスプレイの」アクティブレイアウトだけを置き換えます
+- ディスプレイは `primary` / `secondary` のロール指定、解像度条件、ディスプレイ UUID（`display.id`）でマッチ
+- `--layout` 未指定のスペース切替と、cycle・switcher・スロットフォーカスはプライマリディスプレイの workspace を対象にします。`space switch --layout <name>` は指定 workspace だけを切り替え、他ディスプレイには干渉しません
+- `shitsurae arrange main calendar` は、別ディスプレイに解決される複数レイアウトを1リクエストで適用します。全レイアウトの存在・接続先・display重複を最初に検証したあと、ウィンドウ操作を直列実行します（物理操作のatomicityは保証しません）。複数指定時は `--dry-run` / `--state-only` / `--space` を併用できません
+- `space list` / `space current` / `space switch` に `--layout <name>` を付けると、そのレイアウトのworkspaceだけを対象にできます。未適用レイアウトは暗黙に起動せずエラーになります
+- secondary ホストの 1 スペースレイアウトは、実質的な「常時表示の固定面」になります（下の例）
+- 宣言先ディスプレイが切断されると workspace は休眠し、macOS が移動したウィンドウには触れません。再接続時はレイアウトを自動で再配置します（アプリの起動はしません）。再接続で UUID が変わっても宣言の再解決で復元しますが、`display.id` 直指定だけは UUID 変化後に設定の更新が必要です（ロール / 解像度指定を推奨）
+- プライマリ以外のディスプレイ上の未追跡ウィンドウは自動 adoption されません。レイアウトが claim しない限り、サブディスプレイは自由な置き場のままです
+
+```yaml
+layouts:
+  main:
+    spaces:
+      - spaceID: 1
+        windows: [...]
+  calendar:
+    display:
+      monitor: secondary
+    spaces:
+      - spaceID: 1
+        windows:
+          - slot: 1
+            launch: true
+            match:
+              bundleID: com.microsoft.edgemac.app.xxxxxxxxxxxx # Edge PWA
+            frame:
+              x: "0%"
+              y: "0%"
+              width: "100%"
+              height: "100%"
+```
+
+> [!IMPORTANT]
+> secondary ホストのレイアウトには**狭い matcher**（専用 bundleID、または `title` / `profile` の判別子付き）を使ってください。他ディスプレイのレイアウト rule に match するウィンドウはプライマリの adoption から除外されるため、広い matcher（ブラウザ本体の bundleID など）を書くと、そのアプリのプライマリ側ウィンドウが軒並み管理外になります。同時に active になり得るレイアウト間の完全同一 matcher は設定ロードエラーです。
+
+GUIのArrange画面では、接続displayごとにLayoutとSpaceを選び、行の**Apply**でそのdisplayだけを適用できます。同じ選択から**Apply Display Set**を押すと、選択した全displayの全workspaceを一括適用します。Virtual Workspaces欄にはactive workspaceごとのSpaceボタンが表示されるため、secondary側だけを切り替える操作も可能です。Workspace State画面も全active layoutを表示し、secondaryに所有されるwindowをUnmanagedとして扱いません。
+
+v2.0 からの移行: `spaces[].display` は削除されました。`layouts.<name>.display` へ移動してください（ホストディスプレイはレイアウトにつき 1 枚。従来から validator が強制していた不変条件です）。
 
 ### 9. 設定自動リロード
 
@@ -251,6 +289,8 @@ layouts:
 ```
 
 `spaceID` は仮想 workspace の論理番号です。その他のサンプルは `samples/` にあります。
+
+`windows[].frame` は省略できます。省略したwindowは、arrange時に現在の座標・サイズを維持したままworkspaceとslotへ登録されます。workspace切り替えによる画面外への退避と、元の座標・サイズへの復元は通常どおり行われます。
 
 ### 始め方
 
@@ -399,7 +439,7 @@ v2 は Mission Control / ネイティブ Space 連携を廃止しました。互
 1. **設定ファイル**: 次の 2 キーを削除してください(残っているとロード時エラーになります)
    - `mode.space`(常に virtual 動作になりました。`mode.followFocus` はそのまま使えます)
    - `executionPolicy`(セクションごと削除)
-2. **runtime state**: v1 の状態ファイルは初回起動時に自動的に破棄されます(バックアップが `runtime-state.discarded-*.json` として残ります)。`shitsurae arrange <layout> --state-only --space <id>` で再ブートストラップしてください。
+2. **runtime state**: v1 の状態ファイルは初回起動時に自動的に破棄されます(バックアップが `runtime-state.discarded-*.json` として残ります)。`shitsurae arrange <layout> --state-only --space <id>` で再ブートストラップしてください。なお、旧スキーマの state を検出した場合はファイルを温存したまま起動を停止します(退避中ウィンドウの唯一の記録のため)。クラッシュ / SIGKILL 直後にアップデートした場合のみ発生します(正常終了は state をクリアするため通常の更新では起きません)。旧バージョンを一度起動して正常終了するか、退避ウィンドウを手で戻してから `~/.local/state/shitsurae/runtime-state.json` を退避・削除してください。
 3. **同一アプリの複数スロット**: 同じ `bundleID` を複数スロットに割り当てている場合、各スロットに `title` / `profile` / `index` の区別子が必要になりました。
 4. **ShitsuraeAgent は廃止**: `~/Library/LaunchAgents/com.yuki-yano.shitsurae.agent.plist` が残っていれば削除して構いません。
 

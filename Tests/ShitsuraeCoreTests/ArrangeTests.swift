@@ -104,6 +104,48 @@ struct ArrangeTests {
         #expect(notesEntry?.windowID == 3)
     }
 
+    @Test func arrangeWithoutFrameTracksWindowWithoutMovingOrResizingIt() async throws {
+        let original = TestFixtures.window(
+            id: 1,
+            bundleID: "com.apple.TextEdit",
+            frame: ResolvedFrame(x: 137, y: 89, width: 777, height: 555),
+            isAXBacked: true
+        )
+        let (engine, control, url) = makeEngine(windows: [original])
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let layout = LayoutDefinition(spaces: [
+            SpaceDefinition(spaceID: 1, windows: [
+                WindowDefinition(
+                    match: WindowMatchRule(bundleID: "com.apple.TextEdit"),
+                    slot: 1,
+                    launch: false
+                ),
+            ]),
+        ])
+        let frameFreeConfig = TestFixtures.loadedConfig(layouts: ["track-only": layout])
+
+        let dryRun = try await engine.arrangeDryRun(
+            layoutName: "track-only",
+            spaceID: nil,
+            config: frameFreeConfig
+        )
+        #expect(!dryRun.plan.contains { $0.action == "setFrame" })
+        #expect(dryRun.plan.contains { $0.action == "registerSlot" })
+
+        let result = try await engine.arrange(
+            layoutName: "track-only",
+            spaceID: nil,
+            config: frameFreeConfig
+        )
+
+        #expect(result.result == "success")
+        #expect(control.window(1)?.frame == original.frame)
+        let entry = try #require((await engine.currentState).slots.first)
+        #expect(entry.layoutName == "track-only")
+        #expect(entry.spaceID == 1)
+        #expect(entry.lastVisibleFrame == original.frame)
+    }
+
     @Test func arrangeReportsPartialWhenWindowMissing() async throws {
         // Notes is not running and launch:false in the fixture layout.
         let (engine, _, url) = makeEngine(windows: [

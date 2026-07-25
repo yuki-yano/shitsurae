@@ -3,9 +3,13 @@ import Foundation
 /// Result of processing one AX focus event. `spaceID` is the workspace the
 /// window belongs to *after* processing (binding refresh or adoption already
 /// applied); nil means the window stays unmanaged (focus-ignored).
+/// `layoutName` / `activeSpaceID` describe the workspace of the layout that
+/// OWNS the window — follow-focus is ownership-scoped and must switch that
+/// layout's space, never another display's workspace.
 public struct FocusEventOutcome: Equatable, Sendable {
     public let sequence: UInt64
     public let identity: WindowIdentity
+    public let layoutName: String?
     public let spaceID: Int?
     public let activeSpaceID: Int?
     public let didAdopt: Bool
@@ -113,6 +117,24 @@ public extension VirtualSpaceEngine {
             return nil
         }
 
+        // Ownership is global across workspaces: a window owned by another
+        // display's layout must never be adopted or rebound by the primary
+        // layout — follow-focus acts on the owner's workspace instead.
+        let primary = primaryWorkspace()
+        if let owner = assignedEntry(for: trackingWindow, inventory: observation.inventory),
+           owner.layoutName != primary?.layoutName
+        {
+            let ownerWorkspace = currentState.activeWorkspace(layoutName: owner.layoutName)
+            return FocusEventOutcome(
+                sequence: sequence,
+                identity: identity,
+                layoutName: owner.layoutName,
+                spaceID: owner.spaceID,
+                activeSpaceID: ownerWorkspace?.spaceID,
+                didAdopt: false
+            )
+        }
+
         let suspendedSpaceID = suspendedCompanionMainSpaces[trackingWindow.identity]
         guard let result = try? trackWindow(
             windowID: trackingWindow.windowID,
@@ -136,17 +158,19 @@ public extension VirtualSpaceEngine {
         if suspendedSpaceID != nil,
            trackingWindow.identity == focusedWindow.identity
         {
-            guard let activeSpaceID = currentState.primaryActiveSpaceID,
+            guard let activeSpaceID = primaryWorkspace()?.spaceID,
                   let entry = result.entry,
                   entry.spaceID != activeSpaceID
             else {
                 suspendedCompanionMainSpaces.removeValue(forKey: trackingWindow.identity)
+                let workspace = primaryWorkspace()
                 return result.entry.map {
                     FocusEventOutcome(
                         sequence: sequence,
                         identity: identity,
+                        layoutName: workspace?.layoutName,
                         spaceID: $0.spaceID,
-                        activeSpaceID: currentState.primaryActiveSpaceID,
+                        activeSpaceID: workspace?.spaceID,
                         didAdopt: result.didAdopt
                     )
                 }
@@ -170,11 +194,13 @@ public extension VirtualSpaceEngine {
             }
             return nil
         }
+        let workspace = primaryWorkspace()
         return FocusEventOutcome(
             sequence: sequence,
             identity: identity,
+            layoutName: workspace?.layoutName,
             spaceID: result.entry?.spaceID,
-            activeSpaceID: currentState.primaryActiveSpaceID,
+            activeSpaceID: workspace?.spaceID,
             didAdopt: result.didAdopt
         )
     }
@@ -182,9 +208,12 @@ public extension VirtualSpaceEngine {
     /// Applies follow-focus only if this is still the latest event and the OS
     /// still reports the same exact frontmost focused window immediately
     /// before the switch. A stale continuation can never move workspaces.
+    /// The switch is scoped to the layout that owns the focused window; a
+    /// dormant owner (host display disconnected) is a silent no-op.
     func switchSpaceForFocusEvent(
         sequence: UInt64,
         identity: WindowIdentity,
+        layoutName: String,
         to targetSpaceID: Int,
         config: LoadedConfig
     ) throws -> SpaceSwitchOutcome? {
@@ -195,7 +224,16 @@ public extension VirtualSpaceEngine {
         }
         let observation = control.focusedWindowObservation()
         guard observation.focusedIdentity == identity else { return nil }
-        return try switchSpace(to: targetSpaceID, config: config)
+        guard let layout = config.config.layouts[layoutName],
+              DisplayResolver.hostDisplay(
+                  layout: layout,
+                  config: config.config,
+                  displays: control.displays()
+              ) != nil
+        else {
+            return nil // dormant owner: never redirect follow-focus elsewhere
+        }
+        return try switchSpace(layoutName: layoutName, to: targetSpaceID, config: config)
     }
 
     func invalidateFocusEvents(upTo sequence: UInt64) {
@@ -220,7 +258,7 @@ public extension VirtualSpaceEngine {
             title: window.title,
             profile: window.profileDirectory,
             spaceID: entry?.spaceID,
-            activeSpaceID: currentState.primaryActiveSpaceID,
+            activeSpaceID: primaryWorkspace()?.spaceID,
             displayID: window.displayID ?? "",
             role: window.role,
             subrole: window.subrole,
@@ -233,15 +271,14 @@ public extension VirtualSpaceEngine {
 
     // MARK: - focus
 
-    /// focus --slot N: targets the active workspace's tracked windows only.
+    /// focus --slot N: targets the primary workspace's tracked windows only.
     func focusSlot(_ slot: Int, config: LoadedConfig) throws -> FocusJSON {
         try ensureAccessibility()
-        guard let layoutName = currentState.activeLayoutName else {
+        guard let workspace = primaryWorkspace() else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
-        guard let activeSpaceID = currentState.primaryActiveSpaceID else {
-            throw VirtualSpaceEngineError.noActiveLayout
-        }
+        let layoutName = workspace.layoutName
+        let activeSpaceID = workspace.spaceID
 
         let entries = currentState.slots(layoutName: layoutName)
             .filter { $0.spaceID == activeSpaceID && $0.slot == slot }
@@ -287,11 +324,13 @@ public extension VirtualSpaceEngine {
         var didSwitchSpace = false
         let entry = trackedEntry(for: window)
 
+        // Switch within the layout that owns the window (its own workspace),
+        // so focusing a secondary-owned window never disturbs the primary.
         if let entry,
-           let activeSpaceID = currentState.primaryActiveSpaceID,
-           entry.spaceID != activeSpaceID
+           let ownerSpaceID = currentState.activeWorkspace(layoutName: entry.layoutName)?.spaceID,
+           entry.spaceID != ownerSpaceID
         {
-            _ = try switchSpace(to: entry.spaceID, config: config)
+            _ = try switchSpace(layoutName: entry.layoutName, to: entry.spaceID, config: config)
             didSwitchSpace = true
         }
 
@@ -322,10 +361,10 @@ public extension VirtualSpaceEngine {
         var didSwitchSpace = false
         let entry = assignedEntry(for: window)
         if let entry,
-           let activeSpaceID = currentState.primaryActiveSpaceID,
-           entry.spaceID != activeSpaceID
+           let ownerSpaceID = currentState.activeWorkspace(layoutName: entry.layoutName)?.spaceID,
+           entry.spaceID != ownerSpaceID
         {
-            _ = try switchSpace(to: entry.spaceID, config: config)
+            _ = try switchSpace(layoutName: entry.layoutName, to: entry.spaceID, config: config)
             didSwitchSpace = true
         }
 
@@ -352,11 +391,11 @@ public extension VirtualSpaceEngine {
         config: LoadedConfig
     ) throws -> WindowIdentity? {
         try ensureAccessibility()
-        guard let layoutName = currentState.activeLayoutName,
-              let activeSpaceID = currentState.primaryActiveSpaceID
-        else {
+        guard let workspace = primaryWorkspace() else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
+        let layoutName = workspace.layoutName
+        let activeSpaceID = workspace.spaceID
 
         let inventory = control.windowInventory()
         guard inventory.isAuthoritative else {
@@ -607,8 +646,12 @@ public extension VirtualSpaceEngine {
 
     // MARK: - Adoption
 
-    /// Pulls untracked on-screen windows of the host display into the active
-    /// workspace so cycle/switcher can reach them.
+    /// Pulls untracked on-screen windows of the primary workspace's host
+    /// display into that workspace so cycle/switcher can reach them.
+    /// Adoption is primary-only in the multi-display foundation; other
+    /// displays' stray windows stay unmanaged, and windows a different
+    /// workspace's layout rules match are never captured (their arrange /
+    /// reconnect restore must be able to claim them).
     func adoptUntrackedWindows(
         config: LoadedConfig,
         persistChanges: Bool = true,
@@ -616,14 +659,15 @@ public extension VirtualSpaceEngine {
         excludedWindowIdentities: Set<WindowIdentity> = [],
         additionalIgnoreRules: IgnoreRuleSet? = nil
     ) throws -> Int {
-        guard let layoutName = currentState.activeLayoutName,
-              let activeSpaceID = currentState.primaryActiveSpaceID,
-              let layout = config.config.layouts[layoutName]
+        let displays = control.displays()
+        guard let workspace = primaryWorkspace(displays: displays),
+              let layout = config.config.layouts[workspace.layoutName]
         else {
             return 0
         }
+        let layoutName = workspace.layoutName
+        let activeSpaceID = workspace.spaceID
 
-        let displays = control.displays()
         guard let hostDisplay = DisplayResolver.hostDisplay(
             layout: layout,
             config: config.config,
@@ -638,13 +682,25 @@ public extension VirtualSpaceEngine {
         let ineligibleAdoptedIDs = ineligibleAdoptedEntryIDs(layoutName: layoutName, windows: allWindows)
         let layoutSlots = currentState.slots(layoutName: layoutName)
         let onScreenIdentities = control.onScreenWindowIdentities()
+        let crossLayoutExcluded = crossLayoutExcludedIdentities(
+            layoutName: layoutName,
+            hostDisplayID: hostDisplay.id,
+            windows: allWindows,
+            includeDisplayAffinity: true
+        )
         let windows = allWindows.filter { window in
             onScreenIdentities.contains(window.identity)
                 && window.displayID == hostDisplay.id
                 && !window.minimized
                 && !excludedWindowIdentities.contains(window.identity)
+                && !crossLayoutExcluded.contains(window.identity)
                 && !WindowEligibility.isShitsuraeApplication(bundleID: window.bundleID)
                 && WindowEligibility.isManageableForVirtualWorkspace(window)
+                && !matchesOtherWorkspaceLayoutRule(
+                    window: window,
+                    excludingLayout: layoutName,
+                    config: config
+                )
                 && !PolicyEngine.matchesIgnoreRule(window: window, rules: config.config.ignore?.focus)
                 && !PolicyEngine.matchesIgnoreRule(window: window, rules: additionalIgnoreRules)
         }
@@ -696,7 +752,7 @@ public extension VirtualSpaceEngine {
         return result.didAdopt
     }
 
-    struct WindowTrackingResult {
+    struct WindowTrackingResult: Sendable {
         /// Entry owning the window after processing (nil = unmanaged).
         let entry: SlotEntry?
         /// The window as seen by the fresh enumeration (nil = not present
@@ -725,11 +781,11 @@ public extension VirtualSpaceEngine {
         adoptionSpaceID: Int? = nil,
         persistChanges: Bool = true
     ) throws -> WindowTrackingResult {
-        guard let layoutName = currentState.activeLayoutName,
-              let activeSpaceID = currentState.primaryActiveSpaceID
-        else {
+        guard let workspace = primaryWorkspace() else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
+        let layoutName = workspace.layoutName
+        let activeSpaceID = workspace.spaceID
 
         let inventory = suppliedInventory ?? control.windowInventory()
         let targetIdentity = WindowIdentity(
@@ -741,9 +797,30 @@ public extension VirtualSpaceEngine {
         // Focus projection may refresh the exact AX main's existing binding
         // and MRU while a sheet protects it from geometry. No other blocked
         // window enters the assignment pool, and a blocked target is never
-        // newly adopted below.
+        // newly adopted below. Windows another workspace owns (or hosts by
+        // display affinity) never enter the pool at all.
+        let crossLayoutExcluded = crossLayoutExcludedIdentities(
+            layoutName: layoutName,
+            hostDisplayID: workspace.displayID,
+            windows: inventory.windows,
+            includeDisplayAffinity: true
+        )
+        // A target excluded by cross-layout scope is PRESENT but unmanaged
+        // for this workspace — callers must be able to distinguish that from
+        // absence, or the frontmost window's per-app shortcut policy would be
+        // dropped for windows that are physically in front of the user
+        // (FollowFocusPolicy invariant).
+        if crossLayoutExcluded.contains(targetIdentity),
+           let excludedWindow = inventory.windows.first(where: {
+               $0.identity == targetIdentity
+                   && WindowEligibility.isManageableForVirtualWorkspace($0)
+           })
+        {
+            return WindowTrackingResult(entry: nil, window: excludedWindow, didAdopt: false)
+        }
         let manageable = inventory.windows.filter { candidate in
-            WindowEligibility.isManageableForVirtualWorkspace(candidate)
+            guard !crossLayoutExcluded.contains(candidate.identity) else { return false }
+            return WindowEligibility.isManageableForVirtualWorkspace(candidate)
                 || (allowBlockedBindingRefresh
                     && candidate.identity == targetIdentity
                     && WindowEligibility.classification(of: candidate) == .manageable)
@@ -793,6 +870,19 @@ public extension VirtualSpaceEngine {
         if respectFocusIgnoreRules,
            PolicyEngine.matchesIgnoreRule(window: window, rules: config.config.ignore?.focus)
         {
+            return WindowTrackingResult(entry: nil, window: window, didAdopt: false)
+        }
+
+        // Focus-driven adoption is scoped exactly like bulk adoption: only
+        // windows on the primary workspace's host display, and never one a
+        // different workspace's layout rules match.
+        guard window.displayID == workspace.displayID,
+              !matchesOtherWorkspaceLayoutRule(
+                  window: window,
+                  excludingLayout: layoutName,
+                  config: config
+              )
+        else {
             return WindowTrackingResult(entry: nil, window: window, didAdopt: false)
         }
 
@@ -846,19 +936,29 @@ public extension VirtualSpaceEngine {
         config: LoadedConfig,
         excludedApps: Set<String> = []
     ) throws -> [SwitcherCandidate] {
-        guard let layoutName = currentState.activeLayoutName else {
+        guard let workspace = primaryWorkspace() else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
+        let layoutName = workspace.layoutName
         _ = try? adoptUntrackedWindows(config: config)
 
-        let activeSpaceID = currentState.primaryActiveSpaceID
+        let activeSpaceID = workspace.spaceID
         let layoutSlots = currentState.slots(layoutName: layoutName)
             .filter { includeAllSpaces || $0.spaceID == activeSpaceID }
             .filter { !excludedApps.contains($0.bundleID) }
 
         let inventory = control.windowInventory()
         guard inventory.isAuthoritative else { return [] }
-        let windows = inventory.windows.filter(WindowEligibility.isManageableForVirtualWorkspace)
+        let crossLayoutExcluded = crossLayoutExcludedIdentities(
+            layoutName: layoutName,
+            hostDisplayID: workspace.displayID,
+            windows: inventory.windows,
+            includeDisplayAffinity: true
+        )
+        let windows = inventory.windows.filter {
+            WindowEligibility.isManageableForVirtualWorkspace($0)
+                && !crossLayoutExcluded.contains($0.identity)
+        }
         let resolution = WindowRegistry.resolve(
             entries: layoutSlots.map(\.registryEntry),
             manageableWindows: windows,
@@ -906,19 +1006,29 @@ public extension VirtualSpaceEngine {
     /// Cycle order: slotted windows first (slot ascending), then adopted
     /// windows in observed order. Used by nextWindow/prevWindow.
     func cycleCandidates(config: LoadedConfig, excludedApps: Set<String> = []) throws -> [SwitcherCandidate] {
-        guard let layoutName = currentState.activeLayoutName else {
+        guard let workspace = primaryWorkspace() else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
+        let layoutName = workspace.layoutName
         _ = try? adoptUntrackedWindows(config: config)
 
-        let activeSpaceID = currentState.primaryActiveSpaceID
+        let activeSpaceID = workspace.spaceID
         let layoutSlots = currentState.slots(layoutName: layoutName)
             .filter { $0.spaceID == activeSpaceID }
             .filter { !excludedApps.contains($0.bundleID) }
 
         let inventory = control.windowInventory()
         guard inventory.isAuthoritative else { return [] }
-        let windows = inventory.windows.filter(WindowEligibility.isManageableForVirtualWorkspace)
+        let crossLayoutExcluded = crossLayoutExcludedIdentities(
+            layoutName: layoutName,
+            hostDisplayID: workspace.displayID,
+            windows: inventory.windows,
+            includeDisplayAffinity: true
+        )
+        let windows = inventory.windows.filter {
+            WindowEligibility.isManageableForVirtualWorkspace($0)
+                && !crossLayoutExcluded.contains($0.identity)
+        }
         let resolution = WindowRegistry.resolve(
             entries: layoutSlots.map(\.registryEntry),
             manageableWindows: windows,
@@ -956,17 +1066,58 @@ public extension VirtualSpaceEngine {
 
     // MARK: - Space queries
 
-    func spaceList(config: LoadedConfig) -> SpaceListJSON {
-        guard let layoutName = currentState.activeLayoutName,
-              let layout = config.config.layouts[layoutName]
-        else {
-            return SpaceListJSON(layoutName: nil, spaces: [])
+    /// Every display's active workspace (dormant included), for reference
+    /// commands and diagnostics.
+    func workspaceSummaries() -> [WorkspaceSummaryJSON] {
+        let connectedIDs = Set(control.displays().map(\.id))
+        return currentState.activeWorkspaces.map { workspace in
+            WorkspaceSummaryJSON(
+                displayID: workspace.displayID,
+                layoutName: workspace.layoutName,
+                spaceID: workspace.spaceID,
+                dormant: !connectedIDs.contains(workspace.displayID)
+            )
         }
+    }
 
-        let activeSpaceID = currentState.primaryActiveSpaceID
+    func spaceList(config: LoadedConfig) -> SpaceListJSON {
+        let workspaces = workspaceSummaries()
+        guard let workspace = primaryWorkspace(),
+              let layout = config.config.layouts[workspace.layoutName]
+        else {
+            return SpaceListJSON(layoutName: nil, spaces: [], workspaces: workspaces)
+        }
+        return makeSpaceList(
+            workspace: workspace,
+            layout: layout,
+            workspaces: workspaces
+        )
+    }
+
+    /// Layout-scoped query used by `space list/current --layout`.
+    /// A configured but inactive layout is not implicitly bootstrapped.
+    func spaceList(layoutName: String, config: LoadedConfig) throws -> SpaceListJSON {
+        guard let layout = config.config.layouts[layoutName] else {
+            throw VirtualSpaceEngineError.layoutNotFound(layoutName)
+        }
+        guard let workspace = currentState.activeWorkspace(layoutName: layoutName) else {
+            throw VirtualSpaceEngineError.workspaceNotActive(layoutName)
+        }
+        return makeSpaceList(
+            workspace: workspace,
+            layout: layout,
+            workspaces: workspaceSummaries()
+        )
+    }
+
+    private func makeSpaceList(
+        workspace: ActiveWorkspace,
+        layout: LayoutDefinition,
+        workspaces: [WorkspaceSummaryJSON]
+    ) -> SpaceListJSON {
         let focusedIdentity = control.focusedWindow()?.identity
-        let layoutSlots = currentState.slots(layoutName: layoutName)
-        let hostDisplayID = currentState.activeSpaces.first?.displayID
+        let layoutSlots = currentState.slots(layoutName: workspace.layoutName)
+        let hostDisplayID = workspace.displayID
 
         let spaces = layout.spaces.map(\.spaceID).sorted().map { spaceID in
             let trackedWindowIDs = layoutSlots
@@ -978,13 +1129,17 @@ public extension VirtualSpaceEngine {
             return SpaceSummaryJSON(
                 spaceID: spaceID,
                 displayID: hostDisplayID,
-                isActive: spaceID == activeSpaceID,
+                isActive: spaceID == workspace.spaceID,
                 hasFocus: focusedIdentity.map { trackedIdentities.contains($0) } ?? false,
                 trackedWindowIDs: trackedWindowIDs.sorted()
             )
         }
 
-        return SpaceListJSON(layoutName: layoutName, spaces: spaces)
+        return SpaceListJSON(
+            layoutName: workspace.layoutName,
+            spaces: spaces,
+            workspaces: workspaces
+        )
     }
 
     func spaceCurrent(config: LoadedConfig) -> SpaceCurrentJSON {
@@ -992,6 +1147,17 @@ public extension VirtualSpaceEngine {
         return SpaceCurrentJSON(
             layoutName: list.layoutName,
             space: list.spaces.first(where: \.isActive),
+            workspaces: list.workspaces,
+            recoveryRequired: currentState.recoveryRequired
+        )
+    }
+
+    func spaceCurrent(layoutName: String, config: LoadedConfig) throws -> SpaceCurrentJSON {
+        let list = try spaceList(layoutName: layoutName, config: config)
+        return SpaceCurrentJSON(
+            layoutName: list.layoutName,
+            space: list.spaces.first(where: \.isActive),
+            workspaces: list.workspaces,
             recoveryRequired: currentState.recoveryRequired
         )
     }

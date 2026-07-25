@@ -96,14 +96,17 @@ The CLI talks to the app over a unix socket and launches the app automatically w
 ```bash
 shitsurae arrange <layout> --dry-run --json    # preview the plan (no changes)
 shitsurae arrange <layout> --json              # apply a layout
+shitsurae arrange <primary> <secondary> --json # batch layouts on distinct displays
 shitsurae arrange <layout> --space 2 --json    # apply one workspace only
 shitsurae arrange <layout> --state-only --json # update runtime state only
 shitsurae layouts list                         # list defined layouts
 shitsurae validate --json                      # validate config files
 shitsurae diagnostics --json                   # diagnostics
 shitsurae space current --json                 # active workspace info
+shitsurae space current --layout <layout> --json # one layout's active workspace
 shitsurae space list --json                    # workspace list
 shitsurae space switch 2 --json                # switch the active workspace
+shitsurae space switch 2 --layout <layout> --json # switch only that layout
 shitsurae space recover --force-clear-pending --yes --json
 shitsurae window current --json                # focused window info
 shitsurae window workspace 2 --json            # reassign a window to workspace 2
@@ -118,9 +121,44 @@ shitsurae switcher list --json --include-all-spaces true
 
 ### 8. Multi-display support
 
-- Match displays by `primary` / `secondary` role or by resolution
-- Reconciles window placement when displays connect/disconnect
-- Displays are identified by display UUID — stable across reconnects
+- Each display hosts its own independent workspace: `layouts.<name>.display` declares the layout's host display, and arranging a layout only replaces the active layout of *that* display
+- Match displays by `primary` / `secondary` role, by resolution, or by display UUID (`display.id`)
+- Space switching without `--layout`, cycle, switcher and slot focus target the primary display's workspace. `space switch --layout <name>` switches only the named workspace without disturbing other displays
+- `shitsurae arrange main calendar` applies layouts that resolve to distinct displays in one request. Shitsurae validates every layout, connected host and display collision before serializing window mutations; physical window operations are not atomic. Multi-layout arrange does not accept `--dry-run`, `--state-only` or `--space`
+- Add `--layout <name>` to `space list`, `space current` or `space switch` to target only that layout's active workspace. A configured but inactive layout is rejected instead of being implicitly bootstrapped
+- A single-space layout hosted on a secondary display is effectively an always-visible pinned surface (see the example below)
+- When a declared display disconnects, its workspace goes dormant and windows moved by macOS are left untouched; on reconnect the layout is repositioned automatically (no apps are launched). Reconnects that change the display UUID are handled by re-resolving the declaration — but a layout pinned with `display.id` cannot recover from a UUID change until the config is updated, so prefer role / resolution declarations
+- Untracked windows on non-primary displays are never auto-adopted: secondary displays stay free-form unless a layout claims their windows
+
+```yaml
+layouts:
+  main:
+    spaces:
+      - spaceID: 1
+        windows: [...]
+  calendar:
+    display:
+      monitor: secondary
+    spaces:
+      - spaceID: 1
+        windows:
+          - slot: 1
+            launch: true
+            match:
+              bundleID: com.microsoft.edgemac.app.xxxxxxxxxxxx # Edge PWA
+            frame:
+              x: "0%"
+              y: "0%"
+              width: "100%"
+              height: "100%"
+```
+
+> [!IMPORTANT]
+> Give secondary-hosted layouts *narrow* matchers (a dedicated bundleID, or `title` / `profile` discriminators). Windows that match another display's layout rules are excluded from adoption on the primary display, so a broad matcher (bare browser bundleID etc.) would leave all of that app's primary-display windows unmanaged. Completely identical matchers across layouts that can be active simultaneously are a config-load error.
+
+In the GUI Arrange screen, select a Layout and Space for each connected display. Use the row’s **Apply** button to apply only that display, or **Apply Display Set** to apply every selected display’s complete workspace set together. The Virtual Workspaces card exposes Space buttons for every active workspace, so a secondary workspace can be switched independently. Workspace State also lists every active layout and does not classify secondary-owned windows as unmanaged.
+
+Migrating from v2.0: `spaces[].display` was removed — move the block to `layouts.<name>.display` (one host display per layout; this was already enforced).
 
 ### 9. Config auto-reload
 
@@ -235,6 +273,8 @@ layouts:
 ```
 
 `spaceID` is the logical virtual-workspace number. More samples live in `samples/`.
+
+`windows[].frame` is optional. When omitted, arrange registers the window with its workspace and slot without changing its current position or size. Switching workspaces still moves it off-screen and restores it to that captured frame normally.
 
 ### Getting started
 
@@ -365,7 +405,7 @@ shortcuts:
 1. **Config**: delete these keys (they are load errors now):
    - `mode.space` (always virtual; `mode.followFocus` still works)
    - `executionPolicy` (whole section)
-2. **Runtime state**: unsupported or corrupt state is preserved and startup stops instead of assuming no windows are parked. Quit the previous version normally to restore its windows, then move `~/.local/state/shitsurae/runtime-state.json` aside and apply a v2 layout.
+2. **Runtime state**: unsupported or corrupt state is preserved and startup stops instead of assuming no windows are parked. Quit the previous version normally to restore its windows, then move `~/.local/state/shitsurae/runtime-state.json` aside and apply a v2 layout. The same applies when upgrading right after a crash / SIGKILL (a clean quit clears the state, so the normal update path never hits this): launch the previous version once and quit it cleanly, or rescue any parked windows by hand before deleting the state file.
 3. **Same app in multiple slots**: each slot now needs a `title` / `profile` / `index` discriminator.
 4. **ShitsuraeAgent is gone**: you can delete `~/Library/LaunchAgents/com.yuki-yano.shitsurae.agent.plist` if it remains.
 

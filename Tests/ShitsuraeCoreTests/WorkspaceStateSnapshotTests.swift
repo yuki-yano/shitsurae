@@ -9,9 +9,10 @@ struct WorkspaceStateSnapshotTests {
     }
 
     private func makeEngine(
-        windows: [WindowSnapshot]
+        windows: [WindowSnapshot],
+        displays: [DisplayInfo] = [TestFixtures.display]
     ) -> (engine: VirtualSpaceEngine, control: MockWindowControl, stateURL: URL) {
-        let control = MockWindowControl(windows: windows, displays: [TestFixtures.display])
+        let control = MockWindowControl(windows: windows, displays: displays)
         let (store, stateURL) = TestFixtures.tempStateStore()
         let engine = try! VirtualSpaceEngine(
             store: store,
@@ -58,7 +59,7 @@ struct WorkspaceStateSnapshotTests {
         let snapshot = await engine.workspaceStateSnapshot(config: config)
 
         #expect(control.listAllWindowsCallCount == inventoryCallsBeforeSnapshot + 1)
-        #expect(snapshot.layoutName == "work")
+        #expect(snapshot.layoutNames == ["work"])
         #expect(snapshot.inventoryAvailability == .available)
         #expect(snapshot.trackedWindowCount == 3)
         #expect(snapshot.boundWindowCount == 3)
@@ -136,6 +137,56 @@ struct WorkspaceStateSnapshotTests {
         #expect(snapshot.unmanagedWindows.count == 1)
         #expect(snapshot.unmanagedWindows[0].liveWindow.identity.windowID == 9)
         #expect(snapshot.unmanagedWindows[0].reason == .unassigned)
+    }
+
+    @Test func secondaryOwnedWindowIsNotReportedAsUnmanaged() async throws {
+        let secondary = TestFixtures.secondaryDisplay()
+        let calendarBundleID = "com.example.Calendar"
+        let dualConfig = TestFixtures.loadedConfig(layouts: [
+            "work": TestFixtures.twoSpaceLayout(),
+            "calendar": LayoutDefinition(
+                display: DisplayDefinition(monitor: .secondary),
+                spaces: [
+                    SpaceDefinition(spaceID: 1, windows: [
+                        WindowDefinition(
+                            match: WindowMatchRule(bundleID: calendarBundleID),
+                            slot: 1,
+                            launch: false,
+                            frame: TestFixtures.frameDef("0%", "0%", "100%", "100%")
+                        ),
+                    ]),
+                ]
+            ),
+        ])
+        let calendar = TestFixtures.window(
+            id: 9,
+            bundleID: calendarBundleID,
+            title: "Calendar",
+            frame: ResolvedFrame(x: 1500, y: 20, width: 600, height: 500),
+            isAXBacked: true,
+            frontIndex: 3,
+            displayID: secondary.id
+        )
+        let (engine, _, stateURL) = makeEngine(
+            windows: standardWindows() + [calendar],
+            displays: [TestFixtures.display, secondary]
+        )
+        defer { try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: dualConfig)
+        try await engine.bootstrapState(layoutName: "calendar", activeSpaceID: 1, config: dualConfig)
+
+        let snapshot = await engine.workspaceStateSnapshot(config: dualConfig)
+
+        #expect(snapshot.layoutNames == ["work", "calendar"])
+        let calendarWorkspace = try #require(snapshot.workspaces.first {
+            $0.layoutName == "calendar" && $0.spaceID == 1
+        })
+        #expect(calendarWorkspace.windows.count == 1)
+        #expect(calendarWorkspace.windows[0].bindingState == .bound)
+        #expect(calendarWorkspace.windows[0].liveWindow?.identity == calendar.identity)
+        #expect(!snapshot.unmanagedWindows.contains {
+            $0.liveWindow.identity == calendar.identity
+        })
     }
 
     @Test func failsClosedWhenLiveInventoryIsUnavailable() async throws {

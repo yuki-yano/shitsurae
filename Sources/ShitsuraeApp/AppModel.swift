@@ -213,9 +213,86 @@ final class AppModel: ObservableObject {
                 event: "app.runtimeStateLoadFailed",
                 fields: ["error": String(describing: error)]
             )
-            fatalError("Unable to load runtime state safely: \(error)")
+            guard let recovered = Self.recoverEngineAfterStateLoadFailure(
+                error: error,
+                logger: logger,
+                focusEventGate: focusEventGate
+            ) else {
+                // The user chose to quit (or recovery failed); the state file
+                // stays untouched for the previous version to restore from.
+                exit(1)
+            }
+            engine = recovered
         }
         router = CommandRouter(engine: engine, configManager: configManager, logger: logger)
+    }
+
+    /// State loading is fail-closed: an unsupported or corrupt file may be
+    /// the only record of windows parked offscreen, so it is never discarded
+    /// silently. Crashing here (the previous behavior) gave the user no
+    /// recovery path — explain the situation instead and let them choose:
+    /// quit (e.g. to run the previous version once so it restores its own
+    /// windows), or preserve the file as a backup and start fresh.
+    private static func recoverEngineAfterStateLoadFailure(
+        error: Error,
+        logger: ShitsuraeLogger,
+        focusEventGate: FocusEventGate
+    ) -> VirtualSpaceEngine? {
+        _ = NSApplication.shared // bootstrap AppKit for the pre-launch alert
+
+        let backupLabel: String
+        let detail: String
+        if case let RuntimeStateStoreError.unsupportedSchema(_, actualVersion, expectedVersion) = error {
+            backupLabel = "unsupported"
+            detail = """
+            The saved runtime state uses schema version \(actualVersion.map(String.init) ?? "unknown"), \
+            but this version of Shitsurae requires version \(expectedVersion). This happens when \
+            updating while the previous version was still running or right after it exited without \
+            a clean shutdown.
+
+            Windows the previous version parked offscreen are recorded only in that file. To restore \
+            them automatically, choose Quit, launch the previous Shitsurae version once and quit it \
+            normally, then start this version again.
+
+            "Start Fresh" keeps the file as a backup and starts with empty state — re-apply a layout \
+            afterwards to bring configured windows back on screen.
+            """
+        } else {
+            backupLabel = "unreadable"
+            detail = """
+            The runtime state file could not be read: \(String(describing: error))
+
+            The file has been left untouched. "Start Fresh" moves it aside as a backup and starts \
+            with empty state — re-apply a layout afterwards to bring configured windows back on screen.
+            """
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Shitsurae cannot read its runtime state"
+        alert.informativeText = detail
+        alert.addButton(withTitle: "Quit")
+        alert.addButton(withTitle: "Start Fresh (Keep Backup)")
+
+        guard alert.runModal() == .alertSecondButtonReturn else {
+            return nil
+        }
+
+        let store = RuntimeStateStore()
+        let backupURL = store.moveStateFileAside(label: backupLabel)
+        logger.log(
+            event: "app.runtimeStateMovedAside",
+            fields: ["backup": backupURL?.path ?? "<moveFailed>"]
+        )
+        guard backupURL != nil else {
+            return nil // never start over a file that refused to move aside
+        }
+        return try? VirtualSpaceEngine(
+            store: store,
+            control: LiveWindowControl(),
+            logger: logger,
+            focusEventGate: focusEventGate
+        )
     }
 
     func start() {
@@ -329,10 +406,11 @@ final class AppModel: ObservableObject {
 
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let state = await engine.currentState
-            activeLayoutName = state.activeLayoutName
-            activeSpaceID = state.primaryActiveSpaceID
-            if let layoutName = state.activeLayoutName,
+            let primaryLayoutName = await engine.activeLayoutName()
+            let primarySpaceID = await engine.activeSpaceID()
+            activeLayoutName = primaryLayoutName
+            activeSpaceID = primarySpaceID
+            if let layoutName = primaryLayoutName,
                let layout = configManager.configIfLoaded()?.config.layouts[layoutName]
             {
                 availableSpaceIDs = layout.spaces.map(\.spaceID).sorted()
@@ -392,6 +470,74 @@ final class AppModel: ObservableObject {
         applyLayout(name, spaceID: spaceID, shitsuraeWindow: shitsuraeWindow)
     }
 
+    func applyLayoutsFromMainWindow(_ names: [String]) {
+        let label = "arrange \(names.joined(separator: ", "))"
+        guard names.count >= 2 else {
+            let message = "select at least two display layouts"
+            lastActionMessage = "\(label): \(message)"
+            actionStatus = .failed(label, message)
+            return
+        }
+        guard let shitsuraeWindow = shitsuraeMainWindowSelector() else {
+            let message = "Shitsurae main window is unavailable"
+            lastActionMessage = "\(label): \(message)"
+            actionStatus = .failed(label, message)
+            return
+        }
+
+        let currentDisplays = displays
+        let primaryDisplayID = currentDisplays.first(where: \.isPrimary)?.id
+        let loadedConfig = configManager.configIfLoaded()?.config
+        let includesPrimaryLayout = names.contains { name in
+            guard let layout = loadedConfig?.layouts[name] else { return false }
+            return DisplayResolver.hostDisplay(
+                layout: layout,
+                config: loadedConfig,
+                displays: currentDisplays
+            )?.id == primaryDisplayID
+        }
+
+        runEngineAction(label, urgency: .interactive) { engine, config in
+            if includesPrimaryLayout {
+                let primaryLayoutName = names.first { name in
+                    guard let layout = config.config.layouts[name] else { return false }
+                    return DisplayResolver.hostDisplay(
+                        layout: layout,
+                        config: config.config,
+                        displays: currentDisplays
+                    )?.isPrimary == true
+                }
+                if let primaryLayoutName,
+                   let layout = config.config.layouts[primaryLayoutName],
+                   !layout.spaces.contains(where: { $0.spaceID == 1 })
+                {
+                    throw VirtualSpaceEngineError.spaceNotFound(
+                        layoutName: primaryLayoutName,
+                        spaceID: 1
+                    )
+                }
+            }
+
+            let result = try await engine.arrange(layoutNames: names, config: config)
+            if result.layouts.contains(where: { $0.result == "failed" }) {
+                let failed = result.layouts
+                    .filter { $0.result == "failed" }
+                    .map(\.layout)
+                    .joined(separator: ", ")
+                throw VirtualSpaceEngineError.stateError(
+                    "arrange failed for: \(failed)"
+                )
+            }
+            if includesPrimaryLayout {
+                _ = try await engine.windowWorkspace(
+                    selector: shitsuraeWindow,
+                    toSpaceID: 1,
+                    config: config
+                )
+            }
+        }
+    }
+
     private func applyLayout(
         _ name: String,
         spaceID: Int?,
@@ -445,12 +591,31 @@ final class AppModel: ObservableObject {
     }
 
     func switchSpace(to spaceID: Int) {
+        performSpaceSwitch(layoutName: nil, to: spaceID)
+    }
+
+    func switchSpace(layoutName: String, to spaceID: Int) {
+        performSpaceSwitch(layoutName: layoutName, to: spaceID)
+    }
+
+    private func performSpaceSwitch(layoutName: String?, to spaceID: Int) {
         // Mark before the switch: the engine focuses the target window
         // mid-switch and the OS activation notification must not re-trigger
         // follow-focus.
         markInteractiveActivation()
-        runEngineAction("switch to space \(spaceID)", urgency: .interactive) { [weak self] engine, config in
-            let outcome = try await engine.switchSpace(to: spaceID, config: config)
+        let label = layoutName.map { "switch \($0) to space \(spaceID)" }
+            ?? "switch to space \(spaceID)"
+        runEngineAction(label, urgency: .interactive) { [weak self] engine, config in
+            let outcome: SpaceSwitchOutcome
+            if let layoutName {
+                outcome = try await engine.switchSpace(
+                    layoutName: layoutName,
+                    to: spaceID,
+                    config: config
+                )
+            } else {
+                outcome = try await engine.switchSpace(to: spaceID, config: config)
+            }
             await MainActor.run {
                 self?.markInteractiveActivation()
                 self?.lastActiveSpaceChangeAt = Date()
@@ -919,9 +1084,11 @@ final class AppModel: ObservableObject {
                 // can replace it with an in-workspace MRU target.
                 try? await Task.sleep(nanoseconds: Self.terminationFollowFocusDelayNanoseconds)
                 guard self?.focusEventCoordinator.isCurrent(sequence) == true else { return }
+                guard let ownerLayoutName = outcome.layoutName else { return }
                 let switchOutcome = try? await engine.switchSpaceForFocusEvent(
                     sequence: sequence,
                     identity: outcome.identity,
+                    layoutName: ownerLayoutName,
                     to: targetSpaceID,
                     config: config
                 )
@@ -1031,9 +1198,9 @@ final class AppModel: ObservableObject {
         guard let config = configManager.configIfLoaded() else { return }
         let engine = engine
         Task { [weak self] in
-            if let activeSpaceID = await engine.activeSpaceID() {
-                _ = try? await engine.switchSpace(to: activeSpaceID, config: config, reconcile: true)
-            }
+            // Restores dormant workspaces whose display reconnected and
+            // reconciles every workspace whose host is connected.
+            await engine.handleDisplayConfigurationChange(config: config)
             await MainActor.run { self?.refreshStatus() }
         }
     }

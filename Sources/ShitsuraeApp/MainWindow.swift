@@ -15,6 +15,16 @@ enum SidebarItem: Hashable {
     case diagnostics
 }
 
+private struct DisplayLayoutChoice: Identifiable, Equatable {
+    let displayID: String
+    let isPrimary: Bool
+    let layoutNames: [String]
+    let activeLayoutName: String?
+
+    var id: String { displayID }
+    var title: String { isPrimary ? "Primary Display" : "Display \(displayID.prefix(8))…" }
+}
+
 struct MainWindowView: View {
     @EnvironmentObject var model: AppModel
     @State private var selection: SidebarItem? = .arrange
@@ -88,16 +98,49 @@ struct MainWindowView: View {
 
 struct ArrangeView: View {
     @EnvironmentObject var model: AppModel
-    @State private var selectedLayout: String?
-    @State private var selectedSpaceID: Int?
+    @State private var previewLayoutName: String?
 
     private var currentLayout: LayoutDefinition? {
-        guard let name = selectedLayout else { return nil }
+        guard let name = previewLayoutName else { return nil }
         return model.configManager.configIfLoaded()?.config.layouts[name]
     }
 
-    private var spaceIDs: [Int] {
-        currentLayout?.spaces.map(\.spaceID) ?? []
+    private var spaceIDsByLayout: [String: [Int]] {
+        guard let config = model.configManager.configIfLoaded()?.config else { return [:] }
+        return config.layouts.mapValues { layout in
+            layout.spaces.map(\.spaceID).sorted()
+        }
+    }
+
+    private var displayLayoutChoices: [DisplayLayoutChoice] {
+        guard let config = model.configManager.configIfLoaded()?.config else { return [] }
+        let activeByDisplayID = Dictionary(
+            uniqueKeysWithValues: (model.diagnostics?.state.activeWorkspaces ?? []).map {
+                ($0.displayID, $0.layoutName)
+            }
+        )
+        return model.displays
+            .sorted {
+                if $0.isPrimary != $1.isPrimary { return $0.isPrimary }
+                return $0.id < $1.id
+            }
+            .compactMap { display in
+                let candidates = model.layouts.filter { name in
+                    guard let layout = config.layouts[name] else { return false }
+                    return DisplayResolver.hostDisplay(
+                        layout: layout,
+                        config: config,
+                        displays: model.displays
+                    )?.id == display.id
+                }
+                guard !candidates.isEmpty else { return nil }
+                return DisplayLayoutChoice(
+                    displayID: display.id,
+                    isPrimary: display.isPrimary,
+                    layoutNames: candidates,
+                    activeLayoutName: activeByDisplayID[display.id]
+                )
+            }
     }
 
     var body: some View {
@@ -115,42 +158,16 @@ struct ArrangeView: View {
                     Button("Open Config Directory") { model.openConfigDirectory() }
                 } else {
                     statusCard
-
-                    // Pickers hug their content (.fixedSize) so captions stay
-                    // aligned with them. The apply button sits trailing on the
-                    // same row; layoutPriority keeps it intact on narrow
-                    // windows (the Spacer collapses first, the button never
-                    // gets clipped).
-                    HStack(alignment: .bottom, spacing: 20) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Layout").font(.caption).foregroundStyle(.secondary)
-                            Picker("Layout", selection: $selectedLayout) {
-                                Text("Select…").tag(nil as String?)
-                                ForEach(model.layouts, id: \.self) { name in
-                                    Text(name).tag(name as String?)
-                                }
-                            }
-                            .labelsHidden()
-                            .fixedSize()
-                        }
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Space").font(.caption).foregroundStyle(.secondary)
-                            Picker("Space", selection: $selectedSpaceID) {
-                                Text("All Workspaces").tag(nil as Int?)
-                                ForEach(spaceIDs, id: \.self) { id in
-                                    Text("Space \(id)").tag(id as Int?)
-                                }
-                            }
-                            .labelsHidden()
-                            .fixedSize()
-                        }
-
-                        Spacer(minLength: 16)
-
-                        actionButtons
-                            .layoutPriority(1)
-                    }
+                    DisplayArrangeSection(
+                        choices: displayLayoutChoices,
+                        spaceIDsByLayout: spaceIDsByLayout,
+                        isRunning: model.actionStatus.isRunning,
+                        previewLayoutName: $previewLayoutName,
+                        onApplyLayout: { layoutName, spaceID in
+                            model.applyLayoutFromMainWindow(layoutName, spaceID: spaceID)
+                        },
+                        onApplyDisplaySet: model.applyLayoutsFromMainWindow
+                    )
 
                     if case let .failed(label, message) = model.actionStatus {
                         Label("\(label): \(message)", systemImage: "xmark.circle.fill")
@@ -165,22 +182,6 @@ struct ArrangeView: View {
                 }
             }
             .padding(20)
-        }
-        .onAppear {
-            if selectedLayout == nil {
-                selectedLayout = model.activeLayoutName ?? model.layouts.first
-            }
-        }
-        .onChange(of: model.layouts) { _, newValue in
-            if let selected = selectedLayout, !newValue.contains(selected) {
-                selectedLayout = nil
-                selectedSpaceID = nil
-            }
-        }
-        .onChange(of: selectedLayout) { _, _ in
-            if let selectedSpaceID, !spaceIDs.contains(selectedSpaceID) {
-                self.selectedSpaceID = nil
-            }
         }
     }
 
@@ -202,20 +203,25 @@ struct ArrangeView: View {
                 }
 
                 if model.activeLayoutName == nil {
-                    Text("Select a layout and press Apply All — windows are launched, placed and tracked from scratch.")
+                    Text("Choose a display layout and press Apply — windows are launched, placed and tracked from scratch.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                } else if !model.availableSpaceIDs.isEmpty {
-                    HStack(spacing: 6) {
-                        Text("Switch:")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        ForEach(model.availableSpaceIDs, id: \.self) { spaceID in
-                            Button("\(spaceID)") { model.switchSpace(to: spaceID) }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .disabled(spaceID == model.activeSpaceID || model.actionStatus.isRunning)
+                }
+
+                let workspaces = model.diagnostics?.state.activeWorkspaces ?? []
+                ForEach(workspaces, id: \.layoutName) { workspace in
+                    WorkspaceSpaceControls(
+                        workspace: workspace,
+                        isPrimary: model.displays.first(where: { $0.id == workspace.displayID })?.isPrimary == true,
+                        spaceIDs: model.configManager.configIfLoaded()?.config.layouts[workspace.layoutName]?
+                            .spaces.map(\.spaceID).sorted() ?? [],
+                        isRunning: model.actionStatus.isRunning,
+                        onSwitch: { spaceID in
+                            model.switchSpace(layoutName: workspace.layoutName, to: spaceID)
                         }
+                    )
+                    if workspace.layoutName != workspaces.last?.layoutName {
+                        Divider()
                     }
                 }
             }
@@ -238,61 +244,6 @@ struct ArrangeView: View {
         .background(.quaternary.opacity(0.6), in: Capsule())
     }
 
-    @ViewBuilder
-    private var actionButtons: some View {
-        arrangeButton(
-            title: selectedSpaceID == nil ? "Apply All" : "Apply Space \(selectedSpaceID!)",
-            systemImage: "play.fill",
-            action: "arrange",
-            prominent: true
-        ) {
-            guard let layout = selectedLayout else { return }
-            model.applyLayoutFromMainWindow(layout, spaceID: selectedSpaceID)
-        }
-        .help("Launch, place and track windows, then re-hide inactive workspaces")
-    }
-
-    @ViewBuilder
-    private func arrangeButton(
-        title: String,
-        systemImage: String,
-        action: String,
-        prominent: Bool = false,
-        perform: @escaping () -> Void
-    ) -> some View {
-        let button = Button(action: perform) {
-            HStack(spacing: 6) {
-                statusIcon(action: action, defaultSystemImage: systemImage, onProminent: prominent)
-                Text(title)
-            }
-        }
-        .disabled(selectedLayout == nil || model.actionStatus.isRunning)
-
-        if prominent {
-            button.buttonStyle(.borderedProminent)
-        } else {
-            button.buttonStyle(.bordered)
-        }
-    }
-
-    @ViewBuilder
-    private func statusIcon(action: String, defaultSystemImage: String, onProminent: Bool = false) -> some View {
-        // Status colors sit on the tinted prominent background, where the
-        // usual green/red would vanish — use white there instead.
-        switch model.actionStatus {
-        case let .running(label) where label.hasPrefix(action):
-            ProgressView().controlSize(.small)
-        case let .success(label) where label.hasPrefix(action):
-            Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(onProminent ? Color.white : Color.green)
-        case let .failed(label, _) where label.hasPrefix(action):
-            Image(systemName: "xmark.circle.fill")
-                .foregroundStyle(onProminent ? Color.white : Color.red)
-        default:
-            Image(systemName: defaultSystemImage)
-        }
-    }
-
     private func layoutPreview(_ layout: LayoutDefinition) -> some View {
         let hostDisplay = DisplayResolver.hostDisplay(
             layout: layout,
@@ -301,16 +252,20 @@ struct ArrangeView: View {
         )
 
         return VStack(alignment: .leading, spacing: 10) {
-            Label("Preview", systemImage: "rectangle.on.rectangle")
-                .font(.headline)
+            HStack {
+                Label("Preview", systemImage: "rectangle.on.rectangle")
+                    .font(.headline)
+                if let display = layout.display {
+                    displayBadge(display)
+                }
+            }
 
             ForEach(Array(layout.spaces.enumerated()), id: \.offset) { _, space in
                 GroupBox {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Text("Space \(space.spaceID)").font(.subheadline).bold()
-                            if space.spaceID == model.activeSpaceID,
-                               selectedLayout == model.activeLayoutName
+                            if space.spaceID == activeSpaceID(for: previewLayoutName)
                             {
                                 Text("active")
                                     .font(.caption2)
@@ -318,9 +273,6 @@ struct ArrangeView: View {
                                     .padding(.vertical, 1)
                                     .background(.green.opacity(0.15), in: Capsule())
                                     .foregroundStyle(.green)
-                            }
-                            if let display = space.display {
-                                displayBadge(display)
                             }
                         }
 
@@ -336,6 +288,13 @@ struct ArrangeView: View {
                 }
             }
         }
+    }
+
+    private func activeSpaceID(for layoutName: String?) -> Int? {
+        guard let layoutName else { return nil }
+        return model.diagnostics?.state.activeWorkspaces
+            .first(where: { $0.layoutName == layoutName })?
+            .spaceID
     }
 
     private func windowLegend(_ windows: [WindowDefinition]) -> some View {
@@ -365,6 +324,223 @@ struct ArrangeView: View {
     }
 }
 
+private struct DisplayArrangeSection: View {
+    let choices: [DisplayLayoutChoice]
+    let spaceIDsByLayout: [String: [Int]]
+    let isRunning: Bool
+    @Binding var previewLayoutName: String?
+    let onApplyLayout: (String, Int?) -> Void
+    let onApplyDisplaySet: ([String]) -> Void
+
+    @State private var selectionByDisplayID: [String: String] = [:]
+    @State private var spaceByDisplayID: [String: Int] = [:]
+
+    private var selectedLayouts: [String] {
+        choices.compactMap { selectionByDisplayID[$0.displayID] }
+    }
+
+    var body: some View {
+        GroupBox("Displays") {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(choices) { choice in
+                    DisplayArrangeRow(
+                        choice: choice,
+                        spaceIDs: spaceIDs(for: choice),
+                        selectedLayout: selectionBinding(for: choice),
+                        selectedSpaceID: spaceBinding(for: choice),
+                        isRunning: isRunning,
+                        onApply: {
+                            applyLayout(for: choice)
+                        }
+                    )
+                }
+
+                HStack {
+                    Text("Display Set applies all workspaces. Use a row’s Apply button for one space.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Apply Display Set", systemImage: "rectangle.2.swap") {
+                        onApplyDisplaySet(selectedLayouts)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(selectedLayouts.count < 2 || isRunning)
+                    .accessibilityHint("Applies the selected display layouts as one logical batch")
+                }
+            }
+            .padding(4)
+        }
+        .onAppear(perform: synchronizeSelections)
+        .onChange(of: choices) {
+            synchronizeSelections()
+        }
+    }
+
+    private func selectionBinding(for choice: DisplayLayoutChoice) -> Binding<String?> {
+        Binding(
+            get: { selectionByDisplayID[choice.displayID] },
+            set: { newValue in
+                selectionByDisplayID[choice.displayID] = newValue
+                if let newValue {
+                    previewLayoutName = newValue
+                    if let selectedSpaceID = spaceByDisplayID[choice.displayID],
+                       !(spaceIDsByLayout[newValue] ?? []).contains(selectedSpaceID)
+                    {
+                        spaceByDisplayID[choice.displayID] = nil
+                    }
+                } else {
+                    spaceByDisplayID[choice.displayID] = nil
+                }
+            }
+        )
+    }
+
+    private func spaceBinding(for choice: DisplayLayoutChoice) -> Binding<Int?> {
+        Binding(
+            get: { spaceByDisplayID[choice.displayID] },
+            set: { spaceByDisplayID[choice.displayID] = $0 }
+        )
+    }
+
+    private func spaceIDs(for choice: DisplayLayoutChoice) -> [Int] {
+        guard let layoutName = selectionByDisplayID[choice.displayID] else { return [] }
+        return spaceIDsByLayout[layoutName] ?? []
+    }
+
+    private func applyLayout(for choice: DisplayLayoutChoice) {
+        guard let layoutName = selectionByDisplayID[choice.displayID] else { return }
+        previewLayoutName = layoutName
+        onApplyLayout(layoutName, spaceByDisplayID[choice.displayID])
+    }
+
+    private func synchronizeSelections() {
+        var updated: [String: String] = [:]
+        for choice in choices {
+            if let current = selectionByDisplayID[choice.displayID],
+               choice.layoutNames.contains(current)
+            {
+                updated[choice.displayID] = current
+            } else if let active = choice.activeLayoutName,
+                      choice.layoutNames.contains(active)
+            {
+                updated[choice.displayID] = active
+            } else if choice.layoutNames.count == 1 {
+                updated[choice.displayID] = choice.layoutNames[0]
+            }
+        }
+        if updated != selectionByDisplayID {
+            selectionByDisplayID = updated
+        }
+
+        let validDisplayIDs = Set(updated.keys)
+        let validSpaces = spaceByDisplayID.filter { displayID, spaceID in
+            guard validDisplayIDs.contains(displayID),
+                  let layoutName = updated[displayID]
+            else {
+                return false
+            }
+            return (spaceIDsByLayout[layoutName] ?? []).contains(spaceID)
+        }
+        if validSpaces != spaceByDisplayID {
+            spaceByDisplayID = validSpaces
+        }
+
+        if previewLayoutName.map({ updated.values.contains($0) }) != true {
+            previewLayoutName = choices
+                .compactMap { updated[$0.displayID] }
+                .first
+        }
+    }
+}
+
+private struct DisplayArrangeRow: View {
+    let choice: DisplayLayoutChoice
+    let spaceIDs: [Int]
+    @Binding var selectedLayout: String?
+    @Binding var selectedSpaceID: Int?
+    let isRunning: Bool
+    let onApply: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Label(
+                choice.title,
+                systemImage: choice.isPrimary ? "display" : "rectangle.on.rectangle"
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Picker("Layout", selection: $selectedLayout) {
+                Text("Do not apply").tag(nil as String?)
+                ForEach(choice.layoutNames, id: \.self) { layoutName in
+                    Text(layoutName).tag(layoutName as String?)
+                }
+            }
+            .frame(width: 150)
+
+            Picker("Space", selection: $selectedSpaceID) {
+                Text("All Workspaces").tag(nil as Int?)
+                ForEach(spaceIDs, id: \.self) { spaceID in
+                    Text("Space \(spaceID)").tag(spaceID as Int?)
+                }
+            }
+            .frame(width: 150)
+            .disabled(selectedLayout == nil)
+
+            Button("Apply", systemImage: "play.fill", action: onApply)
+                .buttonStyle(.bordered)
+                .disabled(selectedLayout == nil || isRunning)
+                .help("Apply this display’s selected layout or space")
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(choice.title)
+    }
+}
+
+private struct WorkspaceSpaceControls: View {
+    let workspace: WorkspaceSummaryJSON
+    let isPrimary: Bool
+    let spaceIDs: [Int]
+    let isRunning: Bool
+    let onSwitch: (Int) -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(workspace.layoutName)
+                        .font(.subheadline.bold())
+                    Text(isPrimary ? "primary" : "secondary")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    if workspace.dormant {
+                        Text("dormant")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+                }
+                Text(workspace.displayID)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            ForEach(spaceIDs, id: \.self) { spaceID in
+                Button("\(spaceID)") {
+                    onSwitch(spaceID)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(spaceID == workspace.spaceID || workspace.dormant || isRunning)
+                .accessibilityLabel(
+                    "Switch \(workspace.layoutName) to space \(spaceID)"
+                )
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(workspace.layoutName) workspace")
+    }
+}
+
 // MARK: - Layout detail
 
 struct LayoutDetailView: View {
@@ -384,8 +560,13 @@ struct LayoutDetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text(name)
-                    .font(.title2).bold()
+                HStack {
+                    Text(name)
+                        .font(.title2).bold()
+                    if let display = layout.display {
+                        displayBadge(display)
+                    }
+                }
 
                 HStack(spacing: 16) {
                     statBadge(
@@ -435,9 +616,6 @@ struct LayoutDetailView: View {
             HStack {
                 Text("Space \(space.spaceID)")
                     .font(.headline)
-                if let display = space.display {
-                    displayBadge(display)
-                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
@@ -552,7 +730,9 @@ struct VisualLayoutPreview: View {
             let previewWidth = geo.size.width
             let previewHeight = previewWidth * displayAspectRatio
             let rects = space.windows.compactMap { win in
-                resolveProportionalRect(frame: win.frame, display: display).map {
+                win.frame.flatMap { frame in
+                    resolveProportionalRect(frame: frame, display: display)
+                }.map {
                     (win: win, rect: $0)
                 }
             }
@@ -1155,11 +1335,15 @@ struct DiagnosticsSection: View {
                 if let diagnostics = model.diagnostics {
                     GroupBox("State") {
                         VStack(alignment: .leading, spacing: 2) {
-                            row("Active layout", diagnostics.state.activeLayoutName ?? "—")
                             row(
-                                "Active spaces",
-                                diagnostics.state.activeSpaces
-                                    .map { "space \($0.spaceID) @ \($0.displayID.prefix(8))…" }
+                                "Active workspaces",
+                                diagnostics.state.activeWorkspaces.isEmpty
+                                    ? "—"
+                                    : diagnostics.state.activeWorkspaces
+                                    .map { workspace in
+                                        let dormant = workspace.dormant ? " (dormant)" : ""
+                                        return "\(workspace.layoutName) space \(workspace.spaceID) @ \(workspace.displayID.prefix(8))…\(dormant)"
+                                    }
                                     .joined(separator: ", ")
                             )
                             row("Tracked slots", "\(diagnostics.state.slotCount)")
@@ -1298,7 +1482,10 @@ func formatLength(_ value: LengthValue) -> String {
     }
 }
 
-func formatFrame(_ frame: FrameDefinition) -> String {
+func formatFrame(_ frame: FrameDefinition?) -> String {
+    guard let frame else {
+        return "Preserve current frame"
+    }
     let x = formatLength(frame.x)
     let y = formatLength(frame.y)
     let w = formatLength(frame.width)

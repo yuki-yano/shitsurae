@@ -22,3 +22,8 @@ jobs:
 
       - name: Run Swift tests
         run: env -u LIBRARY_PATH swift test
+
+      - name: Validate config schema and samples
+        run: |
+          brew install gojq
+          ./Scripts/validate-config-schema.sh

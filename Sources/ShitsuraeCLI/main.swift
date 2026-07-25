@@ -71,6 +71,17 @@ func printHumanReadable(_ payload: Any) {
         return
     }
 
+    if let result = dictionary["result"] as? String,
+       let layouts = dictionary["layouts"] as? [[String: Any]],
+       layouts.allSatisfy({ $0["layout"] is String && $0["result"] is String })
+    {
+        print("result: \(result)")
+        for layout in layouts {
+            print("\(layout["layout"] ?? "?")\tresult=\(layout["result"] ?? "?")")
+        }
+        return
+    }
+
     if let result = dictionary["result"] as? String {
         print("result: \(result)")
         if let unresolved = dictionary["unresolvedSlots"] as? [[String: Any]], !unresolved.isEmpty {
@@ -156,10 +167,10 @@ struct ShitsuraeCommand: ParsableCommand {
 }
 
 struct Arrange: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Apply a layout")
+    static let configuration = CommandConfiguration(abstract: "Apply one or more display layouts")
 
-    @Argument(help: "Layout name")
-    var layout: String
+    @Argument(help: "Layout names; multiple names are applied as one logical batch")
+    var layouts: [String] = []
 
     @Flag(name: .customLong("dry-run"), help: "Show the plan without applying")
     var dryRun = false
@@ -172,9 +183,20 @@ struct Arrange: ParsableCommand {
 
     @OptionGroup var jsonFlag: JSONFlag
 
+    func validate() throws {
+        guard !layouts.isEmpty else {
+            throw ValidationError("at least one layout name is required")
+        }
+        if layouts.count > 1, dryRun || stateOnly || space != nil {
+            throw ValidationError(
+                "multi-display arrange does not accept --dry-run, --state-only, or --space"
+            )
+        }
+    }
+
     func run() throws {
         let request = CLIRequestBuilder.arrange(
-            layout: layout,
+            layouts: layouts,
             dryRun: dryRun,
             stateOnly: stateOnly,
             spaceID: space
@@ -281,20 +303,32 @@ struct Space: ParsableCommand {
     struct List: ParsableCommand {
         static let configuration = CommandConfiguration(abstract: "List virtual workspaces")
 
+        @Option(name: .customLong("layout"), help: "Query this active layout instead of the primary workspace")
+        var layout: String?
+
         @OptionGroup var jsonFlag: JSONFlag
 
         func run() throws {
-            executeRemote(CommandRequest(command: "spaceList"), json: jsonFlag.json)
+            executeRemote(
+                CLIRequestBuilder.spaceQuery(command: "spaceList", layout: layout),
+                json: jsonFlag.json
+            )
         }
     }
 
     struct Current: ParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Show the active virtual workspace")
 
+        @Option(name: .customLong("layout"), help: "Query this active layout instead of the primary workspace")
+        var layout: String?
+
         @OptionGroup var jsonFlag: JSONFlag
 
         func run() throws {
-            executeRemote(CommandRequest(command: "spaceCurrent"), json: jsonFlag.json)
+            executeRemote(
+                CLIRequestBuilder.spaceQuery(command: "spaceCurrent", layout: layout),
+                json: jsonFlag.json
+            )
         }
     }
 
@@ -304,6 +338,9 @@ struct Space: ParsableCommand {
         @Argument(help: "Target space ID")
         var spaceID: Int
 
+        @Option(name: .customLong("layout"), help: "Switch this active layout instead of the primary workspace")
+        var layout: String?
+
         @Flag(name: .customLong("reconcile"), help: "Force visibility reconciliation")
         var reconcile = false
 
@@ -312,6 +349,7 @@ struct Space: ParsableCommand {
         func run() throws {
             let request = CLIRequestBuilder.spaceSwitch(
                 spaceID: spaceID,
+                layout: layout,
                 reconcile: reconcile
             )
             executeRemote(request, json: jsonFlag.json)

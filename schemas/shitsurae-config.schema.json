@@ -217,8 +217,7 @@
       "additionalProperties": false,
       "required": [
         "match",
-        "slot",
-        "frame"
+        "slot"
       ],
       "properties": {
         "match": {
@@ -248,9 +247,6 @@
         "spaceID": {
           "type": "integer",
           "minimum": 1
-        },
-        "display": {
-          "$ref": "#/$defs/displayDefinition"
         },
         "windows": {
           "type": "array",
@@ -283,6 +279,9 @@
       "properties": {
         "initialFocus": {
           "$ref": "#/$defs/initialFocusDefinition"
+        },
+        "display": {
+          "$ref": "#/$defs/displayDefinition"
         },
         "spaces": {
           "type": "array",

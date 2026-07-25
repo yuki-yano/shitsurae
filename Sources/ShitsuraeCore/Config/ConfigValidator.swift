@@ -82,7 +82,7 @@ public enum ConfigValidator {
                 )
             }
 
-            validateLayoutDisplayConsistency(
+            validateLayoutDisplayDefinition(
                 layoutName: layoutName,
                 layout: layout,
                 sourcePath: sourcePath,
@@ -179,24 +179,27 @@ public enum ConfigValidator {
                         )
                     }
 
-                    do {
-                        _ = try LengthParser.parse(window.frame.x)
-                        _ = try LengthParser.parse(window.frame.y)
-                        _ = try LengthParser.parse(window.frame.width)
-                        _ = try LengthParser.parse(window.frame.height)
-                    } catch {
-                        errors.append(
-                            ValidateErrorItem(
-                                code: .validationError,
-                                path: sourcePath,
-                                message: "frame has invalid length expression"
+                    if let frame = window.frame {
+                        do {
+                            _ = try LengthParser.parse(frame.x)
+                            _ = try LengthParser.parse(frame.y)
+                            _ = try LengthParser.parse(frame.width)
+                            _ = try LengthParser.parse(frame.height)
+                        } catch {
+                            errors.append(
+                                ValidateErrorItem(
+                                    code: .validationError,
+                                    path: sourcePath,
+                                    message: "frame has invalid length expression"
+                                )
                             )
-                        )
+                        }
                     }
                 }
             }
         }
 
+        validateCrossLayoutMatcherUniqueness(config: config, sourcePath: sourcePath, errors: &errors)
         validateIgnore(config.ignore, sourcePath: sourcePath, errors: &errors)
         validateShortcuts(config.resolvedShortcuts, sourcePath: sourcePath, errors: &errors)
 
@@ -262,65 +265,97 @@ public enum ConfigValidator {
         }
     }
 
-    /// All spaces of a layout must target the same host display (v2.0 hosts
-    /// every virtual space on a single display; per-display workspaces are a
-    /// planned extension).
-    private static func validateLayoutDisplayConsistency(
+    /// layouts.<name>.display must be an unambiguous resolver input:
+    /// monitor and id are mutually exclusive; an empty declaration carries no
+    /// information and must be deleted instead.
+    private static func validateLayoutDisplayDefinition(
         layoutName: String,
         layout: LayoutDefinition,
         sourcePath: String,
         errors: inout [ValidateErrorItem]
     ) {
-        let descriptors = layout.spaces.map { space in
-            (spaceID: space.spaceID, value: normalizedDisplayKey(for: space.display))
-        }
+        guard let display = layout.display else { return }
 
-        if descriptors.contains(where: { descriptor in
-            if case .invalid = descriptor.value { return true }
-            return false
-        }) {
+        if display.monitor != nil, display.id != nil {
             errors.append(
                 ValidateErrorItem(
                     code: .validationError,
                     path: sourcePath,
-                    message: "each layout must target one host display in layout \(layoutName)"
+                    message: "display.monitor and display.id are mutually exclusive in layout \(layoutName)"
                 )
             )
-            return
         }
+        if display.monitor == nil, display.id == nil, display.width == nil, display.height == nil {
+            errors.append(
+                ValidateErrorItem(
+                    code: .validationError,
+                    path: sourcePath,
+                    message: "display must declare monitor, id, or a resolution in layout \(layoutName); delete the empty display key to host on the primary display"
+                )
+            )
+        }
+    }
 
-        let normalizedKeys = Set(descriptors.compactMap { descriptor -> String? in
-            if case let .value(key) = descriptor.value {
-                return key
+    /// Layouts that can be active simultaneously (their host declarations
+    /// differ) must not share a completely identical window matcher: both
+    /// would claim the same window and the cross-layout ownership rules could
+    /// not break the tie deterministically. Layouts sharing one host replace
+    /// each other on arrange, so identical matchers between them stay legal.
+    private static func validateCrossLayoutMatcherUniqueness(
+        config: ShitsuraeConfig,
+        sourcePath: String,
+        errors: inout [ValidateErrorItem]
+    ) {
+        let layouts = config.layouts.sorted { $0.key < $1.key }
+        guard layouts.count > 1 else { return }
+
+        let hostKeys = layouts.map { hostComparisonKey(layout: $0.value, config: config) }
+        let matcherKeys: [[String: (spaceID: Int, slot: Int)]] = layouts.map { _, layout in
+            var keys: [String: (spaceID: Int, slot: Int)] = [:]
+            for space in layout.spaces {
+                for window in space.windows {
+                    keys[normalizedWindowKey(window)] = (space.spaceID, window.slot)
+                }
             }
-            return nil
-        })
-        let hasNilDisplay = descriptors.contains { descriptor in
-            if case .none = descriptor.value { return true }
-            return false
-        }
-        let hasExplicitDisplay = descriptors.contains { descriptor in
-            if case .value = descriptor.value { return true }
-            return false
+            return keys
         }
 
-        if hasNilDisplay && hasExplicitDisplay {
-            errors.append(
-                ValidateErrorItem(
-                    code: .validationError,
-                    path: sourcePath,
-                    message: "cannot mix implicit and explicit displays in layout \(layoutName)"
-                )
-            )
-        } else if normalizedKeys.count > 1 {
-            errors.append(
-                ValidateErrorItem(
-                    code: .validationError,
-                    path: sourcePath,
-                    message: "all spaces must share one display target in layout \(layoutName)"
-                )
-            )
+        for lhs in layouts.indices {
+            for rhs in layouts.indices where rhs > lhs {
+                guard hostKeys[lhs] != hostKeys[rhs] else { continue }
+                for (key, lhsPosition) in matcherKeys[lhs] {
+                    guard let rhsPosition = matcherKeys[rhs][key] else { continue }
+                    errors.append(
+                        ValidateErrorItem(
+                            code: .validationError,
+                            path: sourcePath,
+                            message: "identical window matcher in layouts \(layouts[lhs].key) (spaceID=\(lhsPosition.spaceID) slot=\(lhsPosition.slot)) and \(layouts[rhs].key) (spaceID=\(rhsPosition.spaceID) slot=\(rhsPosition.slot)) which can be active simultaneously; add a discriminator to one of them"
+                        )
+                    )
+                }
+            }
         }
+    }
+
+    /// Comparison key of the display a layout would be hosted on. Two layouts
+    /// with the same key can never be active at the same time (arrange
+    /// replaces the active layout per display). An undeclared display and
+    /// `monitor: primary` denote the same host unless monitors.primary.id
+    /// pins the primary role to an arbitrary display UUID.
+    private static func hostComparisonKey(layout: LayoutDefinition, config: ShitsuraeConfig) -> String {
+        guard let display = layout.display else {
+            return "primary-implicit"
+        }
+        if let id = display.id {
+            return "id:\(id)"
+        }
+        if let monitor = display.monitor {
+            if monitor == .primary, config.monitors?.primary?.id == nil {
+                return "primary-implicit"
+            }
+            return "monitor:\(monitor.rawValue)"
+        }
+        return "res:\(display.width.map(String.init) ?? "*")x\(display.height.map(String.init) ?? "*")"
     }
 
     /// Window matchers must be pairwise distinct across the whole layout —
@@ -687,32 +722,6 @@ public enum ConfigValidator {
 
     private static func isRegexCompilable(_ pattern: String) -> Bool {
         (try? NSRegularExpression(pattern: pattern)) != nil
-    }
-
-    private enum DisplayKeyDescriptor {
-        case none
-        case value(String)
-        case invalid
-    }
-
-    private static func normalizedDisplayKey(for display: DisplayDefinition?) -> DisplayKeyDescriptor {
-        guard let display else {
-            return .none
-        }
-
-        if display.monitor != nil && display.id != nil {
-            return .invalid
-        }
-        if display.monitor == nil && display.id == nil && (display.width != nil || display.height != nil) {
-            return .invalid
-        }
-        if let monitor = display.monitor {
-            return .value("monitor:\(monitor.rawValue)")
-        }
-        if let id = display.id {
-            return .value("id:\(id)")
-        }
-        return .none
     }
 
     private static func normalizedWindowKey(_ window: WindowDefinition) -> String {

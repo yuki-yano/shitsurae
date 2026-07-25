@@ -187,9 +187,12 @@ public enum VisibilityPlanner {
             return nil
         }
 
+        guard let definitionFrame = definition.frame else {
+            return nil
+        }
         let basis = hostDisplay.visibleFrame
         return try? LengthParser.resolveFrame(
-            definition.frame,
+            definitionFrame,
             basis: basis,
             scale: hostDisplay.scale
         )

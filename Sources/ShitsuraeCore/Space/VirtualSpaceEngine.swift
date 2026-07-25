@@ -24,6 +24,8 @@ public enum VirtualSpaceEngineError: Error, Equatable, Sendable {
     case noActiveLayout
     case layoutNotFound(String)
     case spaceNotFound(layoutName: String, spaceID: Int)
+    case workspaceNotActive(String)
+    case invalidArrangeBatch(String)
     case hostDisplayUnavailable
     case windowNotTracked
     case ambiguousWindow
@@ -110,12 +112,96 @@ public actor VirtualSpaceEngine {
         state
     }
 
+    /// The active workspace of the current macOS primary display — the fixed
+    /// target of every explicit input (space switch, cycle, switcher,
+    /// focusBySlot, operation CLI) in the multi-display foundation.
+    func primaryWorkspace(displays: [DisplayInfo]) -> ActiveWorkspace? {
+        guard let primary = DisplayResolver.primaryDisplay(displays) else { return nil }
+        return state.activeWorkspace(displayID: primary.id)
+    }
+
+    func primaryWorkspace() -> ActiveWorkspace? {
+        primaryWorkspace(displays: control.displays())
+    }
+
     public func activeSpaceID() -> Int? {
-        state.primaryActiveSpaceID
+        primaryWorkspace()?.spaceID
     }
 
     public func activeLayoutName() -> String? {
-        state.activeLayoutName
+        primaryWorkspace()?.layoutName
+    }
+
+    // MARK: - Cross-layout ownership
+
+    /// Identities this layout's resolution must not touch:
+    /// (1) windows bound to a *different-display* active workspace's layout
+    ///     slots (origin == .layout). Adopted bindings do not defend against
+    ///     rule claims, and the workspace being replaced on the same display
+    ///     is a takeover target, so neither is excluded here.
+    /// (2) display affinity (skipped for user-initiated arrange takeovers):
+    ///     windows sitting on a display hosted by a different active
+    ///     workspace, unless this layout's own slots already bind them.
+    ///     Windows on unhosted displays stay claimable so a reopened window
+    ///     can still be pulled back by the next switch.
+    func crossLayoutExcludedIdentities(
+        layoutName: String,
+        hostDisplayID: String?,
+        windows: [WindowSnapshot],
+        includeDisplayAffinity: Bool
+    ) -> Set<WindowIdentity> {
+        let otherWorkspaces = state.activeWorkspaces.filter {
+            $0.layoutName != layoutName && $0.displayID != hostDisplayID
+        }
+        guard !otherWorkspaces.isEmpty else { return [] }
+
+        var excluded = Set<WindowIdentity>()
+        for workspace in otherWorkspaces {
+            for entry in state.slots(layoutName: workspace.layoutName) where entry.origin == .layout {
+                if let identity = entry.boundIdentity {
+                    excluded.insert(identity)
+                }
+            }
+        }
+
+        if includeDisplayAffinity {
+            let ownIdentities = Set(state.slots(layoutName: layoutName).compactMap(\.boundIdentity))
+            let otherHostedDisplayIDs = Set(otherWorkspaces.map(\.displayID))
+            for window in windows {
+                guard let displayID = window.displayID,
+                      otherHostedDisplayIDs.contains(displayID),
+                      !ownIdentities.contains(window.identity)
+                else { continue }
+                excluded.insert(window.identity)
+            }
+        }
+        return excluded
+    }
+
+    /// Adoption must not capture a window that a different active workspace's
+    /// layout rules match — even unbound (a reopened window has a fresh
+    /// identity), it belongs to that workspace and its arrange / reconnect
+    /// restore must be able to claim it.
+    func matchesOtherWorkspaceLayoutRule(
+        window: WindowSnapshot,
+        excludingLayout layoutName: String,
+        config: LoadedConfig
+    ) -> Bool {
+        for workspace in state.activeWorkspaces where workspace.layoutName != layoutName {
+            guard let layout = config.config.layouts[workspace.layoutName] else { continue }
+            for space in layout.spaces {
+                for definition in space.windows
+                    where WindowRegistry.ruleMatches(
+                        rule: definition.match,
+                        window: window,
+                        ignoreIndex: true
+                    )
+                {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     /// Synchronous cross-actor invalidation for explicit commands entering
@@ -130,29 +216,44 @@ public actor VirtualSpaceEngine {
     }
 
     /// Single source of truth for "which entry owns this live window":
-    /// resolves every entry of the active layout against the manageable live
-    /// windows — the same global assignment the next switchSpace computes.
-    /// Per-window queries (focus follow, MRU marking, adoption checks,
-    /// workspace moves) all share this result so they can never disagree with
-    /// bulk resolution; in particular a relaunched app's new window
-    /// re-associates with its layout entry here instead of spawning a
-    /// duplicate adopted entry.
+    /// resolves each active workspace's layout against the manageable live
+    /// windows (with cross-layout exclusions) — the same global assignment
+    /// the next switchSpace computes. Per-window queries (focus follow, MRU
+    /// marking, adoption checks, workspace moves) all share this result so
+    /// they can never disagree with bulk resolution; in particular a
+    /// relaunched app's new window re-associates with its layout entry here
+    /// instead of spawning a duplicate adopted entry. The cross-layout
+    /// exclusion invariant makes at most one workspace claim a window.
     func assignedEntry(for window: WindowSnapshot) -> SlotEntry? {
-        guard let layoutName = state.activeLayoutName else { return nil }
-        let slots = state.slots(layoutName: layoutName)
-        guard !slots.isEmpty else { return nil }
-
         let inventory = control.windowInventory()
+        return assignedEntry(for: window, inventory: inventory)
+    }
+
+    func assignedEntry(for window: WindowSnapshot, inventory: WindowInventory) -> SlotEntry? {
+        guard !state.activeWorkspaces.isEmpty else { return nil }
         let windows = inventory.windows.filter(WindowEligibility.isManageableForVirtualWorkspace)
-        guard let matched = WindowRegistry.assignedEntry(
-            for: window,
-            entries: slots.map(\.registryEntry),
-            manageableWindows: windows,
-            fullInventory: inventory
-        ) else {
-            return nil
+
+        for workspace in state.activeWorkspaces {
+            let slots = state.slots(layoutName: workspace.layoutName)
+            guard !slots.isEmpty else { continue }
+            let excluded = crossLayoutExcludedIdentities(
+                layoutName: workspace.layoutName,
+                hostDisplayID: workspace.displayID,
+                windows: windows,
+                includeDisplayAffinity: true
+            )
+            guard !excluded.contains(window.identity) else { continue }
+            let pool = windows.filter { !excluded.contains($0.identity) }
+            if let matched = WindowRegistry.assignedEntry(
+                for: window,
+                entries: slots.map(\.registryEntry),
+                manageableWindows: pool,
+                fullInventory: inventory
+            ), let entry = slots.first(where: { $0.id == matched.id }) {
+                return entry
+            }
         }
-        return slots.first { $0.id == matched.id }
+        return nil
     }
 
     private func makeSpaceSwitchPreflightSnapshot(
@@ -160,11 +261,13 @@ public actor VirtualSpaceEngine {
         layoutName: String,
         layoutSlots: [SlotEntry],
         previousSpaceID: Int?,
-        targetSpaceID: Int
+        targetSpaceID: Int,
+        excludedIdentities: Set<WindowIdentity>
     ) -> SpaceSwitchPreflightSnapshot {
         let inventory = observation.inventory
         let allWindows = inventory.windows
         let manageableWindows = WindowEligibility.geometryCandidates(in: observation)
+            .filter { !excludedIdentities.contains($0.identity) }
         let blockedIdentities = WindowEligibility.geometryBlockedIdentities(in: observation)
         let focusedMainIsBlocked = observation.mainIdentity.map(blockedIdentities.contains) == true
 
@@ -173,6 +276,7 @@ public actor VirtualSpaceEngine {
         // switch plan so a focused companion can never drag its main window.
         let ownershipWindows = allWindows.filter {
             WindowEligibility.classification(of: $0) == .manageable
+                && !excludedIdentities.contains($0.identity)
         }
         let ownershipResolution = WindowRegistry.resolve(
             entries: layoutSlots.map(\.registryEntry),
@@ -237,6 +341,7 @@ public actor VirtualSpaceEngine {
 
     // MARK: - Space switch
 
+    /// Explicit-input entry point: targets the primary display's workspace.
     @discardableResult
     public func switchSpace(
         to targetSpaceID: Int,
@@ -244,10 +349,31 @@ public actor VirtualSpaceEngine {
         reconcile: Bool = false,
         adoptionIgnoreRules: IgnoreRuleSet? = nil
     ) throws -> SpaceSwitchOutcome {
-        try ensureAccessibility()
-        guard let layoutName = state.activeLayoutName else {
+        guard let workspace = primaryWorkspace() else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
+        return try switchSpace(
+            layoutName: workspace.layoutName,
+            to: targetSpaceID,
+            config: config,
+            reconcile: reconcile,
+            adoptionIgnoreRules: adoptionIgnoreRules
+        )
+    }
+
+    /// Core switch, scoped to one layout's workspace. Only this layout's
+    /// slots and its host display are touched — non-interference with other
+    /// displays' workspaces is a hard invariant.
+    @discardableResult
+    public func switchSpace(
+        layoutName: String,
+        to targetSpaceID: Int,
+        config: LoadedConfig,
+        reconcile: Bool = false,
+        adoptionIgnoreRules: IgnoreRuleSet? = nil,
+        shouldFocusTarget: Bool = true
+    ) throws -> SpaceSwitchOutcome {
+        try ensureAccessibility()
         guard let layout = config.config.layouts[layoutName] else {
             throw VirtualSpaceEngineError.layoutNotFound(layoutName)
         }
@@ -264,9 +390,14 @@ public actor VirtualSpaceEngine {
             throw VirtualSpaceEngineError.hostDisplayUnavailable
         }
 
-        let previousSpaceID = state.activeSpaceID(displayID: hostDisplay.id) ?? state.primaryActiveSpaceID
+        guard state.activeWorkspace(layoutName: layoutName)?.displayID == hostDisplay.id else {
+            throw VirtualSpaceEngineError.workspaceNotActive(layoutName)
+        }
+
+        let hostWorkspace = state.activeWorkspace(displayID: hostDisplay.id)
+        let previousSpaceID = hostWorkspace?.layoutName == layoutName ? hostWorkspace?.spaceID : nil
         let didChangeSpace = previousSpaceID != targetSpaceID
-        if !didChangeSpace, !reconcile, state.pendingVisibilityConvergence == nil {
+        if !didChangeSpace, !reconcile, state.pendingVisibilityConvergence(displayID: hostDisplay.id) == nil {
             // Nothing to do; report idempotent success.
             return SpaceSwitchOutcome(
                 layoutName: layoutName,
@@ -287,12 +418,21 @@ public actor VirtualSpaceEngine {
         }
 
         let layoutSlots = state.slots(layoutName: layoutName)
+        func excludedIdentities(in observation: WindowObservation) -> Set<WindowIdentity> {
+            crossLayoutExcludedIdentities(
+                layoutName: layoutName,
+                hostDisplayID: hostDisplay.id,
+                windows: observation.inventory.windows,
+                includeDisplayAffinity: true
+            )
+        }
         var preflight = makeSpaceSwitchPreflightSnapshot(
             observation: initialObservation,
             layoutName: layoutName,
             layoutSlots: layoutSlots,
             previousSpaceID: previousSpaceID,
-            targetSpaceID: targetSpaceID
+            targetSpaceID: targetSpaceID,
+            excludedIdentities: excludedIdentities(in: initialObservation)
         )
         var preflightAttempts = 1
         for delayMS in retryDelaysMS where preflight.shouldReject {
@@ -305,7 +445,8 @@ public actor VirtualSpaceEngine {
                 layoutName: layoutName,
                 layoutSlots: layoutSlots,
                 previousSpaceID: previousSpaceID,
-                targetSpaceID: targetSpaceID
+                targetSpaceID: targetSpaceID,
+                excludedIdentities: excludedIdentities(in: retryObservation)
             )
         }
 
@@ -418,25 +559,33 @@ public actor VirtualSpaceEngine {
                 entriesByID.removeValue(forKey: staleID)
             }
             intentState.slots = intentState.slots.compactMap { entriesByID[$0.id] }
-            intentState.setActiveSpace(displayID: hostDisplay.id, spaceID: targetSpaceID)
-            intentState.activeSpaces.removeAll { active in
-                !displays.contains(where: { $0.id == active.displayID })
-            }
-            intentState.activeLayoutName = layoutName
+            // Dormant workspaces of disconnected displays are kept: pruning
+            // them here (as v2.0 did) would break reconnect restore whenever
+            // the user switched spaces during a disconnect. UUID drift across
+            // reconnects is handled by re-resolution + upsert uniqueness.
+            intentState.upsertActiveWorkspace(
+                displayID: hostDisplay.id,
+                layoutName: layoutName,
+                spaceID: targetSpaceID
+            )
             // This snapshot describes the new physical transaction. The
             // complete plan above already re-evaluated every tracked entry,
             // so retaining an older targetSpaceID would make the WAL metadata
             // contradict the active space and visibility intent on disk.
-            intentState.pendingVisibilityConvergence = PendingVisibilityConvergence(
-                requestID: UUID().uuidString.lowercased(),
-                startedAt: Date.rfc3339UTC(),
-                layoutName: layoutName,
-                targetSpaceID: targetSpaceID,
-                unresolvedSlots: plan.unresolvedSlots + [PendingUnresolvedSlot(
-                    slot: 0,
-                    spaceID: targetSpaceID,
-                    reason: "spaceSwitchInProgress"
-                )]
+            intentState.setPendingVisibilityConvergence(
+                displayID: hostDisplay.id,
+                PendingVisibilityConvergence(
+                    requestID: UUID().uuidString.lowercased(),
+                    startedAt: Date.rfc3339UTC(),
+                    displayID: hostDisplay.id,
+                    layoutName: layoutName,
+                    targetSpaceID: targetSpaceID,
+                    unresolvedSlots: plan.unresolvedSlots + [PendingUnresolvedSlot(
+                        slot: 0,
+                        spaceID: targetSpaceID,
+                        reason: "spaceSwitchInProgress"
+                    )]
+                )
             )
             try persist(intentState)
         }
@@ -476,7 +625,7 @@ public actor VirtualSpaceEngine {
         // window to a non-target window while the switch was running, preserve
         // that newer choice instead of taking focus back from the user.
         var focusedIdentity: WindowIdentity?
-        if !focusedMainIsBlocked, !focusCandidates.isEmpty {
+        if shouldFocusTarget, !focusedMainIsBlocked, !focusCandidates.isEmpty {
             let intendedTopIdentity = focusCandidates[0].window.identity
             let liveFocus = control.focusedWindowObservation().focusedIdentity
             let targetIdentities = Set(focusCandidates.map(\.window.identity))
@@ -542,28 +691,31 @@ public actor VirtualSpaceEngine {
         // unspecified and would make clone-rule assignment flap between
         // persists.
         newState.slots = newState.slots.compactMap { slotsByID[$0.id] }
-        newState.setActiveSpace(displayID: hostDisplay.id, spaceID: targetSpaceID)
-        // ⑥ Drop active-space records of displays that are no longer
-        // connected; a reconnect can change the display UUID and the stale
-        // first entry would otherwise shadow the live one.
-        newState.activeSpaces.removeAll { entry in
-            !displays.contains(where: { $0.id == entry.displayID })
-        }
-        newState.activeLayoutName = layoutName
+        // Dormant workspaces of disconnected displays survive the switch (see
+        // the write-ahead persist above).
+        newState.upsertActiveWorkspace(
+            displayID: hostDisplay.id,
+            layoutName: layoutName,
+            spaceID: targetSpaceID
+        )
         // Quarantined windows are an accepted degraded mode: their verified
         // result is merged, while unknown/unsettled results keep the
         // conservative WAL entry above. They must not pin global recovery;
         // shutdown can still restore every WAL-hidden entry.
         let requiresRecovery = convergence.hasPending || !plan.unresolvedEntryIDs.isEmpty
-        newState.pendingVisibilityConvergence = requiresRecovery
-            ? PendingVisibilityConvergence(
-                requestID: UUID().uuidString.lowercased(),
-                startedAt: Date.rfc3339UTC(),
-                layoutName: layoutName,
-                targetSpaceID: targetSpaceID,
-                unresolvedSlots: plan.unresolvedSlots
-            )
-            : nil
+        newState.setPendingVisibilityConvergence(
+            displayID: hostDisplay.id,
+            requiresRecovery
+                ? PendingVisibilityConvergence(
+                    requestID: UUID().uuidString.lowercased(),
+                    startedAt: Date.rfc3339UTC(),
+                    displayID: hostDisplay.id,
+                    layoutName: layoutName,
+                    targetSpaceID: targetSpaceID,
+                    unresolvedSlots: plan.unresolvedSlots
+                )
+                : nil
+        )
 
         try persist(newState)
 
@@ -729,15 +881,23 @@ public actor VirtualSpaceEngine {
         toSpaceID: Int,
         config: LoadedConfig
     ) throws -> WorkspaceMoveOutcome {
-        guard let layoutName = state.activeLayoutName else {
+        guard let workspace = primaryWorkspace() else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
+        let layoutName = workspace.layoutName
         let observation = control.focusedWindowObservation()
         let inventory = observation.inventory
         guard inventory.isAuthoritative else {
             throw VirtualSpaceEngineError.stateError("window inventory unavailable")
         }
+        let excluded = crossLayoutExcludedIdentities(
+            layoutName: layoutName,
+            hostDisplayID: workspace.displayID,
+            windows: inventory.windows,
+            includeDisplayAffinity: true
+        )
         let manageable = WindowEligibility.geometryCandidates(in: observation)
+            .filter { !excluded.contains($0.identity) }
         guard let freshWindow = manageable.first(where: { $0.identity == window.identity }) else {
             throw VirtualSpaceEngineError.windowNotTracked
         }
@@ -778,7 +938,10 @@ public actor VirtualSpaceEngine {
         else {
             throw VirtualSpaceEngineError.windowNotTracked
         }
-        guard let layoutName = state.activeLayoutName else {
+        // The move stays within the layout that owns the tracked entry; its
+        // workspace must be active (on any display) for visibility planning.
+        let layoutName = trackedEntry.layoutName
+        guard state.activeWorkspace(layoutName: layoutName) != nil else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
         guard let layout = config.config.layouts[layoutName] else {
@@ -813,7 +976,7 @@ public actor VirtualSpaceEngine {
         ) else {
             throw VirtualSpaceEngineError.hostDisplayUnavailable
         }
-        let activeSpaceID = state.activeSpaceID(displayID: hostDisplay.id) ?? state.primaryActiveSpaceID
+        let activeSpaceID = state.activeWorkspace(displayID: hostDisplay.id)?.spaceID
         let transition: VisibilityTransition = toSpaceID == activeSpaceID ? .show : .hide
         guard let plan = VisibilityPlanner.plan(
             entry: entry,
@@ -826,7 +989,7 @@ public actor VirtualSpaceEngine {
             throw VirtualSpaceEngineError.stateError("unable to plan workspace move")
         }
 
-        let previousPending = state.pendingVisibilityConvergence
+        let previousPending = state.pendingVisibilityConvergence(displayID: hostDisplay.id)
         let requestID = UUID().uuidString.lowercased()
 
         func replacingEntry(in source: RuntimeState, with replacement: SlotEntry) -> RuntimeState {
@@ -843,7 +1006,7 @@ public actor VirtualSpaceEngine {
         // directly. Every real geometry mutation uses write-ahead state below.
         if plan.mutation == .none {
             var finalState = replacingEntry(in: state, with: plan.desiredEntry)
-            finalState.pendingVisibilityConvergence = previousPending
+            finalState.setPendingVisibilityConvergence(displayID: hostDisplay.id, previousPending)
             try persist(finalState)
             return WorkspaceMoveOutcome(
                 windowID: window.windowID,
@@ -860,9 +1023,10 @@ public actor VirtualSpaceEngine {
         // startup/shutdown recovery instead of an untracked offscreen window.
         let writeAheadEntry = Self.writeAheadEntry(for: plan)
         var intentState = replacingEntry(in: state, with: writeAheadEntry)
-        intentState.pendingVisibilityConvergence = PendingVisibilityConvergence(
+        let movePending = PendingVisibilityConvergence(
             requestID: requestID,
             startedAt: Date.rfc3339UTC(),
+            displayID: hostDisplay.id,
             layoutName: layoutName,
             targetSpaceID: toSpaceID,
             unresolvedSlots: [PendingUnresolvedSlot(
@@ -871,6 +1035,7 @@ public actor VirtualSpaceEngine {
                 reason: "window workspace move in progress"
             )]
         )
+        intentState.setPendingVisibilityConvergence(displayID: hostDisplay.id, movePending)
         try persist(intentState)
 
         // An explicit user move is a fresh chance: drop quarantine bookkeeping
@@ -895,12 +1060,12 @@ public actor VirtualSpaceEngine {
             // Neither the desired nor the original frame is authoritative.
             // Keep the durable intent and recovery marker, then report failure.
             var pendingState = replacingEntry(in: state, with: writeAheadEntry)
-            pendingState.pendingVisibilityConvergence = intentState.pendingVisibilityConvergence
+            pendingState.setPendingVisibilityConvergence(displayID: hostDisplay.id, movePending)
             try persist(pendingState)
             throw VirtualSpaceEngineError.stateError("workspace move did not converge")
         } else if change.effectiveEntry == change.desiredEntry {
             var finalState = replacingEntry(in: state, with: change.desiredEntry)
-            finalState.pendingVisibilityConvergence = previousPending
+            finalState.setPendingVisibilityConvergence(displayID: hostDisplay.id, previousPending)
             try persist(finalState)
         } else {
             // The write was refused and the original physical state is still
@@ -909,7 +1074,7 @@ public actor VirtualSpaceEngine {
             var rollbackEntry = trackedEntry.bound(to: window)
             rollbackEntry.spaceID = fromSpaceID
             var rollbackState = replacingEntry(in: state, with: rollbackEntry)
-            rollbackState.pendingVisibilityConvergence = previousPending
+            rollbackState.setPendingVisibilityConvergence(displayID: hostDisplay.id, previousPending)
             try persist(rollbackState)
             throw VirtualSpaceEngineError.stateError("workspace move was refused")
         }
@@ -995,11 +1160,12 @@ public actor VirtualSpaceEngine {
                 )
             }
         })
+        let replacedLayoutName = state.activeWorkspace(displayID: hostDisplay.id)?.layoutName
         let hiddenEntriesThatWouldLoseRecovery = state.slots.filter { entry in
             guard entry.visibilityState == .hiddenOffscreen else { return false }
-            if let activeLayoutName = state.activeLayoutName,
-               activeLayoutName != layoutName,
-               entry.layoutName == activeLayoutName
+            if let replacedLayoutName,
+               replacedLayoutName != layoutName,
+               entry.layoutName == replacedLayoutName
             {
                 return true
             }
@@ -1054,10 +1220,13 @@ public actor VirtualSpaceEngine {
         // Replace this layout's entries; keep adopted entries of the layout.
         let adopted = state.slots(layoutName: layoutName).filter { $0.origin == .adopted }
         newState.slots = newState.slots.filter { $0.layoutName != layoutName } + entries + adopted
-        newState.activeLayoutName = layoutName
         newState.configGeneration = config.configGeneration
-        newState.setActiveSpace(displayID: hostDisplay.id, spaceID: activeSpaceID)
-        newState.pendingVisibilityConvergence = nil
+        newState.upsertActiveWorkspace(
+            displayID: hostDisplay.id,
+            layoutName: layoutName,
+            spaceID: activeSpaceID
+        )
+        newState.setPendingVisibilityConvergence(displayID: hostDisplay.id, nil)
 
         try persist(newState)
 
@@ -1074,7 +1243,7 @@ public actor VirtualSpaceEngine {
     /// space recover --force-clear-pending
     public func clearPending() throws {
         var newState = state
-        newState.pendingVisibilityConvergence = nil
+        newState.pendingVisibilityConvergences = []
         newState.liveArrangeRecoveryRequired = false
         try persist(newState)
     }
@@ -1084,15 +1253,41 @@ public actor VirtualSpaceEngine {
         state = RuntimeState()
     }
 
-    /// Shutdown path: restore every offscreen-hidden window of the active
-    /// layout so nothing stays stranded while Shitsurae is not running.
-    /// Returns true when every hidden window was restored (and converged) —
-    /// only then is it safe to discard the runtime state.
+    /// Shutdown path: restore every offscreen-hidden window of every active
+    /// workspace (dormant ones included) so nothing stays stranded while
+    /// Shitsurae is not running. Returns true when every hidden window was
+    /// restored (and converged) — only then is it safe to discard the
+    /// runtime state.
+    ///
+    /// Dormant workspaces cannot resolve their declared host display, so this
+    /// one path substitutes the primary display and clamps restore frames
+    /// into it: a window on the wrong display is recoverable by hand, a
+    /// stranded offscreen window is not.
     @discardableResult
     public func restoreAllForShutdown(config: LoadedConfig) -> Bool {
-        guard let layoutName = state.activeLayoutName else {
+        guard !state.activeWorkspaces.isEmpty else {
             return true // nothing tracked, nothing to restore
         }
+
+        let displays = control.displays()
+        var allRestored = true
+        for workspace in state.activeWorkspaces {
+            let restored = restoreWorkspaceForShutdown(
+                workspace,
+                config: config,
+                displays: displays
+            )
+            allRestored = allRestored && restored
+        }
+        return allRestored
+    }
+
+    private func restoreWorkspaceForShutdown(
+        _ workspace: ActiveWorkspace,
+        config: LoadedConfig,
+        displays: [DisplayInfo]
+    ) -> Bool {
+        let layoutName = workspace.layoutName
         guard let layout = config.config.layouts[layoutName] else {
             return state.slots(layoutName: layoutName)
                 .allSatisfy { $0.visibilityState != .hiddenOffscreen }
@@ -1101,15 +1296,17 @@ public actor VirtualSpaceEngine {
         let hiddenEntries = state.slots(layoutName: layoutName)
             .filter { $0.visibilityState == .hiddenOffscreen }
         guard !hiddenEntries.isEmpty else {
-            return !state.recoveryRequired
+            return state.pendingVisibilityConvergence(displayID: workspace.displayID) == nil
+                && !state.liveArrangeRecoveryRequired
         }
 
-        let displays = control.displays()
-        guard let hostDisplay = DisplayResolver.hostDisplay(
+        let resolvedHost = DisplayResolver.hostDisplay(
             layout: layout,
             config: config.config,
             displays: displays
-        ) else {
+        )
+        let clampToFallbackDisplay = resolvedHost == nil
+        guard let hostDisplay = resolvedHost ?? DisplayResolver.primaryDisplay(displays) else {
             return false
         }
 
@@ -1141,7 +1338,7 @@ public actor VirtualSpaceEngine {
                 // Otherwise the window is gone (app quit); nothing to restore.
                 continue
             }
-            guard let plan = VisibilityPlanner.plan(
+            guard var plan = VisibilityPlanner.plan(
                 entry: entry,
                 window: window,
                 transition: .show,
@@ -1151,6 +1348,9 @@ public actor VirtualSpaceEngine {
             ) else {
                 unresolvedCount += 1
                 continue
+            }
+            if clampToFallbackDisplay {
+                plan = Self.clampingPlanFrame(plan, into: hostDisplay.visibleFrame)
             }
             plans.append(plan)
         }
@@ -1176,6 +1376,218 @@ public actor VirtualSpaceEngine {
         try? persist(newState)
 
         return !convergence.hasPending && unresolvedCount == 0
+    }
+
+    /// Shutdown-only frame clamping for dormant-workspace restores: shrink to
+    /// fit the substitute display, then move the origin inside its visible
+    /// frame so the restored window is guaranteed reachable.
+    private static func clampingPlanFrame(
+        _ plan: VisibilityPlan,
+        into visibleFrame: CGRect
+    ) -> VisibilityPlan {
+        guard case let .frame(frame) = plan.mutation else { return plan }
+        let width = min(frame.width, visibleFrame.width)
+        let height = min(frame.height, visibleFrame.height)
+        let x = min(max(frame.x, visibleFrame.minX), visibleFrame.minX + visibleFrame.width - width)
+        let y = min(max(frame.y, visibleFrame.minY), visibleFrame.minY + visibleFrame.height - height)
+        let clamped = ResolvedFrame(x: x, y: y, width: width, height: height)
+        guard clamped != frame else { return plan }
+
+        var desiredEntry = plan.desiredEntry
+        desiredEntry.lastVisibleFrame = clamped
+        return VisibilityPlan(
+            entryID: plan.entryID,
+            window: plan.window,
+            originalEntry: plan.originalEntry,
+            desiredEntry: desiredEntry,
+            mutation: .frame(clamped),
+            restoreFromMinimized: plan.restoreFromMinimized,
+            action: plan.action
+        )
+    }
+
+    // MARK: - Display configuration changes
+
+    /// didChangeScreenParametersNotification hook. Two responsibilities:
+    /// 1. restore dormant workspaces whose declared display re-resolves
+    ///    (reconnect; the UUID may have changed, so re-resolution — not UUID
+    ///    equality — decides, and the upsert migrates displayID + pending),
+    /// 2. reconcile every workspace whose host is connected (resolution /
+    ///    arrangement changes re-converge visibility), generalizing the
+    ///    former single-layout behavior.
+    ///
+    /// Restore priority when several dormant entries resolve to the same
+    /// reconnected display: id declaration > monitor role > resolution
+    /// condition; ties break by registration order in activeWorkspaces.
+    public func handleDisplayConfigurationChange(config: LoadedConfig) {
+        let displays = control.displays()
+        let connectedIDs = Set(displays.map(\.id))
+
+        let dormant = state.activeWorkspaces.filter { !connectedIDs.contains($0.displayID) }
+        let prioritized = dormant.enumerated()
+            .sorted { lhs, rhs in
+                let lhsPriority = Self.restorePriority(
+                    config.config.layouts[lhs.element.layoutName]?.display
+                )
+                let rhsPriority = Self.restorePriority(
+                    config.config.layouts[rhs.element.layoutName]?.display
+                )
+                if lhsPriority != rhsPriority { return lhsPriority < rhsPriority }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element)
+
+        var claimedDisplayIDs = Set<String>()
+        for workspace in prioritized {
+            guard let layout = config.config.layouts[workspace.layoutName] else {
+                // The layout left the config while dormant; drop the record.
+                var newState = state
+                newState.activeWorkspaces.removeAll { $0.layoutName == workspace.layoutName }
+                newState.pendingVisibilityConvergences.removeAll { $0.layoutName == workspace.layoutName }
+                try? persist(newState)
+                continue
+            }
+            guard let host = DisplayResolver.hostDisplay(
+                layout: layout,
+                config: config.config,
+                displays: displays
+            ),
+                !claimedDisplayIDs.contains(host.id),
+                state.activeWorkspace(displayID: host.id) == nil
+            else {
+                continue // stays dormant (host absent, or the display is taken)
+            }
+            claimedDisplayIDs.insert(host.id)
+            restoreDormantWorkspace(
+                workspace,
+                layout: layout,
+                hostDisplay: host,
+                config: config
+            )
+        }
+
+        // Reconcile all workspaces whose host display is currently connected.
+        let liveConnectedIDs = Set(control.displays().map(\.id))
+        for workspace in state.activeWorkspaces where liveConnectedIDs.contains(workspace.displayID) {
+            do {
+                _ = try switchSpace(
+                    layoutName: workspace.layoutName,
+                    to: workspace.spaceID,
+                    config: config,
+                    reconcile: true
+                )
+            } catch {
+                logger.log(
+                    level: "warn",
+                    event: "display.change.reconcileFailed",
+                    fields: [
+                        "layout": workspace.layoutName,
+                        "displayID": workspace.displayID,
+                        "error": String(describing: error),
+                    ]
+                )
+            }
+        }
+    }
+
+    /// Lower value wins. Mirrors the declaration specificity order the
+    /// design fixes for dormant-restore races.
+    private static func restorePriority(_ display: DisplayDefinition?) -> Int {
+        guard let display else { return 3 }
+        if display.id != nil { return 0 }
+        if display.monitor != nil { return 1 }
+        return 2
+    }
+
+    /// Reconnect restore: move the workspace record to the re-resolved
+    /// display (pending metadata migrates in the upsert), recompute layout
+    /// definition frames against the new host, and re-converge visibility.
+    /// Applications are never launched here — this is position restore only.
+    private func restoreDormantWorkspace(
+        _ workspace: ActiveWorkspace,
+        layout: LayoutDefinition,
+        hostDisplay: DisplayInfo,
+        config: LoadedConfig
+    ) {
+        var newState = state
+        newState.upsertActiveWorkspace(
+            displayID: hostDisplay.id,
+            layoutName: workspace.layoutName,
+            spaceID: workspace.spaceID
+        )
+
+        // Recompute definition frames against the (possibly UUID-changed)
+        // host so the following reconcile shows windows at their declared
+        // positions instead of stale coordinates of the old display.
+        var framesByFingerprint: [String: ResolvedFrame] = [:]
+        for space in layout.spaces {
+            for definition in space.windows {
+                let fingerprint = SlotEntry.fingerprint(
+                    layoutName: workspace.layoutName,
+                    spaceID: space.spaceID,
+                    definition: definition
+                )
+                if let definitionFrame = definition.frame,
+                   let frame = try? LengthParser.resolveFrame(
+                    definitionFrame,
+                    basis: hostDisplay.visibleFrame,
+                    scale: hostDisplay.scale
+                ) {
+                    framesByFingerprint[fingerprint] = frame
+                }
+            }
+        }
+        newState.slots = newState.slots.map { entry in
+            guard entry.layoutName == workspace.layoutName,
+                  entry.origin == .layout,
+                  let frame = framesByFingerprint[entry.definitionFingerprint]
+            else {
+                return entry
+            }
+            var updated = entry
+            updated.lastVisibleFrame = frame
+            return updated
+        }
+        do {
+            try persist(newState)
+        } catch {
+            logger.log(
+                level: "warn",
+                event: "display.change.restorePersistFailed",
+                fields: [
+                    "layout": workspace.layoutName,
+                    "error": String(describing: error),
+                ]
+            )
+            return
+        }
+
+        do {
+            _ = try switchSpace(
+                layoutName: workspace.layoutName,
+                to: workspace.spaceID,
+                config: config,
+                reconcile: true
+            )
+            logger.log(
+                event: "display.change.workspaceRestored",
+                fields: [
+                    "layout": workspace.layoutName,
+                    "fromDisplayID": workspace.displayID,
+                    "toDisplayID": hostDisplay.id,
+                ]
+            )
+        } catch {
+            logger.log(
+                level: "warn",
+                event: "display.change.restoreFailed",
+                fields: [
+                    "layout": workspace.layoutName,
+                    "displayID": hostDisplay.id,
+                    "error": String(describing: error),
+                ]
+            )
+        }
     }
 
     // MARK: - Persistence

@@ -132,10 +132,18 @@ public struct ModeDefinition: Codable, Equatable, Sendable {
 
 public struct LayoutDefinition: Codable, Equatable, Sendable {
     public let initialFocus: InitialFocusDefinition?
+    /// Host display of the whole layout. One layout is always hosted by
+    /// exactly one display; nil falls back to the macOS primary display.
+    public let display: DisplayDefinition?
     public let spaces: [SpaceDefinition]
 
-    public init(initialFocus: InitialFocusDefinition? = nil, spaces: [SpaceDefinition]) {
+    public init(
+        initialFocus: InitialFocusDefinition? = nil,
+        display: DisplayDefinition? = nil,
+        spaces: [SpaceDefinition]
+    ) {
         self.initialFocus = initialFocus
+        self.display = display
         self.spaces = spaces
     }
 }
@@ -150,13 +158,36 @@ public struct InitialFocusDefinition: Codable, Equatable, Sendable {
 
 public struct SpaceDefinition: Codable, Equatable, Sendable {
     public let spaceID: Int
-    public let display: DisplayDefinition?
     public let windows: [WindowDefinition]
 
-    public init(spaceID: Int, display: DisplayDefinition? = nil, windows: [WindowDefinition]) {
+    public init(spaceID: Int, windows: [WindowDefinition]) {
         self.spaceID = spaceID
-        self.display = display
         self.windows = windows
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case spaceID
+        case windows
+        case display
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if container.contains(.display) {
+            throw ShitsuraeError(
+                .validationError,
+                "spaces[].display was removed (one host display per layout); move it to layouts.<name>.display and delete the spaces[].display key",
+                subcode: "removedConfigKey"
+            )
+        }
+        spaceID = try container.decode(Int.self, forKey: .spaceID)
+        windows = try container.decode([WindowDefinition].self, forKey: .windows)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(spaceID, forKey: .spaceID)
+        try container.encode(windows, forKey: .windows)
     }
 }
 
@@ -164,9 +195,11 @@ public struct WindowDefinition: Codable, Equatable, Sendable {
     public let match: WindowMatchRule
     public let slot: Int
     public let launch: Bool?
-    public let frame: FrameDefinition
+    /// Omit to track the window in its virtual workspace without changing
+    /// its visible position or size during arrange.
+    public let frame: FrameDefinition?
 
-    public init(match: WindowMatchRule, slot: Int, launch: Bool? = nil, frame: FrameDefinition) {
+    public init(match: WindowMatchRule, slot: Int, launch: Bool? = nil, frame: FrameDefinition? = nil) {
         self.match = match
         self.slot = slot
         self.launch = launch

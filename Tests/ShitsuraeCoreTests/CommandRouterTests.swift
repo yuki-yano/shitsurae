@@ -14,6 +14,20 @@ struct CommandRouterTests {
         #expect(!CommandRouter.invalidatesPendingFocus(dryRun))
     }
 
+    @Test func multiDisplayArrangeRejectsSingleLayoutOnlyOptions() async throws {
+        let (router, _, _, cleanup) = try makeRouter(windows: [])
+        defer { cleanup() }
+
+        var request = CommandRequest(command: "arrange")
+        request.layouts = ["work", "calendar"]
+        request.spaceID = 1
+        let response = try await send(router, request)
+
+        #expect(response["ok"] as? Bool == false)
+        let error = try #require(response["error"] as? [String: Any])
+        #expect(error["subcode"] as? String == "invalidArrangeBatchOptions")
+    }
+
     private func makeRouter(
         windows: [WindowSnapshot]
     ) throws -> (router: CommandRouter, engine: VirtualSpaceEngine, control: MockWindowControl, cleanup: () -> Void) {
@@ -101,7 +115,7 @@ struct CommandRouterTests {
         defer { cleanup() }
 
         var bootstrap = CommandRequest(command: "arrange")
-        bootstrap.layout = "work"
+        bootstrap.layouts = ["work"]
         bootstrap.stateOnly = true
         bootstrap.spaceID = 1
         let bootstrapResponse = try await send(router, bootstrap)
@@ -125,7 +139,7 @@ struct CommandRouterTests {
         defer { cleanup() }
 
         var bootstrap = CommandRequest(command: "arrange")
-        bootstrap.layout = "work"
+        bootstrap.layouts = ["work"]
         bootstrap.stateOnly = true
         bootstrap.spaceID = 1
         _ = try await send(router, bootstrap)
@@ -137,6 +151,13 @@ struct CommandRouterTests {
         #expect(space["spaceID"] as? Int == 1)
         #expect(space["isActive"] as? Bool == true)
         #expect(payload["recoveryRequired"] as? Bool == false)
+
+        var scoped = CommandRequest(command: "spaceCurrent")
+        scoped.layout = "work"
+        let scopedResponse = try await send(router, scoped)
+        let scopedPayload = try #require(scopedResponse["payload"] as? [String: Any])
+        #expect(scopedPayload["layoutName"] as? String == "work")
+        #expect((scopedPayload["space"] as? [String: Any])?["spaceID"] as? Int == 1)
     }
 
     @Test func unknownCommandFailsCleanly() async throws {
@@ -189,7 +210,7 @@ struct CommandRouterTests {
         defer { cleanup() }
 
         var bootstrap = CommandRequest(command: "arrange")
-        bootstrap.layout = "work"
+        bootstrap.layouts = ["work"]
         bootstrap.stateOnly = true
         bootstrap.spaceID = 1
         _ = try await send(router, bootstrap)
