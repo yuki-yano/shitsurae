@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import Testing
@@ -8,6 +9,12 @@ struct WindowEnumeratorTests {
     @Test func resolvesKernelGenerationForCurrentProcess() {
         let pid = Int(ProcessInfo.processInfo.processIdentifier)
         #expect(ProcessGenerationResolver.startTime(pid: pid) != nil)
+    }
+
+    @Test func excludesBackgroundOnlyProcessOwnersBeforeAXEnumeration() {
+        #expect(WindowEnumerator.isEligibleProcessOwner(activationPolicy: .regular))
+        #expect(WindowEnumerator.isEligibleProcessOwner(activationPolicy: .accessory))
+        #expect(!WindowEnumerator.isEligibleProcessOwner(activationPolicy: .prohibited))
     }
 
     private func ax(

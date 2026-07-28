@@ -180,6 +180,7 @@ public enum WindowEnumerator {
         return Dictionary(uniqueKeysWithValues: applications.compactMap { app in
             let pid = Int(app.processIdentifier)
             guard !app.isTerminated,
+                  isEligibleProcessOwner(activationPolicy: app.activationPolicy),
                   let bundleID = app.bundleIdentifier,
                   let processStartTime = ProcessGenerationResolver.startTime(pid: pid)
             else {
@@ -193,6 +194,16 @@ public enum WindowEnumerator {
                 isHidden: app.isHidden
             ))
         })
+    }
+
+    /// Background-only processes can publish layer-0 CG surfaces even though
+    /// they do not own user-manageable application windows. Querying their AX
+    /// window list can block until the system timeout (CursorUIViewService is
+    /// one example), so reject them before any AX request is attempted.
+    static func isEligibleProcessOwner(
+        activationPolicy: NSApplication.ActivationPolicy
+    ) -> Bool {
+        activationPolicy != .prohibited
     }
 
     static func rawWindowHandles(

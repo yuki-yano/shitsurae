@@ -940,15 +940,15 @@ public extension VirtualSpaceEngine {
             throw VirtualSpaceEngineError.noActiveLayout
         }
         let layoutName = workspace.layoutName
-        _ = try? adoptUntrackedWindows(config: config)
+        let inventory = control.windowInventory()
+        guard inventory.isAuthoritative else { return [] }
+        _ = try? adoptUntrackedWindows(config: config, inventory: inventory)
 
         let activeSpaceID = workspace.spaceID
         let layoutSlots = currentState.slots(layoutName: layoutName)
             .filter { includeAllSpaces || $0.spaceID == activeSpaceID }
             .filter { !excludedApps.contains($0.bundleID) }
 
-        let inventory = control.windowInventory()
-        guard inventory.isAuthoritative else { return [] }
         let crossLayoutExcluded = crossLayoutExcludedIdentities(
             layoutName: layoutName,
             hostDisplayID: workspace.displayID,
@@ -1010,15 +1010,15 @@ public extension VirtualSpaceEngine {
             throw VirtualSpaceEngineError.noActiveLayout
         }
         let layoutName = workspace.layoutName
-        _ = try? adoptUntrackedWindows(config: config)
+        let inventory = control.windowInventory()
+        guard inventory.isAuthoritative else { return [] }
+        _ = try? adoptUntrackedWindows(config: config, inventory: inventory)
 
         let activeSpaceID = workspace.spaceID
         let layoutSlots = currentState.slots(layoutName: layoutName)
             .filter { $0.spaceID == activeSpaceID }
             .filter { !excludedApps.contains($0.bundleID) }
 
-        let inventory = control.windowInventory()
-        guard inventory.isAuthoritative else { return [] }
         let crossLayoutExcluded = crossLayoutExcludedIdentities(
             layoutName: layoutName,
             hostDisplayID: workspace.displayID,

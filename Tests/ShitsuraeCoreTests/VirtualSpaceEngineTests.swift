@@ -2968,6 +2968,20 @@ struct VirtualSpaceEngineTests {
         #expect(await engine.currentState == before)
     }
 
+    @Test func switcherAndCycleReuseAdoptionInventory() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+
+        var inventoryCount = control.listAllWindowsCallCount
+        _ = try await engine.switcherCandidates(includeAllSpaces: false, config: config)
+        #expect(control.listAllWindowsCallCount == inventoryCount + 1)
+
+        inventoryCount = control.listAllWindowsCallCount
+        _ = try await engine.cycleCandidates(config: config)
+        #expect(control.listAllWindowsCallCount == inventoryCount + 1)
+    }
+
     @Test func switcherIdentityNeverFocusesReusedWindowID() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
