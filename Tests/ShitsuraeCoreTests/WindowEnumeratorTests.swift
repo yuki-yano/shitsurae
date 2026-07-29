@@ -105,7 +105,8 @@ struct WindowEnumeratorTests {
                     minimized: [ax(100, 2)],
                     roles: [ax(100, 1): "AXWindow", ax(100, 2): "AXWindow"],
                     subroles: [ax(100, 1): "AXStandardWindow", ax(100, 2): "AXDialog"],
-                    modals: [ax(100, 1): false, ax(100, 2): true]
+                    modals: [ax(100, 1): false, ax(100, 2): true],
+                    mainWindowIdentities: [ax(100, 1)]
                 )
             }
         )
@@ -119,6 +120,8 @@ struct WindowEnumeratorTests {
         #expect(snapshots.first { $0.windowID == 1 }?.modal == false)
         #expect(snapshots.first { $0.windowID == 2 }?.subrole == "AXDialog")
         #expect(snapshots.first { $0.windowID == 2 }?.modal == true)
+        #expect(snapshots.first { $0.windowID == 1 }?.isApplicationMainWindow == true)
+        #expect(snapshots.first { $0.windowID == 2 }?.isApplicationMainWindow == false)
     }
 
     @Test func focusedCompanionBlocksOnlyItsExactProcessMainWindow() {

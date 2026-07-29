@@ -960,7 +960,7 @@ struct VirtualSpaceEngineTests {
         #expect(control.window(chatGPT.windowID)?.frame == originalFrame)
     }
 
-    @Test func ownWindowCannotBeAssignedToVirtualWorkspace() async throws {
+    @Test func shitsuraeMainWindowCanBeAssignedToVirtualWorkspace() async throws {
         let originalFrame = ResolvedFrame(x: 200, y: 100, width: 500, height: 700)
         let ownWindow = TestFixtures.window(
             id: 9,
@@ -968,6 +968,43 @@ struct VirtualSpaceEngineTests {
             pid: 90,
             title: "Shitsurae",
             frame: originalFrame,
+            isApplicationMainWindow: true,
+            isAXBacked: true,
+            frontIndex: 0
+        )
+        let (engine, _, url) = makeEngine(windows: standardWindows() + [ownWindow])
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 2, config: config)
+        _ = try await engine.adoptUntrackedWindows(config: config)
+        #expect((await engine.currentState).slots.contains {
+            $0.boundIdentity == ownWindow.identity
+        })
+
+        let moved = try await engine.windowWorkspace(
+            selector: WindowTargetSelector(
+                windowID: ownWindow.windowID,
+                pid: ownWindow.pid,
+                processStartTime: ownWindow.processStartTime,
+                bundleID: ownWindow.bundleID
+            ),
+            toSpaceID: 1,
+            config: config
+        )
+
+        #expect(moved.spaceID == 1)
+        #expect((await engine.currentState).slots.contains {
+            $0.boundIdentity == ownWindow.identity && $0.spaceID == 1
+        })
+    }
+
+    @Test func focusedShitsuraeMainWindowIsAdoptedWhenPresented() async throws {
+        let ownWindow = TestFixtures.window(
+            id: 9,
+            bundleID: "com.yuki-yano.shitsurae",
+            pid: 90,
+            title: "Shitsurae",
+            isApplicationMainWindow: true,
             isAXBacked: true,
             frontIndex: 0
         )
@@ -975,27 +1012,21 @@ struct VirtualSpaceEngineTests {
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
         try await engine.bootstrapState(layoutName: "work", activeSpaceID: 2, config: config)
-        _ = try await engine.adoptUntrackedWindows(config: config)
-        #expect(!(await engine.currentState).slots.contains {
-            $0.boundIdentity == ownWindow.identity
-        })
+        control.setFocusedWindowID(ownWindow.windowID)
 
-        await #expect(throws: VirtualSpaceEngineError.windowNotTracked) {
-            try await engine.windowWorkspace(
-                selector: WindowTargetSelector(
-                    windowID: ownWindow.windowID,
-                    pid: ownWindow.pid,
-                    processStartTime: ownWindow.processStartTime,
-                    bundleID: ownWindow.bundleID
-                ),
-                toSpaceID: 1,
-                config: config
-            )
-        }
+        let outcome = try #require(await engine.processFocusEvent(
+            sequence: 1,
+            windowID: ownWindow.windowID,
+            pid: ownWindow.pid,
+            processStartTime: ownWindow.processStartTime,
+            bundleID: ownWindow.bundleID,
+            config: config
+        ))
 
-        #expect(control.window(ownWindow.windowID)?.frame == originalFrame)
-        #expect(!(await engine.currentState).slots.contains {
-            $0.boundIdentity == ownWindow.identity
+        #expect(outcome.didAdopt)
+        #expect(outcome.spaceID == 2)
+        #expect((await engine.currentState).slots.contains {
+            $0.boundIdentity == ownWindow.identity && $0.spaceID == 2
         })
     }
 
@@ -2826,13 +2857,14 @@ struct VirtualSpaceEngineTests {
         #expect(finderEntries.first?.windowID == 9)
     }
 
-    @Test func switchPrunesPreviouslyAdoptedShitsuraeWindowEvenWhenAXInvisible() async throws {
+    @Test func switchPreservesAndHidesPreviouslyAdoptedShitsuraeMainWindow() async throws {
         let ownWindow = TestFixtures.window(
             id: 9,
             bundleID: "com.yuki-yano.shitsurae",
             pid: 90,
             title: "Shitsurae",
-            isAXBacked: false,
+            isApplicationMainWindow: true,
+            isAXBacked: true,
             frontIndex: 3
         )
         let (engine, control, url) = makeEngine(windows: standardWindows() + [ownWindow])
@@ -2862,10 +2894,10 @@ struct VirtualSpaceEngineTests {
         let outcome = try await engine.switchSpace(to: 2, config: config)
 
         let state = await engine.currentState
-        #expect(!state.slots.contains {
-            WindowEligibility.isShitsuraeApplication(bundleID: $0.bundleID)
+        #expect(state.slots.contains {
+            $0.boundIdentity == ownWindow.identity
         })
-        #expect(!control.frameMutationAttemptWindowIDs.contains(ownWindow.windowID))
+        #expect(control.frameMutationAttemptWindowIDs.contains(ownWindow.windowID))
         #expect(outcome.converged)
         #expect(!state.recoveryRequired)
     }

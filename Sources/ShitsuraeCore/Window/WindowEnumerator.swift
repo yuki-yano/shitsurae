@@ -110,7 +110,6 @@ public enum WindowEnumerator {
     public static func focusedWindowIdentity() -> WindowIdentity? {
         guard let appBefore = NSWorkspace.shared.frontmostApplication,
               let bundleID = appBefore.bundleIdentifier,
-              !WindowEligibility.isShitsuraeApplication(bundleID: bundleID),
               let processStartTime = ProcessGenerationResolver.startTime(
                   pid: Int(appBefore.processIdentifier)
               ),
@@ -140,7 +139,6 @@ public enum WindowEnumerator {
     public static func frontmostWindowIdentity() -> WindowIdentity? {
         guard let appBefore = NSWorkspace.shared.frontmostApplication,
               let bundleID = appBefore.bundleIdentifier,
-              !WindowEligibility.isShitsuraeApplication(bundleID: bundleID),
               let processStartTime = ProcessGenerationResolver.startTime(
                   pid: Int(appBefore.processIdentifier)
               ),
@@ -343,7 +341,8 @@ public enum WindowEnumerator {
             guard !app.isTerminated,
                   isEligibleProcessOwner(activationPolicy: app.activationPolicy),
                   let bundleID = app.bundleIdentifier,
-                  !WindowEligibility.isShitsuraeApplication(bundleID: bundleID),
+                  (!WindowEligibility.isShitsuraeApplication(bundleID: bundleID)
+                      || WindowEligibility.isShitsuraeMainApplication(bundleID: bundleID)),
                   let processStartTime = ProcessGenerationResolver.startTime(pid: pid)
             else {
                 return nil
@@ -530,6 +529,7 @@ public enum WindowEnumerator {
                     role: axInfo.roles[axIdentity],
                     subrole: axInfo.subroles[axIdentity],
                     modal: axInfo.modals[axIdentity],
+                    isApplicationMainWindow: axInfo.mainWindowIdentities.contains(axIdentity),
                     geometryBlocked: false,
                     isAXBacked: axInfo.axBackedWindowIDs.contains(axIdentity),
                     minimized: axInfo.minimized.contains(axIdentity),

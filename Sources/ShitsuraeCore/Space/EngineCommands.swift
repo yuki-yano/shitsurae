@@ -85,9 +85,6 @@ public extension VirtualSpaceEngine {
         bundleID: String,
         config: LoadedConfig
     ) -> FocusEventOutcome? {
-        guard !WindowEligibility.isShitsuraeApplication(bundleID: bundleID) else {
-            return nil
-        }
         guard focusEventGate.accept(sequence) else { return nil }
         guard sequence > latestFocusEventSequence else { return nil }
         latestFocusEventSequence = sequence
@@ -743,7 +740,6 @@ public extension VirtualSpaceEngine {
                 && !window.minimized
                 && !excludedWindowIdentities.contains(window.identity)
                 && !crossLayoutExcluded.contains(window.identity)
-                && !WindowEligibility.isShitsuraeApplication(bundleID: window.bundleID)
                 && WindowEligibility.isManageableForVirtualWorkspace(window)
                 && !matchesOtherWorkspaceLayoutRule(
                     window: window,

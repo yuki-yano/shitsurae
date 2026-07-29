@@ -5,6 +5,90 @@ import ShitsuraeCore
 
 @Suite("Layout preview geometry")
 struct LayoutPreviewTests {
+    @Test func includesEverySelectedDisplayInArrangePreviewOrder() {
+        let choices = [
+            DisplayLayoutChoice(
+                displayID: "primary",
+                isPrimary: true,
+                monitorAlias: "main",
+                layoutNames: ["default"],
+                activeLayoutName: "default"
+            ),
+            DisplayLayoutChoice(
+                displayID: "research",
+                isPrimary: false,
+                monitorAlias: "research",
+                layoutNames: ["research"],
+                activeLayoutName: "research"
+            ),
+            DisplayLayoutChoice(
+                displayID: "calendar",
+                isPrimary: false,
+                monitorAlias: "calendar",
+                layoutNames: ["calendar"],
+                activeLayoutName: "calendar"
+            ),
+        ]
+
+        let selections = selectedDisplayLayouts(
+            choices: choices,
+            selectionByDisplayID: [
+                "primary": "default",
+                "research": "research",
+                "calendar": "calendar",
+            ],
+            spaceByDisplayID: ["research": 2]
+        )
+
+        #expect(selections == [
+            DisplayLayoutSelection(
+                displayID: "primary",
+                displayTitle: "main Display",
+                layoutName: "default",
+                spaceID: nil
+            ),
+            DisplayLayoutSelection(
+                displayID: "research",
+                displayTitle: "research Display",
+                layoutName: "research",
+                spaceID: 2
+            ),
+            DisplayLayoutSelection(
+                displayID: "calendar",
+                displayTitle: "calendar Display",
+                layoutName: "calendar",
+                spaceID: nil
+            ),
+        ])
+    }
+
+    @Test func omitsDisplaysMarkedDoNotApplyFromArrangePreview() {
+        let choices = [
+            DisplayLayoutChoice(
+                displayID: "primary",
+                isPrimary: true,
+                monitorAlias: nil,
+                layoutNames: ["default"],
+                activeLayoutName: nil
+            ),
+            DisplayLayoutChoice(
+                displayID: "secondary",
+                isPrimary: false,
+                monitorAlias: nil,
+                layoutNames: ["calendar"],
+                activeLayoutName: nil
+            ),
+        ]
+
+        let selections = selectedDisplayLayouts(
+            choices: choices,
+            selectionByDisplayID: ["secondary": "calendar"],
+            spaceByDisplayID: [:]
+        )
+
+        #expect(selections.map(\.displayID) == ["secondary"])
+    }
+
     @Test func resolvesLengthsAgainstTheSelectedDisplaysVisibleFrameAndScale() throws {
         let display = DisplayInfo(
             id: "secondary",

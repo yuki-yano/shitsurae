@@ -24,12 +24,18 @@ public enum WindowEligibility {
         bundleID.hasPrefix("com.yuki-yano.shitsurae")
     }
 
+    public static func isShitsuraeMainApplication(bundleID: String) -> Bool {
+        bundleID == "com.yuki-yano.shitsurae"
+    }
+
     public static func classification(of window: WindowSnapshot) -> Classification {
-        // Shitsurae's own settings and overlay windows are control surfaces,
-        // never user workspace content. Bundle identity is authoritative even
-        // when AppKit has already detached the AX window but CG still retains
-        // its surface.
-        if isShitsuraeApplication(bundleID: window.bundleID) {
+        // Only Shitsurae's AX main window is workspace content. Menu, switcher,
+        // settings/helper surfaces, the CLI, and detached CG remnants remain
+        // control surfaces.
+        if isShitsuraeApplication(bundleID: window.bundleID),
+           (!isShitsuraeMainApplication(bundleID: window.bundleID)
+               || !window.isApplicationMainWindow)
+        {
             return .companion
         }
 

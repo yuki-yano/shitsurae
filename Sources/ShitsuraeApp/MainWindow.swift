@@ -15,7 +15,7 @@ enum SidebarItem: Hashable {
     case diagnostics
 }
 
-private struct DisplayLayoutChoice: Identifiable, Equatable {
+struct DisplayLayoutChoice: Identifiable, Equatable {
     let displayID: String
     let isPrimary: Bool
     let monitorAlias: String?
@@ -26,6 +26,33 @@ private struct DisplayLayoutChoice: Identifiable, Equatable {
     var title: String {
         monitorAlias.map { "\($0) Display" }
             ?? (isPrimary ? "Primary Display" : "Display \(displayID.prefix(8))…")
+    }
+}
+
+struct DisplayLayoutSelection: Identifiable, Equatable {
+    let displayID: String
+    let displayTitle: String
+    let layoutName: String
+    let spaceID: Int?
+
+    var id: String { displayID }
+}
+
+func selectedDisplayLayouts(
+    choices: [DisplayLayoutChoice],
+    selectionByDisplayID: [String: String],
+    spaceByDisplayID: [String: Int]
+) -> [DisplayLayoutSelection] {
+    choices.compactMap { choice in
+        guard let layoutName = selectionByDisplayID[choice.displayID] else {
+            return nil
+        }
+        return DisplayLayoutSelection(
+            displayID: choice.displayID,
+            displayTitle: choice.title,
+            layoutName: layoutName,
+            spaceID: spaceByDisplayID[choice.displayID]
+        )
     }
 }
 
@@ -102,12 +129,8 @@ struct MainWindowView: View {
 
 struct ArrangeView: View {
     @EnvironmentObject var model: AppModel
-    @State private var previewLayoutName: String?
-
-    private var currentLayout: LayoutDefinition? {
-        guard let name = previewLayoutName else { return nil }
-        return model.configManager.configIfLoaded()?.config.layouts[name]
-    }
+    @State private var selectionByDisplayID: [String: String] = [:]
+    @State private var spaceByDisplayID: [String: Int] = [:]
 
     private var spaceIDsByLayout: [String: [Int]] {
         guard let config = model.configManager.configIfLoaded()?.config else { return [:] }
@@ -152,6 +175,14 @@ struct ArrangeView: View {
             }
     }
 
+    private var previewSelections: [DisplayLayoutSelection] {
+        selectedDisplayLayouts(
+            choices: displayLayoutChoices,
+            selectionByDisplayID: selectionByDisplayID,
+            spaceByDisplayID: spaceByDisplayID
+        )
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -171,7 +202,8 @@ struct ArrangeView: View {
                         choices: displayLayoutChoices,
                         spaceIDsByLayout: spaceIDsByLayout,
                         isRunning: model.actionStatus.isRunning,
-                        previewLayoutName: $previewLayoutName,
+                        selectionByDisplayID: $selectionByDisplayID,
+                        spaceByDisplayID: $spaceByDisplayID,
                         onApplyLayout: { layoutName, spaceID in
                             model.applyLayoutFromMainWindow(layoutName, spaceID: spaceID)
                         },
@@ -185,8 +217,8 @@ struct ArrangeView: View {
                             .textSelection(.enabled)
                     }
 
-                    if let layout = currentLayout {
-                        layoutPreview(layout)
+                    if !previewSelections.isEmpty {
+                        displaySetPreview(previewSelections)
                     }
                 }
             }
@@ -264,29 +296,48 @@ struct ArrangeView: View {
         .background(.quaternary.opacity(0.6), in: Capsule())
     }
 
-    private func layoutPreview(_ layout: LayoutDefinition) -> some View {
-        let hostDisplay = DisplayResolver.hostDisplay(
-            layout: layout,
-            config: model.configManager.configIfLoaded()?.config,
-            displays: model.displays
-        )
+    private func displaySetPreview(_ selections: [DisplayLayoutSelection]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Preview", systemImage: "rectangle.on.rectangle")
+                .font(.headline)
 
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Label("Preview", systemImage: "rectangle.on.rectangle")
-                    .font(.headline)
-                if let display = layout.display {
-                    displayBadge(display)
+            ForEach(selections) { selection in
+                if let layout = model.configManager.configIfLoaded()?
+                    .config.layouts[selection.layoutName]
+                {
+                    layoutPreview(selection: selection, layout: layout)
                 }
             }
+        }
+    }
 
-            ForEach(Array(layout.spaces.enumerated()), id: \.offset) { _, space in
-                GroupBox {
+    private func layoutPreview(
+        selection: DisplayLayoutSelection,
+        layout: LayoutDefinition
+    ) -> some View {
+        let hostDisplay = model.displays.first { $0.id == selection.displayID }
+        let spaces = selection.spaceID.map { selectedSpaceID in
+            layout.spaces.filter { $0.spaceID == selectedSpaceID }
+        } ?? layout.spaces
+
+        return GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Label(selection.displayTitle, systemImage: "display")
+                        .font(.subheadline.bold())
+                    Text(selection.layoutName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let display = layout.display {
+                        displayBadge(display)
+                    }
+                }
+
+                ForEach(spaces, id: \.spaceID) { space in
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Text("Space \(space.spaceID)").font(.subheadline).bold()
-                            if space.spaceID == activeSpaceID(for: previewLayoutName)
-                            {
+                            if space.spaceID == activeSpaceID(for: selection.layoutName) {
                                 Text("active")
                                     .font(.caption2)
                                     .padding(.horizontal, 6)
@@ -305,13 +356,18 @@ struct ArrangeView: View {
                         windowLegend(space.windows)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if space.spaceID != spaces.last?.spaceID {
+                        Divider()
+                    }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(4)
         }
     }
 
-    private func activeSpaceID(for layoutName: String?) -> Int? {
-        guard let layoutName else { return nil }
+    private func activeSpaceID(for layoutName: String) -> Int? {
         return model.diagnostics?.state.activeWorkspaces
             .first(where: { $0.layoutName == layoutName })?
             .spaceID
@@ -348,12 +404,10 @@ private struct DisplayArrangeSection: View {
     let choices: [DisplayLayoutChoice]
     let spaceIDsByLayout: [String: [Int]]
     let isRunning: Bool
-    @Binding var previewLayoutName: String?
+    @Binding var selectionByDisplayID: [String: String]
+    @Binding var spaceByDisplayID: [String: Int]
     let onApplyLayout: (String, Int?) -> Void
     let onApplyDisplaySet: ([String]) -> Void
-
-    @State private var selectionByDisplayID: [String: String] = [:]
-    @State private var spaceByDisplayID: [String: Int] = [:]
 
     private var selectedLayouts: [String] {
         choices.compactMap { selectionByDisplayID[$0.displayID] }
@@ -402,7 +456,6 @@ private struct DisplayArrangeSection: View {
             set: { newValue in
                 selectionByDisplayID[choice.displayID] = newValue
                 if let newValue {
-                    previewLayoutName = newValue
                     if let selectedSpaceID = spaceByDisplayID[choice.displayID],
                        !(spaceIDsByLayout[newValue] ?? []).contains(selectedSpaceID)
                     {
@@ -429,7 +482,6 @@ private struct DisplayArrangeSection: View {
 
     private func applyLayout(for choice: DisplayLayoutChoice) {
         guard let layoutName = selectionByDisplayID[choice.displayID] else { return }
-        previewLayoutName = layoutName
         onApplyLayout(layoutName, spaceByDisplayID[choice.displayID])
     }
 
@@ -463,12 +515,6 @@ private struct DisplayArrangeSection: View {
         }
         if validSpaces != spaceByDisplayID {
             spaceByDisplayID = validSpaces
-        }
-
-        if previewLayoutName.map({ updated.values.contains($0) }) != true {
-            previewLayoutName = choices
-                .compactMap { updated[$0.displayID] }
-                .first
         }
     }
 }

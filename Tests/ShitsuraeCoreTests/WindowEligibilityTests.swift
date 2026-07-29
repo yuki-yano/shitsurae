@@ -9,7 +9,8 @@ struct WindowEligibilityTests {
         subrole: String? = "AXStandardWindow",
         modal: Bool? = false,
         isAXBacked: Bool,
-        bundleID: String = "com.google.Chrome"
+        bundleID: String = "com.google.Chrome",
+        isApplicationMainWindow: Bool = false
     ) -> WindowSnapshot {
         TestFixtures.window(
             id: 1,
@@ -18,6 +19,7 @@ struct WindowEligibilityTests {
             role: role,
             subrole: subrole,
             modal: modal,
+            isApplicationMainWindow: isApplicationMainWindow,
             isAXBacked: isAXBacked
         )
     }
@@ -135,19 +137,29 @@ struct WindowEligibilityTests {
         #expect(WindowEligibility.geometryCandidates(in: observation).isEmpty)
     }
 
-    @Test func excludesOwnWindowsAndXPCSurfacesFromWorkspaceManagement() {
-        let ownWindow = window(
+    @Test func managesOnlyShitsuraeMainWindowAndStillExcludesHelperSurfaces() {
+        let ownMainWindow = window(
+            subrole: "AXStandardWindow",
+            isAXBacked: true,
+            bundleID: "com.yuki-yano.shitsurae",
+            isApplicationMainWindow: true
+        )
+        #expect(WindowEligibility.isShitsuraeApplication(bundleID: ownMainWindow.bundleID))
+        #expect(WindowEligibility.classification(of: ownMainWindow) == .manageable)
+        #expect(WindowEligibility.isManageableForVirtualWorkspace(ownMainWindow))
+
+        let ownHelperWindow = window(
             subrole: "AXStandardWindow",
             isAXBacked: true,
             bundleID: "com.yuki-yano.shitsurae"
         )
-        #expect(WindowEligibility.isShitsuraeApplication(bundleID: ownWindow.bundleID))
-        #expect(WindowEligibility.classification(of: ownWindow) == .companion)
-        #expect(!WindowEligibility.isManageableForVirtualWorkspace(ownWindow))
+        #expect(WindowEligibility.classification(of: ownHelperWindow) == .companion)
+        #expect(!WindowEligibility.isManageableForVirtualWorkspace(ownHelperWindow))
         #expect(WindowEligibility.classification(of: window(
             isAXBacked: false,
-            bundleID: "com.yuki-yano.shitsurae"
-        )) == .companion)
+            bundleID: "com.yuki-yano.shitsurae",
+            isApplicationMainWindow: true
+        )) == .unknown)
         #expect(!WindowEligibility.isManageableForVirtualWorkspace(
             window(
                 subrole: "AXStandardWindow",

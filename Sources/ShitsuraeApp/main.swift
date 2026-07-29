@@ -85,6 +85,7 @@ struct ShitsuraeApp: App {
                 .environmentObject(model)
                 .onAppear {
                     NSApp.activate(ignoringOtherApps: true)
+                    model.mainWindowDidAppear()
                 }
         }
         .defaultSize(width: 860, height: 560)

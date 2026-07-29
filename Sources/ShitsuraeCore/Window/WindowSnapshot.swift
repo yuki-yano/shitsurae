@@ -158,6 +158,10 @@ public struct WindowSnapshot: Equatable, Sendable {
     /// Raw kAXModalAttribute. nil means the attribute could not be observed;
     /// absence is not equivalent to a known non-modal window.
     public let modal: Bool?
+    /// Whether AX reported this exact window as the owning application's
+    /// `kAXMainWindowAttribute`. Shitsurae uses this to distinguish its one
+    /// workspace-facing window from its menu, switcher, and helper surfaces.
+    public let isApplicationMainWindow: Bool
     /// True when this exact AX main window is protected by a concurrently
     /// focused companion/unknown surface in the same process. It remains
     /// state-trackable but must not be a geometry or workspace-move target.
@@ -193,6 +197,7 @@ public struct WindowSnapshot: Equatable, Sendable {
         role: String?,
         subrole: String?,
         modal: Bool?,
+        isApplicationMainWindow: Bool = false,
         geometryBlocked: Bool,
         isAXBacked: Bool,
         minimized: Bool,
@@ -211,6 +216,7 @@ public struct WindowSnapshot: Equatable, Sendable {
         self.role = role
         self.subrole = subrole
         self.modal = modal
+        self.isApplicationMainWindow = isApplicationMainWindow
         self.geometryBlocked = geometryBlocked
         self.isAXBacked = isAXBacked
         self.minimized = minimized
@@ -245,6 +251,7 @@ public struct WindowSnapshot: Equatable, Sendable {
             role: role,
             subrole: subrole,
             modal: modal,
+            isApplicationMainWindow: isApplicationMainWindow,
             geometryBlocked: newValue,
             isAXBacked: isAXBacked,
             minimized: minimized,

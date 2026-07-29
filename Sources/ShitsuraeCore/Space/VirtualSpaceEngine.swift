@@ -1736,9 +1736,6 @@ public actor VirtualSpaceEngine {
         }
 
         return Set(adoptedEntries.compactMap { entry in
-            if WindowEligibility.isShitsuraeApplication(bundleID: entry.bundleID) {
-                return entry.id
-            }
             guard let identity = entry.boundIdentity,
                   let window = windows.first(where: { $0.identity == identity })
             else {

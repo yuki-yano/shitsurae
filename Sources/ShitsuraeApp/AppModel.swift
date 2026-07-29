@@ -501,6 +501,29 @@ final class AppModel: ObservableObject {
 
     // MARK: - Actions
 
+    /// SwiftUI can present the main window while the menu-bar process is
+    /// already active, in which case AppKit does not emit a fresh activation
+    /// notification. Sample it explicitly after the window has joined the
+    /// hierarchy so the normal focus/adoption pipeline assigns it.
+    func mainWindowDidAppear() {
+        guard let application = NSRunningApplication(
+            processIdentifier: ProcessInfo.processInfo.processIdentifier
+        ), let bundleID = application.bundleIdentifier
+        else {
+            return
+        }
+        let sequence = AXWindowEventMonitor.nextSequence()
+        Task { @MainActor [weak self, weak application] in
+            await Task.yield()
+            guard let self, let application else { return }
+            self.handleAppActivated(
+                application: application,
+                bundleID: bundleID,
+                sequence: sequence
+            )
+        }
+    }
+
     func applyLayout(_ name: String, spaceID: Int?) {
         runEngineAction("arrange \(name)", urgency: .interactive) { engine, config in
             let result = try await engine.arrange(layoutName: name, spaceID: spaceID, config: config)
@@ -899,9 +922,7 @@ final class AppModel: ObservableObject {
         }
 
         recordFrontmostActivation(application)
-        guard !bundleID.hasPrefix("com.yuki-yano.shitsurae"),
-              bundleID != Bundle.main.bundleIdentifier,
-              let processStartTime = ProcessGenerationResolver.startTime(
+        guard let processStartTime = ProcessGenerationResolver.startTime(
                   pid: Int(application.processIdentifier)
               )
         else {
