@@ -48,10 +48,9 @@ public enum SystemProbe {
 
         return screens.compactMap { screen in
             guard let displayID = screenDisplayID(screen) else { return nil }
-            guard let uuidRef = CGDisplayCreateUUIDFromDisplayID(displayID)?.takeRetainedValue() else {
+            guard let uuidString = stableDisplayID(for: displayID) else {
                 return nil
             }
-            let uuidString = (CFUUIDCreateString(nil, uuidRef) as String?) ?? "unknown"
             let mode = CGDisplayCopyDisplayMode(displayID)
 
             let width = mode.map { Int($0.pixelWidth) } ?? Int(screen.frame.width * screen.backingScaleFactor)
@@ -71,6 +70,15 @@ public enum SystemProbe {
             )
         }
         .sorted { $0.id < $1.id }
+    }
+
+    /// Resolves the stable display UUID used by `DisplayInfo` for an AppKit
+    /// screen. UI surfaces use this to target the same physical display as
+    /// Core workspace routing without comparing incompatible coordinate
+    /// systems.
+    public static func stableDisplayID(for screen: NSScreen) -> String? {
+        guard let displayID = screenDisplayID(screen) else { return nil }
+        return stableDisplayID(for: displayID)
     }
 
     /// Converts AppKit's bottom-left-origin global screen coordinates into the
@@ -193,6 +201,14 @@ public enum SystemProbe {
             return nil
         }
         return CGDirectDisplayID(number.uint32Value)
+    }
+
+    private static func stableDisplayID(for displayID: CGDirectDisplayID) -> String? {
+        guard let uuid = CGDisplayCreateUUIDFromDisplayID(displayID)?.takeRetainedValue()
+        else {
+            return nil
+        }
+        return CFUUIDCreateString(nil, uuid) as String?
     }
 
     private static func launchDetachedProcess(executable: String, arguments: [String]) -> Bool {

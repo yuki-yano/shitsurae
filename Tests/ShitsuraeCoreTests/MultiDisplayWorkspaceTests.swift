@@ -254,6 +254,83 @@ struct MultiDisplayWorkspaceTests {
         )
     }
 
+    @Test func switcherAndCycleCandidatesAreScopedToRequestedDisplay() async throws {
+        let (engine, _, url) = makeEngine(windows: primaryWindows() + [calendarWindow()])
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: dualConfig)
+        try await engine.bootstrapState(layoutName: "calendar", activeSpaceID: 1, config: dualConfig)
+
+        let primarySwitcher = try await engine.switcherCandidates(
+            displayID: "uuid-main",
+            includeAllSpaces: false,
+            config: dualConfig
+        )
+        let secondarySwitcher = try await engine.switcherCandidates(
+            displayID: "uuid-sub",
+            includeAllSpaces: false,
+            config: dualConfig
+        )
+        let primaryCycle = try await engine.cycleCandidates(
+            displayID: "uuid-main",
+            config: dualConfig
+        )
+        let secondaryCycle = try await engine.cycleCandidates(
+            displayID: "uuid-sub",
+            config: dualConfig
+        )
+
+        #expect(Set(primarySwitcher.map(\.displayID)) == ["uuid-main"])
+        #expect(Set(primaryCycle.map(\.displayID)) == ["uuid-main"])
+        #expect(secondarySwitcher.map(\.bundleID) == [Self.calendarBundleID])
+        #expect(secondaryCycle.map(\.bundleID) == [Self.calendarBundleID])
+        #expect(Set(secondarySwitcher.map(\.displayID)) == ["uuid-sub"])
+        #expect(Set(secondaryCycle.map(\.displayID)) == ["uuid-sub"])
+    }
+
+    @Test func secondarySwitcherAdoptsOnlyVisibleWindowsOnItsDisplay() async throws {
+        let secondaryStray = TestFixtures.window(
+            id: 6,
+            bundleID: "com.example.Research",
+            frame: ResolvedFrame(x: 1_600, y: 80, width: 500, height: 400),
+            isAXBacked: true,
+            frontIndex: 4,
+            displayID: "uuid-sub"
+        )
+        let primaryStray = TestFixtures.window(
+            id: 7,
+            bundleID: "com.example.PrimaryStray",
+            isAXBacked: true,
+            frontIndex: 5,
+            displayID: "uuid-main"
+        )
+        let (engine, _, url) = makeEngine(
+            windows: primaryWindows() + [calendarWindow(), secondaryStray, primaryStray]
+        )
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: dualConfig)
+        try await engine.bootstrapState(layoutName: "calendar", activeSpaceID: 1, config: dualConfig)
+
+        let candidates = try await engine.switcherCandidates(
+            displayID: "uuid-sub",
+            includeAllSpaces: false,
+            config: dualConfig
+        )
+
+        #expect(Set(candidates.map(\.bundleID)) == [
+            Self.calendarBundleID,
+            "com.example.Research",
+        ])
+        let state = await engine.currentState
+        #expect(state.slots.contains {
+            $0.layoutName == "calendar"
+                && $0.bundleID == "com.example.Research"
+                && $0.origin == .adopted
+        })
+        #expect(!state.slots.contains { $0.bundleID == "com.example.PrimaryStray" })
+    }
+
     @Test func preserveFocusRestoresOutsideWorkspaceFocusAfterVisibilitySteal() async throws {
         let config = TestFixtures.loadedConfig(layouts: [
             "work": TestFixtures.twoSpaceLayout(),

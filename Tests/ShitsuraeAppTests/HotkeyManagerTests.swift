@@ -201,6 +201,40 @@ import ShitsuraeCore
 
 @Suite("HotkeyManager")
 struct HotkeyManagerTests {
+    @Test func resolvesSwitcherDisplayFromCapturedCursorLocation() {
+        let primary = DisplayInfo(
+            id: "primary",
+            width: 2_000,
+            height: 1_200,
+            scale: 2,
+            isPrimary: true,
+            frame: CGRect(x: 0, y: 0, width: 1_000, height: 600),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1_000, height: 575)
+        )
+        let secondary = DisplayInfo(
+            id: "secondary",
+            width: 1_600,
+            height: 1_200,
+            scale: 2,
+            isPrimary: false,
+            frame: CGRect(x: -800, y: 100, width: 800, height: 600),
+            visibleFrame: CGRect(x: -800, y: 100, width: 800, height: 575)
+        )
+
+        #expect(HotkeyManager.targetDisplayID(
+            cursorLocation: CGPoint(x: 400, y: 300),
+            displays: [primary, secondary]
+        ) == "primary")
+        #expect(HotkeyManager.targetDisplayID(
+            cursorLocation: CGPoint(x: -400, y: 300),
+            displays: [primary, secondary]
+        ) == "secondary")
+        #expect(HotkeyManager.targetDisplayID(
+            cursorLocation: CGPoint(x: 2_000, y: 2_000),
+            displays: [primary, secondary]
+        ) == nil)
+    }
+
     @Test func cycleOverlayRepeatUsesConfiguredNextAndPrevDirections() {
         let shortcuts = ResolvedShortcuts(from: nil)
 

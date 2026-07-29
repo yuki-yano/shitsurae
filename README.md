@@ -70,9 +70,10 @@ Every shortcut is configurable in YAML, including per-app disabling (e.g. keep D
 - Quick keys (`1`, `2`, `3`, …) for one-keystroke selection
 - Releasing the modifiers always commits the selection
 - Selecting a window of another workspace switches there automatically
+- The overlay appears on the display containing the pointer and lists only windows from that display
 - Trigger, accept/cancel keys and the quick-key string are configurable
 
-`Cmd+Ctrl+J/K` cycles in a different, stable order: slotted windows first, then the rest. Set `shortcuts.cycle.mode: overlay` for an overlay UI on top of that order.
+`Cmd+Ctrl+J/K` cycles windows on the display containing the pointer in a different, stable order: slotted windows first, then the rest. Set `shortcuts.cycle.mode: overlay` for an overlay UI on that display.
 
 ### 4. Window snapping
 
@@ -123,12 +124,12 @@ shitsurae switcher list --json --include-all-spaces true
 
 - Each display hosts its own independent workspace: `layouts.<name>.display` declares the layout's host display, and arranging a layout only replaces the active layout of *that* display
 - Give displays stable aliases under `monitors`, selecting each by `primary: true`, exact UUID, or a unique width/height pair. Layouts reference those aliases with `display.monitor`
-- Space switching without `--layout` / `--monitor`, cycle, switcher and slot focus target the primary display's workspace. `space switch --monitor research --focus preserve` switches that display while preserving focus on another display
+- Space switching without `--layout` / `--monitor` and slot focus target the primary display's workspace. Cycle and switcher target the active workspace on the display containing the pointer. `space switch --monitor research --focus preserve` switches that display while preserving focus on another display
 - `shitsurae arrange main calendar` applies layouts that resolve to distinct displays in one request. Shitsurae validates every layout, connected host and display collision before serializing window mutations; physical window operations are not atomic. Multi-layout arrange does not accept `--dry-run`, `--state-only` or `--space`
 - Add `--layout <name>` to `space list`, `space current` or `space switch` to target only that layout's active workspace. A configured but inactive layout is rejected instead of being implicitly bootstrapped
 - A single-space layout hosted on a non-primary display is effectively an always-visible pinned surface (see the example below)
 - When a declared display disconnects, its workspace goes dormant and windows moved by macOS are left untouched; on reconnect the layout is repositioned automatically (no apps are launched). Reconnects that change the display UUID are handled by re-resolving the declaration — but a layout pinned with `display.id` cannot recover from a UUID change until the config is updated, so prefer role / resolution declarations
-- Untracked windows on non-primary displays are never auto-adopted: those displays stay free-form unless a layout claims their windows
+- Untracked windows on non-primary displays normally stay free-form. Invoking cycle or switcher while the pointer is on one of those displays adopts only eligible visible windows from that display into its active workspace
 
 ```yaml
 monitors:

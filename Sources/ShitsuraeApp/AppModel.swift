@@ -699,10 +699,12 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func cycleWindow(forward: Bool) {
+    func cycleWindow(forward: Bool, displayID: String) {
+        let targetsPrimaryDisplay = displays.first(where: \.isPrimary)?.id == displayID
         runEngineAction("cycle", urgency: .interactive) { [weak self] engine, config in
             let shortcuts = config.config.resolvedShortcuts
             let candidates = try await engine.cycleCandidates(
+                displayID: displayID,
                 config: config,
                 excludedApps: shortcuts.cycleExcludedApps
             )
@@ -722,7 +724,7 @@ final class AppModel: ObservableObject {
             _ = try await engine.focusWindow(identity: candidates[nextIndex].identity, config: config)
             await MainActor.run {
                 self?.markInteractiveActivation()
-                self?.frontmostWindowBelongsToActiveWorkspace = true
+                self?.frontmostWindowBelongsToActiveWorkspace = targetsPrimaryDisplay
             }
         }
     }

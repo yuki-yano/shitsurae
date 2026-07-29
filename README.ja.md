@@ -75,9 +75,10 @@ YAML にレイアウトを定義し、`shitsurae arrange <name>` を実行する
 - 各候補に `1`, `2`, `3`, … のクイックキーが割り当てられ、1 打鍵で即時切替
 - 修飾キーを離すと常に選択確定
 - 別 workspace のウィンドウを選ぶと、その workspace へ自動的に切り替わる
+- overlay はマウスポインターがある display に表示され、その display 上の window だけを候補にする
 - トリガー、accept/cancel キー、クイックキー文字列を個別設定可能
 
-一方で `Cmd+Ctrl+J/K` は別順序で動作し、`slot` 付きウィンドウを先頭固定、その後ろに `slot` なしウィンドウを並べます。`shortcuts.cycle.mode: overlay` を指定すると、この順序を使った overlay UI で確定操作できます。
+一方で `Cmd+Ctrl+J/K` はマウスポインターがある display の window を別順序で巡回し、`slot` 付きウィンドウを先頭固定、その後ろに `slot` なしウィンドウを並べます。`shortcuts.cycle.mode: overlay` を指定すると、対象 display 上にこの順序を使った overlay UI を表示します。
 
 ### 4. ウィンドウスナップ
 
@@ -136,12 +137,12 @@ shitsurae switcher list --json --include-all-spaces true  # 全 workspace の候
 
 - ディスプレイごとに独立した workspace を持てます。`layouts.<name>.display` でレイアウトのホストディスプレイを宣言し、arrange は「そのディスプレイの」アクティブレイアウトだけを置き換えます
 - `monitors` 配下でdisplayに安定したaliasを付け、`primary: true`、正確なUUID、または一意なwidth/heightのいずれかで物理displayへbindingします。layoutは`display.monitor`でaliasを参照します
-- `--layout` / `--monitor` 未指定のスペース切替と、cycle・switcher・スロットフォーカスはプライマリディスプレイの workspace を対象にします。`space switch 2 --monitor research --focus preserve` は別displayのfocusを維持したままresearchだけを切り替えます
+- `--layout` / `--monitor` 未指定のスペース切替とスロットフォーカスはプライマリディスプレイの workspace を対象にします。cycle・switcher はマウスポインターがある display の active workspace を対象にします。`space switch 2 --monitor research --focus preserve` は別displayのfocusを維持したままresearchだけを切り替えます
 - `shitsurae arrange main calendar` は、別ディスプレイに解決される複数レイアウトを1リクエストで適用します。全レイアウトの存在・接続先・display重複を最初に検証したあと、ウィンドウ操作を直列実行します（物理操作のatomicityは保証しません）。複数指定時は `--dry-run` / `--state-only` / `--space` を併用できません
 - `space list` / `space current` / `space switch` に `--layout <name>` を付けると、そのレイアウトのworkspaceだけを対象にできます。未適用レイアウトは暗黙に起動せずエラーになります
 - 非primary displayホストの1スペースレイアウトは、実質的な「常時表示の固定面」になります（下の例）
 - 宣言先ディスプレイが切断されると workspace は休眠し、macOS が移動したウィンドウには触れません。再接続時はレイアウトを自動で再配置します（アプリの起動はしません）。再接続で UUID が変わっても宣言の再解決で復元しますが、`display.id` 直指定だけは UUID 変化後に設定の更新が必要です（ロール / 解像度指定を推奨）
-- プライマリ以外のディスプレイ上の未追跡ウィンドウは自動 adoption されません。レイアウトが claim しない限り、サブディスプレイは自由な置き場のままです
+- プライマリ以外のディスプレイ上の未追跡ウィンドウは通常は自由な置き場のままです。その display にマウスポインターを置いて cycle・switcher を起動したときだけ、対象 display 上で可視な管理可能 window を active workspace へ adoption します
 
 ```yaml
 monitors:

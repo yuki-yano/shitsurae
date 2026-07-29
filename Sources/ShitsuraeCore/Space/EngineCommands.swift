@@ -693,11 +693,7 @@ public extension VirtualSpaceEngine {
     // MARK: - Adoption
 
     /// Pulls untracked on-screen windows of the primary workspace's host
-    /// display into that workspace so cycle/switcher can reach them.
-    /// Adoption is primary-only in the multi-display foundation; other
-    /// displays' stray windows stay unmanaged, and windows a different
-    /// workspace's layout rules match are never captured (their arrange /
-    /// reconnect restore must be able to claim them).
+    /// display into that workspace.
     func adoptUntrackedWindows(
         config: LoadedConfig,
         persistChanges: Bool = true,
@@ -706,9 +702,30 @@ public extension VirtualSpaceEngine {
         additionalIgnoreRules: IgnoreRuleSet? = nil
     ) throws -> Int {
         let displays = control.displays()
-        guard let workspace = primaryWorkspace(displays: displays),
-              let layout = config.config.layouts[workspace.layoutName]
-        else {
+        guard let workspace = primaryWorkspace(displays: displays) else {
+            return 0
+        }
+        return try adoptUntrackedWindows(
+            in: workspace,
+            config: config,
+            displays: displays,
+            persistChanges: persistChanges,
+            inventory: suppliedInventory,
+            excludedWindowIdentities: excludedWindowIdentities,
+            additionalIgnoreRules: additionalIgnoreRules
+        )
+    }
+
+    private func adoptUntrackedWindows(
+        in workspace: ActiveWorkspace,
+        config: LoadedConfig,
+        displays: [DisplayInfo],
+        persistChanges: Bool = true,
+        inventory suppliedInventory: WindowInventory? = nil,
+        excludedWindowIdentities: Set<WindowIdentity> = [],
+        additionalIgnoreRules: IgnoreRuleSet? = nil
+    ) throws -> Int {
+        guard let layout = config.config.layouts[workspace.layoutName] else {
             return 0
         }
         let layoutName = workspace.layoutName
@@ -984,10 +1001,49 @@ public extension VirtualSpaceEngine {
         guard let workspace = primaryWorkspace() else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
+        return try switcherCandidates(
+            in: workspace,
+            requireLiveDisplayMatch: false,
+            includeAllSpaces: includeAllSpaces,
+            config: config,
+            excludedApps: excludedApps
+        )
+    }
+
+    func switcherCandidates(
+        displayID: String,
+        includeAllSpaces: Bool,
+        config: LoadedConfig,
+        excludedApps: Set<String> = []
+    ) throws -> [SwitcherCandidate] {
+        guard let workspace = currentState.activeWorkspace(displayID: displayID) else {
+            throw VirtualSpaceEngineError.noActiveLayout
+        }
+        return try switcherCandidates(
+            in: workspace,
+            requireLiveDisplayMatch: true,
+            includeAllSpaces: includeAllSpaces,
+            config: config,
+            excludedApps: excludedApps
+        )
+    }
+
+    private func switcherCandidates(
+        in workspace: ActiveWorkspace,
+        requireLiveDisplayMatch: Bool,
+        includeAllSpaces: Bool,
+        config: LoadedConfig,
+        excludedApps: Set<String>
+    ) throws -> [SwitcherCandidate] {
         let layoutName = workspace.layoutName
         let inventory = control.windowInventory()
         guard inventory.isAuthoritative else { return [] }
-        _ = try? adoptUntrackedWindows(config: config, inventory: inventory)
+        _ = try? adoptUntrackedWindows(
+            in: workspace,
+            config: config,
+            displays: control.displays(),
+            inventory: inventory
+        )
 
         let activeSpaceID = workspace.spaceID
         let layoutSlots = currentState.slots(layoutName: layoutName)
@@ -1010,10 +1066,13 @@ public extension VirtualSpaceEngine {
             fullInventory: inventory
         )
 
-        let bound = presentableBoundWindows(
+        let presentable = presentableBoundWindows(
             entries: layoutSlots,
             assignments: resolution.assignments
         )
+        let bound = requireLiveDisplayMatch
+            ? presentable.filter { $0.window.displayID == workspace.displayID }
+            : presentable
 
         // MRU: most recently activated first; never-activated entries keep
         // slot order after them.
@@ -1054,10 +1113,45 @@ public extension VirtualSpaceEngine {
         guard let workspace = primaryWorkspace() else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
+        return try cycleCandidates(
+            in: workspace,
+            requireLiveDisplayMatch: false,
+            config: config,
+            excludedApps: excludedApps
+        )
+    }
+
+    func cycleCandidates(
+        displayID: String,
+        config: LoadedConfig,
+        excludedApps: Set<String> = []
+    ) throws -> [SwitcherCandidate] {
+        guard let workspace = currentState.activeWorkspace(displayID: displayID) else {
+            throw VirtualSpaceEngineError.noActiveLayout
+        }
+        return try cycleCandidates(
+            in: workspace,
+            requireLiveDisplayMatch: true,
+            config: config,
+            excludedApps: excludedApps
+        )
+    }
+
+    private func cycleCandidates(
+        in workspace: ActiveWorkspace,
+        requireLiveDisplayMatch: Bool,
+        config: LoadedConfig,
+        excludedApps: Set<String>
+    ) throws -> [SwitcherCandidate] {
         let layoutName = workspace.layoutName
         let inventory = control.windowInventory()
         guard inventory.isAuthoritative else { return [] }
-        _ = try? adoptUntrackedWindows(config: config, inventory: inventory)
+        _ = try? adoptUntrackedWindows(
+            in: workspace,
+            config: config,
+            displays: control.displays(),
+            inventory: inventory
+        )
 
         let activeSpaceID = workspace.spaceID
         let layoutSlots = currentState.slots(layoutName: layoutName)
@@ -1080,10 +1174,13 @@ public extension VirtualSpaceEngine {
             fullInventory: inventory
         )
 
-        let bound = presentableBoundWindows(
+        let presentable = presentableBoundWindows(
             entries: layoutSlots,
             assignments: resolution.assignments
         )
+        let bound = requireLiveDisplayMatch
+            ? presentable.filter { $0.window.displayID == workspace.displayID }
+            : presentable
 
         let slotted = bound
             .filter { $0.entry.slot > 0 }

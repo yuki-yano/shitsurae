@@ -114,9 +114,8 @@ public actor VirtualSpaceEngine {
         state
     }
 
-    /// The active workspace of the current macOS primary display — the fixed
-    /// target of every explicit input (space switch, cycle, switcher,
-    /// focusBySlot, operation CLI) in the multi-display foundation.
+    /// The active workspace of the current macOS primary display — the default
+    /// target for commands that do not carry an explicit display scope.
     func primaryWorkspace(displays: [DisplayInfo]) -> ActiveWorkspace? {
         guard let primary = DisplayResolver.primaryDisplay(displays) else { return nil }
         return state.activeWorkspace(displayID: primary.id)

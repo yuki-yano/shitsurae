@@ -15,7 +15,13 @@ final class SwitcherOverlayController {
         self.onSelect = onSelect
     }
 
-    func show(session: HotkeyManager.OverlaySession, showThumbnails: Bool) {
+    @discardableResult
+    func show(session: HotkeyManager.OverlaySession, showThumbnails: Bool) -> Bool {
+        guard let screen = NSScreen.screens.first(where: {
+            SystemProbe.stableDisplayID(for: $0) == session.displayID
+        }) else {
+            return false
+        }
         let thumbnailSession = showThumbnails && SystemProbe.screenRecordingGranted()
             ? WindowThumbnailProvider.shared.beginSession()
             : nil
@@ -42,7 +48,7 @@ final class SwitcherOverlayController {
             self.panel = panel
         }
 
-        guard let panel else { return }
+        guard let panel else { return false }
 
         let hosting = NSHostingView(rootView: content)
         self.hosting = hosting
@@ -50,7 +56,7 @@ final class SwitcherOverlayController {
 
         // Cap to the screen: with many candidates the card row scrolls
         // horizontally instead of running off the display.
-        let screenFrame = NSScreen.main?.visibleFrame ?? .zero
+        let screenFrame = screen.visibleFrame
         let fitting = hosting.fittingSize
         let size = CGSize(
             width: min(fitting.width, max(320, screenFrame.width - 80)),
@@ -62,6 +68,7 @@ final class SwitcherOverlayController {
         )
         panel.setFrame(CGRect(origin: origin, size: size), display: true)
         panel.orderFrontRegardless()
+        return true
     }
 
     func update(session: HotkeyManager.OverlaySession) {

@@ -438,6 +438,7 @@ final class HotkeyManager {
         }
 
         let kind: Kind
+        let displayID: String
         var candidates: [SwitcherCandidate]
         var selectedIndex: Int
         let quickKeys: String
@@ -588,7 +589,7 @@ final class HotkeyManager {
         if eventMatchesHotkey(event: event, key: shortcuts.switcherTrigger.key, modifiers: shortcuts.switcherTrigger.modifiers),
            !disabled("switcher")
         {
-            openSwitcher(shortcuts: shortcuts)
+            openSwitcher(shortcuts: shortcuts, cursorLocation: event.location)
             return true
         }
 
@@ -596,13 +597,23 @@ final class HotkeyManager {
         if eventMatchesHotkey(event: event, key: shortcuts.nextWindow.key, modifiers: shortcuts.nextWindow.modifiers),
            !disabled("nextWindow")
         {
-            cycle(forward: true, shortcuts: shortcuts, trigger: shortcuts.nextWindow)
+            cycle(
+                forward: true,
+                shortcuts: shortcuts,
+                trigger: shortcuts.nextWindow,
+                cursorLocation: event.location
+            )
             return true
         }
         if eventMatchesHotkey(event: event, key: shortcuts.prevWindow.key, modifiers: shortcuts.prevWindow.modifiers),
            !disabled("prevWindow")
         {
-            cycle(forward: false, shortcuts: shortcuts, trigger: shortcuts.prevWindow)
+            cycle(
+                forward: false,
+                shortcuts: shortcuts,
+                trigger: shortcuts.prevWindow,
+                cursorLocation: event.location
+            )
             return true
         }
 
@@ -643,8 +654,17 @@ final class HotkeyManager {
     /// release is never lost while candidates load. Releasing before the
     /// candidates arrive turns the press into a quick-tap: switch to the
     /// previous window without ever showing the overlay.
-    private func openSwitcher(shortcuts: ResolvedShortcuts) {
+    private func openSwitcher(
+        shortcuts: ResolvedShortcuts,
+        cursorLocation: CGPoint
+    ) {
         guard let model, let config = model.configManager.configIfLoaded() else {
+            return
+        }
+        guard let displayID = Self.targetDisplayID(
+            cursorLocation: cursorLocation,
+            displays: model.displays
+        ) else {
             return
         }
 
@@ -655,6 +675,7 @@ final class HotkeyManager {
         let generation = sessionGeneration
         session = OverlaySession(
             kind: .switcher,
+            displayID: displayID,
             candidates: [],
             selectedIndex: 0,
             quickKeys: shortcuts.quickKeys,
@@ -665,8 +686,10 @@ final class HotkeyManager {
         fastPathState.updateOverlaySessionActive(true)
 
         Task { @MainActor in
-            // v1 behavior: the switcher targets the active workspace only.
+            // The switcher targets the active workspace on the display where
+            // the trigger event captured the cursor.
             let candidates = (try? await engine.switcherCandidates(
+                displayID: displayID,
                 includeAllSpaces: false,
                 config: config,
                 excludedApps: shortcuts.switcherExcludedApps
@@ -703,13 +726,26 @@ final class HotkeyManager {
         }
     }
 
-    private func cycle(forward: Bool, shortcuts: ResolvedShortcuts, trigger: HotkeyDefinition) {
+    private func cycle(
+        forward: Bool,
+        shortcuts: ResolvedShortcuts,
+        trigger: HotkeyDefinition,
+        cursorLocation: CGPoint
+    ) {
+        guard let model,
+              let displayID = Self.targetDisplayID(
+                  cursorLocation: cursorLocation,
+                  displays: model.displays
+              )
+        else {
+            return
+        }
         guard shortcuts.cycleMode == .overlay else {
-            model?.cycleWindow(forward: forward)
+            model.cycleWindow(forward: forward, displayID: displayID)
             return
         }
 
-        guard let model, let config = model.configManager.configIfLoaded() else {
+        guard let config = model.configManager.configIfLoaded() else {
             return
         }
         let engine = model.engine
@@ -721,6 +757,7 @@ final class HotkeyManager {
         let generation = sessionGeneration
         session = OverlaySession(
             kind: .cycle,
+            displayID: displayID,
             candidates: [],
             selectedIndex: 0,
             quickKeys: shortcuts.cycleQuickKeys,
@@ -732,6 +769,7 @@ final class HotkeyManager {
 
         Task { @MainActor in
             let candidates = (try? await engine.cycleCandidates(
+                displayID: displayID,
                 config: config,
                 excludedApps: shortcuts.cycleExcludedApps
             )) ?? []
@@ -743,7 +781,7 @@ final class HotkeyManager {
             // Released while loading -> behave like a direct cycle step.
             if self.pendingQuickAccept == generation {
                 self.pendingQuickAccept = nil
-                self.model?.cycleWindow(forward: forward)
+                self.model?.cycleWindow(forward: forward, displayID: displayID)
                 return
             }
 
@@ -862,6 +900,13 @@ final class HotkeyManager {
         return nil
     }
 
+    nonisolated static func targetDisplayID(
+        cursorLocation: CGPoint,
+        displays: [DisplayInfo]
+    ) -> String? {
+        displays.first(where: { $0.frame.contains(cursorLocation) })?.id
+    }
+
     private func isTriggerRepeat(event: HotkeyEventSnapshot) -> Bool {
         guard let shortcuts, let session else { return false }
         switch session.kind {
@@ -886,7 +931,9 @@ final class HotkeyManager {
             }
         }
         guard let session else { return }
-        overlay?.show(session: session, showThumbnails: showThumbnails ?? true)
+        if overlay?.show(session: session, showThumbnails: showThumbnails ?? true) != true {
+            cancelSession()
+        }
     }
 
     private func acceptSession() {
