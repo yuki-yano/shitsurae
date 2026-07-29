@@ -18,11 +18,15 @@ enum SidebarItem: Hashable {
 private struct DisplayLayoutChoice: Identifiable, Equatable {
     let displayID: String
     let isPrimary: Bool
+    let monitorAlias: String?
     let layoutNames: [String]
     let activeLayoutName: String?
 
     var id: String { displayID }
-    var title: String { isPrimary ? "Primary Display" : "Display \(displayID.prefix(8))…" }
+    var title: String {
+        monitorAlias.map { "\($0) Display" }
+            ?? (isPrimary ? "Primary Display" : "Display \(displayID.prefix(8))…")
+    }
 }
 
 struct MainWindowView: View {
@@ -137,6 +141,11 @@ struct ArrangeView: View {
                 return DisplayLayoutChoice(
                     displayID: display.id,
                     isPrimary: display.isPrimary,
+                    monitorAlias: DisplayResolver.alias(
+                        for: display.id,
+                        config: config,
+                        displays: model.displays
+                    ),
                     layoutNames: candidates,
                     activeLayoutName: activeByDisplayID[display.id]
                 )
@@ -213,11 +222,22 @@ struct ArrangeView: View {
                     WorkspaceSpaceControls(
                         workspace: workspace,
                         isPrimary: model.displays.first(where: { $0.id == workspace.displayID })?.isPrimary == true,
+                        monitorAlias: DisplayResolver.alias(
+                            for: workspace.displayID,
+                            config: model.configManager.configIfLoaded()?.config,
+                            displays: model.displays
+                        ),
                         spaceIDs: model.configManager.configIfLoaded()?.config.layouts[workspace.layoutName]?
                             .spaces.map(\.spaceID).sorted() ?? [],
                         isRunning: model.actionStatus.isRunning,
                         onSwitch: { spaceID in
-                            model.switchSpace(layoutName: workspace.layoutName, to: spaceID)
+                            model.switchSpace(
+                                layoutName: workspace.layoutName,
+                                to: spaceID,
+                                focusPolicy: workspace.displayID == model.displays.first(where: \.isPrimary)?.id
+                                    ? .target
+                                    : .preserve
+                            )
                         }
                     )
                     if workspace.layoutName != workspaces.last?.layoutName {
@@ -499,6 +519,7 @@ private struct DisplayArrangeRow: View {
 private struct WorkspaceSpaceControls: View {
     let workspace: WorkspaceSummaryJSON
     let isPrimary: Bool
+    let monitorAlias: String?
     let spaceIDs: [Int]
     let isRunning: Bool
     let onSwitch: (Int) -> Void
@@ -509,7 +530,7 @@ private struct WorkspaceSpaceControls: View {
                 HStack(spacing: 6) {
                     Text(workspace.layoutName)
                         .font(.subheadline.bold())
-                    Text(isPrimary ? "primary" : "secondary")
+                    Text(monitorAlias ?? (isPrimary ? "primary" : "unbound"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     if workspace.dormant {
@@ -932,6 +953,38 @@ struct ShortcutsSection: View {
         ResolvedShortcuts(from: model.configManager.configIfLoaded()?.config.shortcuts)
     }
 
+    private struct SpaceShortcutRow: Identifiable {
+        let id: String
+        let hotkey: HotkeyDefinition
+        let targets: String
+    }
+
+    private var spaceShortcutRows: [SpaceShortcutRow] {
+        let groups = Dictionary(grouping: resolved.switchVirtualSpace) { shortcut in
+            let modifiers = Set(shortcut.hotkey.modifiers.map { $0.lowercased() })
+                .sorted()
+                .joined(separator: "+")
+            return "\(modifiers)|\(shortcut.hotkey.key.lowercased())"
+        }
+        return groups.map { chord, shortcuts in
+            let ordered = shortcuts.sorted {
+                if ($0.monitor ?? "primary") != ($1.monitor ?? "primary") {
+                    return ($0.monitor ?? "primary") < ($1.monitor ?? "primary")
+                }
+                return $0.spaceID < $1.spaceID
+            }
+            let targets = ordered.map {
+                let focus = $0.focus == .preserve ? " preserve" : ""
+                return "\($0.monitor ?? "primary") / \($0.spaceID)\(focus)"
+            }.joined(separator: ", ")
+            return SpaceShortcutRow(
+                id: chord,
+                hotkey: ordered[0].hotkey,
+                targets: targets
+            )
+        }.sorted { $0.id < $1.id }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -1012,12 +1065,10 @@ struct ShortcutsSection: View {
 
                     Divider().gridCellUnsizedAxes(.horizontal)
 
-                    ForEach(1 ... 9, id: \.self) { spaceID in
-                        if let hotkey = resolved.switchVirtualSpace[spaceID] {
-                            GridRow {
-                                slotLabel(spaceID)
-                                hotkeyLabel(hotkey)
-                            }
+                    ForEach(spaceShortcutRows) { row in
+                        GridRow {
+                            Text(row.targets)
+                            hotkeyLabel(row.hotkey)
                         }
                     }
                 }
@@ -1453,7 +1504,7 @@ func resolveProportionalRect(
 func displayBadge(_ display: DisplayDefinition) -> some View {
     Group {
         if let monitor = display.monitor {
-            Text(monitor.rawValue)
+            Text(monitor)
                 .font(.caption2)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 1)

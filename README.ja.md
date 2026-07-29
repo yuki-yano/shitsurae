@@ -29,10 +29,10 @@ shitsurae arrange work
 
 ## 仕組み
 
-Shitsurae は macOS のネイティブ Space(Mission Control)を一切使いません。すべての仮想 workspace は単一のデスクトップ上で、ウィンドウの**画面内/画面外の座標移動**によって実現されます。
+Shitsurae は macOS のネイティブ Space(Mission Control)を一切使いません。すべての仮想 workspace は単一のデスクトップ上で、ウィンドウの**画面内/画面外の座標移動**によって実現されます。Chromium などが画面外配置を拒否した場合だけ、その管理対象ウィンドウを個別に最小化し、戻るときに復元します。この場合はシステムの最小化アニメーションや Dock 上の表示が一時的に見えることがあります。
 
 - workspace 切り替え = 対象ウィンドウを画面内へ、それ以外を画面外(1px 外側)へ移動
-- アニメーションなしの即時切り替え
+- 通常はアニメーションなしの即時切り替え。管理対象の最小化へ切り替わった場合はシステム設定に従う
 - Mission Control・ネイティブデスクトップの設定に依存しない
 - ダイアログ・シートなどの一時 UI は切り替え中も画面内に維持し、親ウィンドウを一時保護して、ダイアログ終了後に本来の workspace へ戻す
 
@@ -135,23 +135,31 @@ shitsurae switcher list --json --include-all-spaces true  # 全 workspace の候
 ### 8. マルチディスプレイ対応
 
 - ディスプレイごとに独立した workspace を持てます。`layouts.<name>.display` でレイアウトのホストディスプレイを宣言し、arrange は「そのディスプレイの」アクティブレイアウトだけを置き換えます
-- ディスプレイは `primary` / `secondary` のロール指定、解像度条件、ディスプレイ UUID（`display.id`）でマッチ
-- `--layout` 未指定のスペース切替と、cycle・switcher・スロットフォーカスはプライマリディスプレイの workspace を対象にします。`space switch --layout <name>` は指定 workspace だけを切り替え、他ディスプレイには干渉しません
+- `monitors` 配下でdisplayに安定したaliasを付け、`primary: true`、正確なUUID、または一意なwidth/heightのいずれかで物理displayへbindingします。layoutは`display.monitor`でaliasを参照します
+- `--layout` / `--monitor` 未指定のスペース切替と、cycle・switcher・スロットフォーカスはプライマリディスプレイの workspace を対象にします。`space switch 2 --monitor research --focus preserve` は別displayのfocusを維持したままresearchだけを切り替えます
 - `shitsurae arrange main calendar` は、別ディスプレイに解決される複数レイアウトを1リクエストで適用します。全レイアウトの存在・接続先・display重複を最初に検証したあと、ウィンドウ操作を直列実行します（物理操作のatomicityは保証しません）。複数指定時は `--dry-run` / `--state-only` / `--space` を併用できません
 - `space list` / `space current` / `space switch` に `--layout <name>` を付けると、そのレイアウトのworkspaceだけを対象にできます。未適用レイアウトは暗黙に起動せずエラーになります
-- secondary ホストの 1 スペースレイアウトは、実質的な「常時表示の固定面」になります（下の例）
+- 非primary displayホストの1スペースレイアウトは、実質的な「常時表示の固定面」になります（下の例）
 - 宣言先ディスプレイが切断されると workspace は休眠し、macOS が移動したウィンドウには触れません。再接続時はレイアウトを自動で再配置します（アプリの起動はしません）。再接続で UUID が変わっても宣言の再解決で復元しますが、`display.id` 直指定だけは UUID 変化後に設定の更新が必要です（ロール / 解像度指定を推奨）
 - プライマリ以外のディスプレイ上の未追跡ウィンドウは自動 adoption されません。レイアウトが claim しない限り、サブディスプレイは自由な置き場のままです
 
 ```yaml
+monitors:
+  main:
+    primary: true
+  calendar:
+    id: 37D8832A-2D66-02CA-B9F7-8F30A301B230
+
 layouts:
   main:
+    display:
+      monitor: main
     spaces:
       - spaceID: 1
         windows: [...]
   calendar:
     display:
-      monitor: secondary
+      monitor: calendar
     spaces:
       - spaceID: 1
         windows:
@@ -167,7 +175,7 @@ layouts:
 ```
 
 > [!IMPORTANT]
-> secondary ホストのレイアウトには**狭い matcher**（専用 bundleID、または `title` / `profile` の判別子付き）を使ってください。他ディスプレイのレイアウト rule に match するウィンドウはプライマリの adoption から除外されるため、広い matcher（ブラウザ本体の bundleID など）を書くと、そのアプリのプライマリ側ウィンドウが軒並み管理外になります。同時に active になり得るレイアウト間の完全同一 matcher は設定ロードエラーです。
+> 非primary displayのレイアウトには**狭い matcher**（専用 bundleID、または `title` / `profile` の判別子付き）を使ってください。他ディスプレイのレイアウト rule に match するウィンドウはプライマリの adoption から除外されるため、広い matcher（ブラウザ本体の bundleID など）を書くと、そのアプリのプライマリ側ウィンドウが軒並み管理外になります。同時に active になり得るレイアウト間の完全同一 matcher は設定ロードエラーです。
 
 GUIのArrange画面では、接続displayごとにLayoutとSpaceを選び、行の**Apply**でそのdisplayだけを適用できます。同じ選択から**Apply Display Set**を押すと、選択した全displayの全workspaceを一括適用します。Virtual Workspaces欄にはactive workspaceごとのSpaceボタンが表示されるため、secondary側だけを切り替える操作も可能です。Workspace State画面も全active layoutを表示し、secondaryに所有されるwindowをUnmanagedとして扱いません。
 
@@ -384,9 +392,11 @@ shortcuts:
 
   # active workspace を切り替え(デフォルト Ctrl+1..9)
   switchVirtualSpace:
-    - slot: 1
+    - spaceID: 1
       key: "1"
       modifiers: [ctrl]
+      monitor: research
+      focus: preserve # target | preserve
 
   # Cmd+Ctrl+J / K の候補から除外
   cycleExcludedApps:

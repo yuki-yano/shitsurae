@@ -101,16 +101,19 @@ struct StateStoreTests {
 
         var state = RuntimeState(configGeneration: "gen")
         state.upsertActiveWorkspace(displayID: "uuid-main", layoutName: "work", spaceID: 2)
-        state.slots = [makeEntry(spaceID: 1, slot: 1), makeEntry(spaceID: 2, slot: 1)]
+        var minimizedEntry = makeEntry(spaceID: 2, slot: 1)
+        minimizedEntry.visibilityState = .hiddenMinimized
+        state.slots = [makeEntry(spaceID: 1, slot: 1), minimizedEntry]
 
         try store.saveStrict(state: state)
         let loaded = try store.loadStrict()
 
-        #expect(loaded.schemaVersion == 5)
+        #expect(loaded.schemaVersion == 6)
         #expect(loaded.activeLayoutName == "work")
         #expect(loaded.activeSpaceID(displayID: "uuid-main") == 2)
         #expect(loaded.primaryActiveSpaceID == 2)
         #expect(loaded.slots.count == 2)
+        #expect(loaded.slots.first { $0.spaceID == 2 }?.visibilityState == .hiddenMinimized)
     }
 
     @Test func missingFileYieldsFreshState() throws {
@@ -160,7 +163,7 @@ struct StateStoreTests {
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        try "{\"schemaVersion\": 5, \"broken".write(to: url, atomically: true, encoding: .utf8)
+        try "{\"schemaVersion\": 6, \"broken".write(to: url, atomically: true, encoding: .utf8)
 
         #expect(throws: RuntimeStateStoreError.self) {
             try store.loadStrict()

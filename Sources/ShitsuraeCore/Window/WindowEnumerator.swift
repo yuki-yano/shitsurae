@@ -31,6 +31,43 @@ public enum WindowEnumerator {
         inventory(displays: displays, options: [.optionAll, .excludeDesktopElements])
     }
 
+    /// Reads CG descriptions and AX attributes only for the concrete windows
+    /// changed by the current operation. CGWindowID is globally unique while
+    /// live; process generation and bundle checks below still detect reuse.
+    public static func windowInventory(
+        identities: Set<WindowIdentity>,
+        displays: [DisplayInfo] = SystemProbe.displays()
+    ) -> WindowInventory {
+        guard !identities.isEmpty else {
+            return .available([])
+        }
+        let targetPIDs = Set(identities.map(\.pid))
+        return inventoryAssembly(
+            displays: displays,
+            ownerPIDs: targetPIDs,
+            rawWindowInfo: {
+                var raw: [[String: Any]] = []
+                for windowID in Set(identities.map(\.windowID)) {
+                    guard let info = CGWindowListCopyWindowInfo(
+                        [.optionIncludingWindow, .excludeDesktopElements],
+                        CGWindowID(windowID)
+                    ) as? [[String: Any]]
+                    else {
+                        return nil
+                    }
+                    raw.append(contentsOf: info)
+                }
+                return raw
+            },
+            axInfoResolver: { expectedOwners in
+                targetedWindowAXInfo(
+                    expectedBundlesByPID: expectedOwners,
+                    identities: identities
+                )
+            }
+        ).inventory
+    }
+
     public static func onScreenWindowIdentities() -> Set<WindowIdentity> {
         let ownersBefore = processOwners()
         guard let raw = CGWindowListCopyWindowInfo(
@@ -68,6 +105,70 @@ public enum WindowEnumerator {
         return observation.inventory.windows.first { $0.identity == identity }
     }
 
+    /// Returns the exact AX-focused identity of the frontmost process without
+    /// assembling a full inventory.
+    public static func focusedWindowIdentity() -> WindowIdentity? {
+        guard let appBefore = NSWorkspace.shared.frontmostApplication,
+              let bundleID = appBefore.bundleIdentifier,
+              !WindowEligibility.isShitsuraeApplication(bundleID: bundleID),
+              let processStartTime = ProcessGenerationResolver.startTime(
+                  pid: Int(appBefore.processIdentifier)
+              ),
+              let focusedWindowID = windowID(
+                  pid: appBefore.processIdentifier,
+                  attribute: kAXFocusedWindowAttribute as CFString
+              ),
+              let appAfter = NSWorkspace.shared.frontmostApplication,
+              appAfter.processIdentifier == appBefore.processIdentifier,
+              appAfter.bundleIdentifier == bundleID,
+              ProcessGenerationResolver.startTime(
+                  pid: Int(appAfter.processIdentifier)
+              ) == processStartTime
+        else {
+            return nil
+        }
+        return WindowIdentity(
+            pid: Int(appBefore.processIdentifier),
+            processStartTime: processStartTime,
+            windowID: focusedWindowID,
+            bundleID: bundleID
+        )
+    }
+
+    /// Returns the frontmost layer-0 window identity without issuing AX
+    /// requests. CG z-order is deliberately exposed separately from AX focus.
+    public static func frontmostWindowIdentity() -> WindowIdentity? {
+        guard let appBefore = NSWorkspace.shared.frontmostApplication,
+              let bundleID = appBefore.bundleIdentifier,
+              !WindowEligibility.isShitsuraeApplication(bundleID: bundleID),
+              let processStartTime = ProcessGenerationResolver.startTime(
+                  pid: Int(appBefore.processIdentifier)
+              ),
+              let raw = CGWindowListCopyWindowInfo(
+                  [.optionOnScreenOnly, .excludeDesktopElements],
+                  kCGNullWindowID
+              ) as? [[String: Any]],
+              let focusedWindowID = frontmostWindowID(
+                  rawWindowInfo: raw,
+                  pid: Int(appBefore.processIdentifier)
+              ),
+              let appAfter = NSWorkspace.shared.frontmostApplication,
+              appAfter.processIdentifier == appBefore.processIdentifier,
+              appAfter.bundleIdentifier == bundleID,
+              ProcessGenerationResolver.startTime(
+                  pid: Int(appAfter.processIdentifier)
+              ) == processStartTime
+        else {
+            return nil
+        }
+        return WindowIdentity(
+            pid: Int(appBefore.processIdentifier),
+            processStartTime: processStartTime,
+            windowID: focusedWindowID,
+            bundleID: bundleID
+        )
+    }
+
     public static func focusedWindowObservation(
         displays: [DisplayInfo] = SystemProbe.displays()
     ) -> WindowObservation {
@@ -81,39 +182,39 @@ public enum WindowEnumerator {
                 mainIdentity: nil
             )
         }
-        let inventory = allWindowInventory(displays: displays)
-        let focusedWindowID = windowID(
-            pid: appBefore.processIdentifier,
-            attribute: kAXFocusedWindowAttribute as CFString
-        )
-        let mainWindowID = windowID(
-            pid: appBefore.processIdentifier,
-            attribute: kAXMainWindowAttribute as CFString
+        let assembly = inventoryAssembly(
+            displays: displays,
+            options: [.optionAll, .excludeDesktopElements]
         )
         guard let appAfter = NSWorkspace.shared.frontmostApplication,
               appAfter.processIdentifier == appBefore.processIdentifier,
               appAfter.bundleIdentifier == bundleID,
               ProcessGenerationResolver.startTime(pid: Int(appAfter.processIdentifier)) == processStartTime
         else {
-            return WindowObservation(inventory: inventory, focusedIdentity: nil, mainIdentity: nil)
+            return WindowObservation(
+                inventory: assembly.inventory,
+                focusedIdentity: nil,
+                mainIdentity: nil
+            )
         }
-        func identity(windowID: UInt32?) -> WindowIdentity? {
-            windowID.map {
-                WindowIdentity(
-                    pid: Int(appBefore.processIdentifier),
-                    processStartTime: processStartTime,
-                    windowID: $0,
-                    bundleID: bundleID
-                )
+        func frontmostProcessIdentity(in identities: Set<WindowIdentity>) -> WindowIdentity? {
+            identities.first {
+                $0.pid == Int(appBefore.processIdentifier)
+                    && $0.processStartTime == processStartTime
+                    && $0.bundleID == bundleID
             }
         }
         return WindowObservation(
-            inventory: inventory,
-            // Preserve AX's exact identities even when the inventory was
-            // captured just before a new sheet appeared. Consumers can then
-            // fail closed instead of treating the older main as mutable.
-            focusedIdentity: identity(windowID: focusedWindowID),
-            mainIdentity: identity(windowID: mainWindowID)
+            inventory: assembly.inventory,
+            // Reuse the exact AX focus/main identities already captured while
+            // assembling this inventory. Querying the frontmost process again
+            // here can pay another full cold AX handshake.
+            focusedIdentity: frontmostProcessIdentity(
+                in: assembly.axInfo.focusedWindowIdentities
+            ),
+            mainIdentity: frontmostProcessIdentity(
+                in: assembly.axInfo.mainWindowIdentities
+            )
         )
     }
 
@@ -123,9 +224,39 @@ public enum WindowEnumerator {
         displays: [DisplayInfo],
         options: CGWindowListOption
     ) -> WindowInventory {
-        let ownersBefore = processOwners()
-        guard let raw = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
-            return .unavailable
+        inventoryAssembly(displays: displays, options: options).inventory
+    }
+
+    private struct InventoryAssembly {
+        let inventory: WindowInventory
+        let axInfo: WindowAXInfo
+    }
+
+    private static func inventoryAssembly(
+        displays: [DisplayInfo],
+        options: CGWindowListOption
+    ) -> InventoryAssembly {
+        inventoryAssembly(
+            displays: displays,
+            ownerPIDs: nil,
+            rawWindowInfo: {
+                CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]]
+            }
+        )
+    }
+
+    private static func inventoryAssembly(
+        displays: [DisplayInfo],
+        ownerPIDs: Set<Int>?,
+        rawWindowInfo: () -> [[String: Any]]?,
+        axInfoResolver: (([Int: ProcessOwnerIdentity]) -> WindowAXInfo)? = nil
+    ) -> InventoryAssembly {
+        let ownersBefore = processOwners(pids: ownerPIDs)
+        guard let raw = rawWindowInfo() else {
+            return InventoryAssembly(
+                inventory: .unavailable,
+                axInfo: WindowAXInfo(axBackedWindowIDs: [])
+            )
         }
 
         let rawPIDs = Set(raw.compactMap {
@@ -139,7 +270,8 @@ public enum WindowEnumerator {
             rawWindowInfo: raw,
             processStartTimesByPID: stableOwners.mapValues(\.identity.processStartTime)
         )
-        return .available(buildSnapshots(
+        var resolvedAXInfo = WindowAXInfo(axBackedWindowIDs: [])
+        let snapshots = buildSnapshots(
             rawWindowInfo: raw,
             displays: displays,
             appResolver: { pid in
@@ -159,8 +291,37 @@ public enum WindowEnumerator {
                     resolver: SystemProbe.browserProfileDirectory(bundleID:pid:)
                 )
             },
-            windowAXInfoResolver: windowAXInfo(expectedBundlesByPID:)
-        ), liveWindowHandles: liveWindowHandles)
+            windowAXInfoResolver: { expectedBundlesByPID in
+                let axInfo = axInfoResolver?(expectedBundlesByPID)
+                    ?? windowAXInfo(expectedBundlesByPID: expectedBundlesByPID)
+                resolvedAXInfo = axInfo
+                return axInfo
+            }
+        )
+        return InventoryAssembly(
+            inventory: .available(snapshots, liveWindowHandles: liveWindowHandles),
+            axInfo: resolvedAXInfo
+        )
+    }
+
+    static func frontmostWindowID(
+        rawWindowInfo: [[String: Any]],
+        pid: Int
+    ) -> UInt32? {
+        rawWindowInfo.lazy.compactMap { info -> UInt32? in
+            guard (info[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+                  (info[kCGWindowOwnerPID as String] as? NSNumber)?.intValue == pid,
+                  let boundsDictionary = info[kCGWindowBounds as String] as? [String: Any],
+                  let bounds = CGRect(
+                      dictionaryRepresentation: boundsDictionary as CFDictionary
+                  ),
+                  bounds.width > 0,
+                  bounds.height > 0
+            else {
+                return nil
+            }
+            return (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value
+        }.first
     }
 
     struct ProcessOwnerIdentity: Equatable, Hashable, Sendable {
@@ -182,6 +343,7 @@ public enum WindowEnumerator {
             guard !app.isTerminated,
                   isEligibleProcessOwner(activationPolicy: app.activationPolicy),
                   let bundleID = app.bundleIdentifier,
+                  !WindowEligibility.isShitsuraeApplication(bundleID: bundleID),
                   let processStartTime = ProcessGenerationResolver.startTime(pid: pid)
             else {
                 return nil
@@ -200,6 +362,8 @@ public enum WindowEnumerator {
     /// they do not own user-manageable application windows. Querying their AX
     /// window list can block until the system timeout (CursorUIViewService is
     /// one example), so reject them before any AX request is attempted.
+    /// Accessory applications remain eligible because they can own real,
+    /// tracked windows and may transition between activation policies.
     static func isEligibleProcessOwner(
         activationPolicy: NSApplication.ActivationPolicy
     ) -> Bool {
@@ -415,6 +579,95 @@ public enum WindowEnumerator {
     /// One AX query per pid, reading minimized, role, subrole, and modal for
     /// every window. Folding them into one pass avoids repeated process AX
     /// enumeration while retaining per-attribute observation failures.
+    private static func targetedWindowAXInfo(
+        expectedBundlesByPID: [Int: ProcessOwnerIdentity],
+        identities: Set<WindowIdentity>
+    ) -> WindowAXInfo {
+        guard AXIsProcessTrusted() else {
+            return WindowAXInfo(axBackedWindowIDs: [])
+        }
+
+        let targetIDsByPID = Dictionary(
+            grouping: identities,
+            by: \.pid
+        ).mapValues { Set($0.map(\.windowID)) }
+        var axBackedWindowIDs = Set<WindowIdentity>()
+        var minimized = Set<WindowIdentity>()
+
+        for (pid, expectedOwner) in expectedBundlesByPID {
+            guard let targetWindowIDs = targetIDsByPID[pid],
+                  let ownerBefore = NSRunningApplication(
+                      processIdentifier: pid_t(pid)
+                  ),
+                  !ownerBefore.isTerminated,
+                  ownerBefore.bundleIdentifier == expectedOwner.bundleID,
+                  ProcessGenerationResolver.startTime(pid: pid)
+                    == expectedOwner.processStartTime
+            else {
+                continue
+            }
+
+            let appElement = AXUIElementCreateApplication(pid_t(pid))
+            var windowsRef: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(
+                appElement,
+                kAXWindowsAttribute as CFString,
+                &windowsRef
+            ) == .success,
+                let windowElements = windowsRef as? [AXUIElement]
+            else {
+                continue
+            }
+
+            var processBacked = Set<WindowIdentity>()
+            var processMinimized = Set<WindowIdentity>()
+            for element in windowElements {
+                var windowID: CGWindowID = 0
+                guard AXUIElementGetWindowID(element, &windowID) == .success,
+                      targetWindowIDs.contains(UInt32(windowID))
+                else {
+                    continue
+                }
+                let identity = WindowIdentity(
+                    pid: pid,
+                    processStartTime: expectedOwner.processStartTime,
+                    windowID: UInt32(windowID),
+                    bundleID: expectedOwner.bundleID
+                )
+                processBacked.insert(identity)
+
+                var minimizedRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(
+                    element,
+                    kAXMinimizedAttribute as CFString,
+                    &minimizedRef
+                ) == .success,
+                    (minimizedRef as? Bool) == true
+                {
+                    processMinimized.insert(identity)
+                }
+            }
+
+            guard let ownerAfter = NSRunningApplication(
+                processIdentifier: pid_t(pid)
+            ),
+                !ownerAfter.isTerminated,
+                ownerAfter.bundleIdentifier == expectedOwner.bundleID,
+                ProcessGenerationResolver.startTime(pid: pid)
+                    == expectedOwner.processStartTime
+            else {
+                continue
+            }
+            axBackedWindowIDs.formUnion(processBacked)
+            minimized.formUnion(processMinimized)
+        }
+
+        return WindowAXInfo(
+            axBackedWindowIDs: axBackedWindowIDs,
+            minimized: minimized
+        )
+    }
+
     static func windowAXInfo(expectedBundlesByPID: [Int: ProcessOwnerIdentity]) -> WindowAXInfo {
         guard AXIsProcessTrusted() else {
             // No AX trust: nothing is confirmed AX-backed, nothing manageable.
@@ -515,6 +768,10 @@ public enum WindowEnumerator {
                     bundleID: expectedOwner.bundleID
                 )
             }
+            // A background process can keep a sheet or dialog focused while
+            // another application is frontmost. Preserve every process's
+            // focused/main relationship so its exact main window is protected
+            // from geometry and visibility mutation until the companion closes.
             let processFocusedIdentity = processWindowIdentity(
                 attribute: kAXFocusedWindowAttribute as CFString
             )

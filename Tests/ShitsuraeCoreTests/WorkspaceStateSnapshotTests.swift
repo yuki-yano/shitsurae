@@ -83,6 +83,24 @@ struct WorkspaceStateSnapshotTests {
         #expect(!focused.hasVisibilityMismatch)
     }
 
+    @Test func rejectsExternallyCapturedObservationAfterStateRevisionChanges() async throws {
+        let (engine, control, stateURL) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        let expectedRevision = await engine.workspaceStateRevision()
+        let observation = control.focusedWindowObservation()
+
+        _ = try await engine.switchSpace(to: 2, config: config)
+        let snapshot = await engine.workspaceStateSnapshot(
+            config: config,
+            observation: observation,
+            displays: control.displays(),
+            expectedRevision: expectedRevision
+        )
+
+        #expect(snapshot == nil)
+    }
+
     @Test func reportsPhysicalOffscreenStateAfterWorkspaceSwitch() async throws {
         let (engine, _, stateURL) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent()) }
@@ -110,6 +128,27 @@ struct WorkspaceStateSnapshotTests {
             } == true
         })
         #expect(inactiveWindows.allSatisfy { !$0.hasVisibilityMismatch })
+    }
+
+    @Test func reportsManagedMinimizedWindowAsHiddenWithVisiblePreview() async throws {
+        let (engine, control, stateURL) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        control.failPositionWindowIDs = [1]
+        _ = try await engine.switchSpace(to: 2, config: config)
+
+        let snapshot = await engine.workspaceStateSnapshot(config: config)
+        let textEdit = try #require(
+            snapshot.workspaces
+                .flatMap(\.windows)
+                .first(where: { $0.bundleID == "com.apple.TextEdit" })
+        )
+
+        #expect(snapshot.hiddenWindowCount == 2)
+        #expect(textEdit.trackedVisibility == .hiddenMinimized)
+        #expect(textEdit.liveWindow?.actualVisibility == .minimized)
+        #expect(textEdit.previewFrameSource == .lastVisibleFrame)
+        #expect(!textEdit.hasVisibilityMismatch)
     }
 
     @Test func distinguishesMissingBindingsFromUnmanagedLiveWindows() async throws {
@@ -145,7 +184,7 @@ struct WorkspaceStateSnapshotTests {
         let dualConfig = TestFixtures.loadedConfig(layouts: [
             "work": TestFixtures.twoSpaceLayout(),
             "calendar": LayoutDefinition(
-                display: DisplayDefinition(monitor: .secondary),
+                display: DisplayDefinition(monitor: "calendar"),
                 spaces: [
                     SpaceDefinition(spaceID: 1, windows: [
                         WindowDefinition(

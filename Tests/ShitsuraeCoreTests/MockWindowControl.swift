@@ -24,6 +24,7 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     /// Models an accepted asynchronous write that has not physically landed
     /// yet. Convergence may retry it, which is useful for focus-settling races.
     var acceptedButPinnedFrameWindowIDs: [UInt32: ResolvedFrame] = [:]
+    var failMinimizeWindowIDs: Set<UInt32> = []
     var failUnminimizeWindowIDs: Set<UInt32> = []
     var failFocusWindowIDs: Set<UInt32> = []
     var failFocusAttemptsRemainingByWindowID: [UInt32: Int] = [:]
@@ -33,7 +34,8 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     /// the engine performs its final focus decision.
     var stealFocusOnPositionAttempt: UInt32?
     private(set) var focusedWindowIDs: [UInt32] = []
-    private var focusedWindowIdentity: WindowIdentity?
+    private var currentFocusedWindowIdentity: WindowIdentity?
+    private var currentFrontmostWindowIdentity: WindowIdentity?
     private var mainWindowIdentity: WindowIdentity?
     private(set) var activatedBundles: [String] = []
     /// Every setWindowFrame/setWindowPosition attempt, successful or not —
@@ -41,6 +43,7 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     private(set) var frameMutationAttemptWindowIDs: [UInt32] = []
     private(set) var setFrameAttemptWindowIDs: [UInt32] = []
     private(set) var setPositionAttemptWindowIDs: [UInt32] = []
+    private(set) var minimizeAttempts: [(windowID: UInt32, minimized: Bool)] = []
     private(set) var launchedRequests: [ApplicationLaunchRequest] = []
     private(set) var sleptMilliseconds: [Int] = []
     var onFrameMutationAttempt: (() -> Void)?
@@ -67,13 +70,21 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         defer { lock.unlock() }
         if let id {
             focusedWindowIDs.append(id)
-            focusedWindowIdentity = windowsByID[id]?.identity
-            mainWindowIdentity = focusedWindowIdentity
+            currentFocusedWindowIdentity = windowsByID[id]?.identity
+            currentFrontmostWindowIdentity = currentFocusedWindowIdentity
+            mainWindowIdentity = currentFocusedWindowIdentity
         } else {
             focusedWindowIDs.removeAll()
-            focusedWindowIdentity = nil
+            currentFocusedWindowIdentity = nil
+            currentFrontmostWindowIdentity = nil
             mainWindowIdentity = nil
         }
+    }
+
+    func setFrontmostWindowID(_ id: UInt32?) {
+        lock.lock()
+        defer { lock.unlock() }
+        currentFrontmostWindowIdentity = id.flatMap { windowsByID[$0]?.identity }
     }
 
     func setMainWindowID(_ id: UInt32?) {
@@ -102,6 +113,8 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     var windowInventoryAvailable = true
     var liveWindowHandlesOverride: Set<WindowHandle>?
     private(set) var listAllWindowsCallCount = 0
+    private(set) var targetedWindowInventoryCallCount = 0
+    private(set) var targetedWindowInventoryIdentitySets: [Set<WindowIdentity>] = []
 
     /// When non-empty, each listAllWindows() call consumes the next snapshot
     /// (replacing the whole window state) — lets tests change the enumeration
@@ -131,6 +144,26 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         return .available(windows, liveWindowHandles: liveWindowHandlesOverride)
     }
 
+    func windowInventory(identities: Set<WindowIdentity>) -> WindowInventory {
+        lock.lock()
+        defer { lock.unlock() }
+        targetedWindowInventoryCallCount += 1
+        targetedWindowInventoryIdentitySets.append(identities)
+        if !windowListSequence.isEmpty {
+            let next = windowListSequence.removeFirst()
+            windowsByID = Dictionary(uniqueKeysWithValues: next.map { ($0.windowID, $0) })
+        }
+        guard windowInventoryAvailable else { return .unavailable }
+        let targetWindowIDs = Set(identities.map(\.windowID))
+        let windows = windowsByID.values
+            .filter { targetWindowIDs.contains($0.windowID) }
+            .sorted { $0.windowID < $1.windowID }
+        let handles = liveWindowHandlesOverride.map { handles in
+            Set(handles.filter { targetWindowIDs.contains($0.windowID) })
+        }
+        return .available(windows, liveWindowHandles: handles)
+    }
+
     func focusedWindowObservation() -> WindowObservation {
         lock.lock()
         defer { lock.unlock() }
@@ -145,7 +178,7 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
                 liveWindowHandles: liveWindowHandlesOverride
             )
             : .unavailable
-        let focusedIdentity = focusedWindowIdentity.flatMap { identity in
+        let focusedIdentity = currentFocusedWindowIdentity.flatMap { identity in
             windowsByID[identity.windowID]?.identity == identity ? identity : nil
         }
         let mainIdentity = mainWindowIdentity.flatMap { identity in
@@ -173,13 +206,35 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     func focusedWindow() -> WindowSnapshot? {
         lock.lock()
         defer { lock.unlock() }
-        guard let identity = focusedWindowIdentity,
+        guard let identity = currentFocusedWindowIdentity,
               let window = windowsByID[identity.windowID],
               window.identity == identity
         else {
             return nil
         }
         return window
+    }
+
+    func focusedWindowIdentity() -> WindowIdentity? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let identity = currentFocusedWindowIdentity,
+              windowsByID[identity.windowID]?.identity == identity
+        else {
+            return nil
+        }
+        return identity
+    }
+
+    func frontmostWindowIdentity() -> WindowIdentity? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let identity = currentFrontmostWindowIdentity,
+              windowsByID[identity.windowID]?.identity == identity
+        else {
+            return nil
+        }
+        return identity
     }
 
     func displays() -> [DisplayInfo] {
@@ -259,7 +314,8 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         }
         if let thief = stealFocusOnPositionAttempt {
             focusedWindowIDs.append(thief)
-            focusedWindowIdentity = windowsByID[thief]?.identity
+            currentFocusedWindowIdentity = windowsByID[thief]?.identity
+            currentFrontmostWindowIdentity = currentFocusedWindowIdentity
         }
         if let pinned = acceptedButPinnedFrameWindowIDs[windowID] {
             windowsByID[windowID] = window.withFrame(pinned)
@@ -287,11 +343,15 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     ) -> WindowInteractionResult {
         lock.lock()
         defer { lock.unlock() }
+        minimizeAttempts.append((windowID: windowID, minimized: minimized))
         guard let window = windowsByID[windowID],
               window.pid == pid,
               window.processStartTime == processStartTime,
               window.bundleID == bundleID
         else {
+            return .failed
+        }
+        if minimized, failMinimizeWindowIDs.contains(windowID) {
             return .failed
         }
         if !minimized, failUnminimizeWindowIDs.contains(windowID) {
@@ -324,7 +384,8 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
             return .failed
         }
         focusedWindowIDs.append(windowID)
-        focusedWindowIdentity = window.identity
+        currentFocusedWindowIdentity = window.identity
+        currentFrontmostWindowIdentity = window.identity
         return .success
     }
 
@@ -525,9 +586,15 @@ enum TestFixtures {
         )
     }
 
-    static func loadedConfig(layouts: [String: LayoutDefinition]) -> LoadedConfig {
+    static func loadedConfig(
+        layouts: [String: LayoutDefinition],
+        monitors: MonitorsDefinition = MonitorsDefinition([
+            "main": MonitorTargetDefinition(primary: true),
+            "calendar": MonitorTargetDefinition(width: 2560, height: 1440),
+        ])
+    ) -> LoadedConfig {
         LoadedConfig(
-            config: ShitsuraeConfig(layouts: layouts),
+            config: ShitsuraeConfig(monitors: monitors, layouts: layouts),
             configFiles: [],
             directoryURL: URL(fileURLWithPath: "/tmp"),
             configGeneration: String(repeating: "a", count: 64)

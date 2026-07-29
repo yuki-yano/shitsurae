@@ -34,7 +34,8 @@ public struct VisibilityPlan: Equatable, Sendable {
 
 /// Pure visibility planning: which frame to show at, where to park hidden
 /// windows. All geometry knowledge ported from v1 (proven in production):
-/// - hide = move 1px outside the display edge (never minimize / NSApp.hide)
+/// - hide = move 1px outside the display edge
+/// - apps that reject parking are minimized per-window by VisibilityApplier
 /// - hide corner auto-selected from the multi-display arrangement
 /// - coordinates normalized into the CG (top-left origin) space
 public enum VisibilityPlanner {
@@ -53,6 +54,20 @@ public enum VisibilityPlanner {
 
         switch transition {
         case .show:
+            if window.minimized, workingEntry.visibilityState == .visible {
+                // The user minimized this window while it was visible.
+                // Refresh its exact binding without taking ownership of the
+                // matching unminimize operation.
+                return VisibilityPlan(
+                    entryID: entry.id,
+                    window: window,
+                    originalEntry: entry,
+                    desiredEntry: workingEntry,
+                    mutation: .none,
+                    restoreFromMinimized: false,
+                    action: "unchanged"
+                )
+            }
             guard let visibleFrame = resolveVisibleFrame(
                 entry: workingEntry,
                 window: window,
@@ -73,7 +88,7 @@ public enum VisibilityPlanner {
                 originalEntry: entry,
                 desiredEntry: desired,
                 mutation: .frame(visibleFrame),
-                restoreFromMinimized: window.minimized,
+                restoreFromMinimized: window.minimized && workingEntry.visibilityState.isManagedHidden,
                 action: "shown"
             )
 
@@ -106,7 +121,7 @@ public enum VisibilityPlanner {
             // hidden, the current frame is the parking spot, not a real one.
             // A native-fullscreen frame is equally unsuitable: it describes
             // the display, not the windowed frame macOS should restore later.
-            desired.lastVisibleFrame = workingEntry.visibilityState == .hiddenOffscreen || window.isFullscreen
+            desired.lastVisibleFrame = workingEntry.visibilityState.isManagedHidden || window.isFullscreen
                 ? workingEntry.lastVisibleFrame
                 : window.frame
             desired.lastHiddenFrame = hiddenFrame

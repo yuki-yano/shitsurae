@@ -221,16 +221,22 @@ struct HotkeyManagerTests {
 
     @Test func fastPathRecognizesVirtualSpaceSwitchShortcut() {
         let shortcuts = ResolvedShortcuts(from: nil)
+        let location = CGPoint(x: 40, y: 80)
 
-        #expect(
-            HotkeyFastPathAction.match(
-                eventKeyCode: Int(kVK_ANSI_2),
-                modifiers: ["ctrl"],
-                shortcuts: shortcuts,
-                frontmostBundleID: "com.apple.Terminal",
-                frontmostBelongsToActiveWorkspace: true
-            ) == .switchSpace(2)
+        let action = HotkeyFastPathAction.match(
+            eventKeyCode: Int(kVK_ANSI_2),
+            modifiers: ["ctrl"],
+            cursorLocation: location,
+            shortcuts: shortcuts,
+            frontmostBundleID: "com.apple.Terminal",
+            frontmostBelongsToActiveWorkspace: true
         )
+        guard case let .switchSpace(candidates, cursorLocation) = action else {
+            Issue.record("expected switchSpace")
+            return
+        }
+        #expect(candidates.map(\.spaceID) == [2])
+        #expect(cursorLocation == location)
     }
 
     @Test func fastPathRespectsDisabledShortcutPolicy() {
@@ -244,7 +250,7 @@ struct HotkeyManagerTests {
                 cycle: nil,
                 switcher: nil,
                 globalActions: nil,
-                disabledInApps: ["com.apple.Terminal": ["switchVirtualSpace:2"]],
+                disabledInApps: ["com.apple.Terminal": ["switchVirtualSpace:primary:2"]],
                 focusBySlotEnabledInApps: nil
             )
         )
@@ -253,6 +259,7 @@ struct HotkeyManagerTests {
             HotkeyFastPathAction.match(
                 eventKeyCode: Int(kVK_ANSI_2),
                 modifiers: ["ctrl"],
+                cursorLocation: .zero,
                 shortcuts: shortcuts,
                 frontmostBundleID: "com.apple.Terminal",
                 frontmostBelongsToActiveWorkspace: true
@@ -267,6 +274,7 @@ struct HotkeyManagerTests {
             HotkeyFastPathAction.match(
                 eventKeyCode: Int(kVK_ANSI_2),
                 modifiers: ["cmd"],
+                cursorLocation: .zero,
                 shortcuts: shortcuts,
                 frontmostBundleID: "com.apple.Terminal",
                 frontmostBelongsToActiveWorkspace: true
@@ -318,5 +326,20 @@ struct HotkeyManagerTests {
                 overlaySessionActive: false
             )
         )
+    }
+
+    @Test func eventSnapshotCapturesKeyboardEventLocation() throws {
+        let event = try #require(
+            CGEvent(
+                keyboardEventSource: nil,
+                virtualKey: CGKeyCode(kVK_ANSI_2),
+                keyDown: true
+            )
+        )
+        event.location = CGPoint(x: 1440, y: 900)
+
+        let snapshot = HotkeyEventSnapshot(type: .keyDown, event: event)
+
+        #expect(snapshot.location == CGPoint(x: 1440, y: 900))
     }
 }

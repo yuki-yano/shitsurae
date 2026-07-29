@@ -26,13 +26,28 @@ public protocol WindowControl: Sendable {
     func listAllWindows() -> [WindowSnapshot]
     /// Full CG inventory with authoritative failure information.
     func windowInventory() -> WindowInventory
+    /// Authoritative inventory limited to the requested concrete windows.
+    /// Implementations must retain handle-reuse and unknown-liveness evidence
+    /// for those identities without enumerating unrelated applications.
+    func windowInventory(identities: Set<WindowIdentity>) -> WindowInventory
     /// Full inventory plus the exact currently focused window identity.
     func focusedWindowObservation() -> WindowObservation
+    /// Exact focused identity from the frontmost process without a full
+    /// window inventory. Used only when callers need to verify focus after
+    /// they already hold the authoritative inventory for their mutation.
+    func focusedWindowIdentity() -> WindowIdentity?
+    /// Cheap frontmost layer-0 identity derived from CG z-order. This is not
+    /// an AX focus observation; callers may use it only to detect that the
+    /// user moved to another window while a mutation was in flight.
+    func frontmostWindowIdentity() -> WindowIdentity?
     /// Cheap on-screen check (identity-preserving, no AX traffic) for filtering
     /// candidate lists.
     func onScreenWindowIdentities() -> Set<WindowIdentity>
     /// Whether AX-based window mutations can succeed at all.
     func accessibilityGranted() -> Bool
+    /// Delay once after a batch of asynchronous AX geometry writes before the
+    /// first physical-state verification. Test controls apply synchronously.
+    func visibilityVerificationSettlingDelayMS() -> Int
     func focusedWindow() -> WindowSnapshot?
     func displays() -> [DisplayInfo]
 
@@ -82,6 +97,10 @@ public extension WindowControl {
         .available(listAllWindows())
     }
 
+    func windowInventory(identities: Set<WindowIdentity>) -> WindowInventory {
+        windowInventory()
+    }
+
     func focusedWindowObservation() -> WindowObservation {
         WindowObservation(
             inventory: windowInventory(),
@@ -90,11 +109,23 @@ public extension WindowControl {
         )
     }
 
+    func focusedWindowIdentity() -> WindowIdentity? {
+        focusedWindow()?.identity
+    }
+
+    func frontmostWindowIdentity() -> WindowIdentity? {
+        focusedWindowIdentity()
+    }
+
     func onScreenWindowIdentities() -> Set<WindowIdentity> {
         Set(listWindows().map(\.identity))
     }
 
     func accessibilityGranted() -> Bool {
         true
+    }
+
+    func visibilityVerificationSettlingDelayMS() -> Int {
+        0
     }
 }

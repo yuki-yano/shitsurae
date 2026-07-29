@@ -80,10 +80,9 @@ struct VisibilityPlannerTests {
         #expect(plan?.desiredEntry.visibilityState == .visible)
     }
 
-    // バグ2-b 回帰: 最小化ウィンドウの show プランはアンミニマイズを含む
-    @Test func showPlanRestoresMinimizedWindow() {
+    @Test func showPlanRestoresWindowMinimizedByManagedVisibility() {
         let layout = TestFixtures.twoSpaceLayout()
-        let entry = makeEntry(spaceID: 1)
+        let entry = makeEntry(spaceID: 1, visibilityState: .hiddenMinimized)
         let window = TestFixtures.window(
             id: 1,
             bundleID: "com.apple.TextEdit",
@@ -101,6 +100,30 @@ struct VisibilityPlannerTests {
         )
 
         #expect(plan?.restoreFromMinimized == true)
+    }
+
+    @Test func showPlanPreservesUserMinimizedVisibleWindow() {
+        let layout = TestFixtures.twoSpaceLayout()
+        let entry = makeEntry(spaceID: 1, visibilityState: .visible)
+        let window = TestFixtures.window(
+            id: 1,
+            bundleID: "com.apple.TextEdit",
+            isAXBacked: true,
+            minimized: true
+        )
+
+        let plan = VisibilityPlanner.plan(
+            entry: entry,
+            window: window,
+            transition: .show,
+            layout: layout,
+            hostDisplay: display,
+            displays: [display]
+        )
+
+        #expect(plan?.mutation == VisibilityMutation.none)
+        #expect(plan?.restoreFromMinimized == false)
+        #expect(plan?.desiredEntry.visibilityState == .visible)
     }
 
     @Test func hidePlanParksWindowOnePixelOutside() {
@@ -534,6 +557,151 @@ struct VisibilityPlannerTests {
 
 @Suite("VisibilityApplier")
 struct VisibilityApplierTests {
+    @Test func rejectedParkingFallsBackToManagedMinimizeAndConverges() {
+        let layout = TestFixtures.twoSpaceLayout()
+        let window = TestFixtures.window(id: 1, bundleID: "app", isAXBacked: true)
+        let control = MockWindowControl(windows: [window], displays: [TestFixtures.display])
+        control.failPositionWindowIDs = [window.windowID]
+        let entry = SlotEntry(
+            layoutName: "work",
+            spaceID: 1,
+            slot: 1,
+            origin: .layout,
+            definitionFingerprint: "fp",
+            layoutSpaceID: 1,
+            bundleID: window.bundleID,
+            windowID: window.windowID,
+            lastVisibleFrame: window.frame,
+            visibilityState: .visible
+        )
+        let plan = VisibilityPlanner.plan(
+            entry: entry,
+            window: window,
+            transition: .hide,
+            layout: layout,
+            hostDisplay: TestFixtures.display,
+            displays: [TestFixtures.display]
+        )!
+
+        let applied = VisibilityApplier.apply(
+            plans: [plan],
+            control: control,
+            logger: TestFixtures.nullLogger()
+        )
+        let outcome = VisibilityApplier.converge(
+            changes: applied,
+            control: control,
+            logger: TestFixtures.nullLogger(),
+            retryDelaysMS: [1]
+        )
+
+        #expect(!outcome.hasPending)
+        #expect(outcome.changes.first?.desiredEntry.visibilityState == .hiddenMinimized)
+        #expect(outcome.changes.first?.effectiveEntry.visibilityState == .hiddenMinimized)
+        #expect(outcome.changes.first?.effectiveEntry.lastHiddenFrame == nil)
+        #expect(outcome.changes.first?.effectiveEntry.lastVisibleFrame == window.frame)
+        #expect(control.window(window.windowID)?.minimized == true)
+        #expect(control.setPositionAttemptWindowIDs == [window.windowID])
+        #expect(control.minimizeAttempts.map(\.minimized) == [true])
+    }
+
+    @Test func managedMinimizedWindowRestoresFrameAndUnminimizes() {
+        let layout = TestFixtures.twoSpaceLayout()
+        let visibleFrame = ResolvedFrame(x: 80, y: 90, width: 700, height: 400)
+        let window = TestFixtures.window(
+            id: 1,
+            bundleID: "app",
+            frame: visibleFrame,
+            isAXBacked: true,
+            minimized: true
+        )
+        let control = MockWindowControl(windows: [window], displays: [TestFixtures.display])
+        let entry = SlotEntry(
+            layoutName: "work",
+            spaceID: 1,
+            slot: 1,
+            origin: .layout,
+            definitionFingerprint: "fp",
+            layoutSpaceID: 1,
+            bundleID: window.bundleID,
+            windowID: window.windowID,
+            lastVisibleFrame: visibleFrame,
+            visibilityState: .hiddenMinimized
+        )
+        let plan = VisibilityPlanner.plan(
+            entry: entry,
+            window: window,
+            transition: .show,
+            layout: layout,
+            hostDisplay: TestFixtures.display,
+            displays: [TestFixtures.display]
+        )!
+
+        let applied = VisibilityApplier.apply(
+            plans: [plan],
+            control: control,
+            logger: TestFixtures.nullLogger()
+        )
+        let outcome = VisibilityApplier.converge(
+            changes: applied,
+            control: control,
+            logger: TestFixtures.nullLogger(),
+            retryDelaysMS: [1]
+        )
+
+        #expect(!outcome.hasPending)
+        #expect(outcome.changes.first?.effectiveEntry.visibilityState == .visible)
+        #expect(control.window(window.windowID)?.minimized == false)
+        #expect(control.window(window.windowID)?.frame == visibleFrame)
+        #expect(control.minimizeAttempts.map(\.minimized) == [false])
+    }
+
+    @Test func failedManagedMinimizeKeepsRejectedParkingUnresolved() {
+        let layout = TestFixtures.twoSpaceLayout()
+        let window = TestFixtures.window(id: 1, bundleID: "app", isAXBacked: true)
+        let control = MockWindowControl(windows: [window], displays: [TestFixtures.display])
+        control.failPositionWindowIDs = [window.windowID]
+        control.failMinimizeWindowIDs = [window.windowID]
+        let entry = SlotEntry(
+            layoutName: "work",
+            spaceID: 1,
+            slot: 1,
+            origin: .layout,
+            definitionFingerprint: "fp",
+            layoutSpaceID: 1,
+            bundleID: window.bundleID,
+            windowID: window.windowID,
+            lastVisibleFrame: window.frame,
+            visibilityState: .visible
+        )
+        let plan = VisibilityPlanner.plan(
+            entry: entry,
+            window: window,
+            transition: .hide,
+            layout: layout,
+            hostDisplay: TestFixtures.display,
+            displays: [TestFixtures.display]
+        )!
+
+        let applied = VisibilityApplier.apply(
+            plans: [plan],
+            control: control,
+            logger: TestFixtures.nullLogger()
+        )
+        let outcome = VisibilityApplier.converge(
+            changes: applied,
+            control: control,
+            logger: TestFixtures.nullLogger(),
+            retryDelaysMS: [1]
+        )
+
+        #expect(outcome.hasPending)
+        #expect(outcome.changes.first?.effectiveEntry.visibilityState == .visible)
+        #expect(outcome.desiredUnresolvedWindowIdentities == [window.identity])
+        #expect(control.window(window.windowID)?.minimized == false)
+        #expect(control.minimizeAttempts.map(\.minimized) == [true])
+    }
+
     @Test func fullscreenWindowMustReachHiddenPositionToConverge() {
         let window = TestFixtures.window(
             id: 1,
@@ -654,6 +822,170 @@ struct VisibilityApplierTests {
         #expect(!outcome.hasPending)
         #expect(outcome.retryCount == 0)
         #expect(outcome.verifyCount == 1)
+    }
+
+    @Test func convergeRetriesOnlyUnresolvedThenRechecksAllChanges() {
+        let first = TestFixtures.window(id: 1, bundleID: "app.one", isAXBacked: true)
+        let second = TestFixtures.window(id: 2, bundleID: "app.two", isAXBacked: true)
+        let control = MockWindowControl(
+            windows: [first, second],
+            displays: [TestFixtures.display]
+        )
+
+        func hiddenEntry(for window: WindowSnapshot) -> SlotEntry {
+            SlotEntry(
+                layoutName: "work",
+                spaceID: 2,
+                slot: Int(window.windowID),
+                origin: .layout,
+                definitionFingerprint: "fp-\(window.windowID)",
+                layoutSpaceID: 2,
+                bundleID: window.bundleID,
+                windowID: window.windowID,
+                lastHiddenFrame: ResolvedFrame(
+                    x: -699,
+                    y: window.frame.y,
+                    width: window.frame.width,
+                    height: window.frame.height
+                ),
+                visibilityState: .hiddenOffscreen
+            )
+        }
+
+        let firstDesired = hiddenEntry(for: first)
+        let secondDesired = hiddenEntry(for: second)
+        _ = control.setWindowPosition(
+            windowID: first.windowID,
+            pid: first.pid,
+            processStartTime: first.processStartTime,
+            bundleID: first.bundleID,
+            position: CGPoint(
+                x: firstDesired.lastHiddenFrame!.x,
+                y: firstDesired.lastHiddenFrame!.y
+            )
+        )
+
+        let outcome = VisibilityApplier.converge(
+            changes: [
+                AppliedVisibilityChange(
+                    window: first,
+                    originalEntry: firstDesired,
+                    effectiveEntry: firstDesired,
+                    desiredEntry: firstDesired,
+                    restoredFromMinimized: false
+                ),
+                AppliedVisibilityChange(
+                    window: second,
+                    originalEntry: secondDesired,
+                    effectiveEntry: secondDesired,
+                    desiredEntry: secondDesired,
+                    restoredFromMinimized: false,
+                    geometryMutationResult: .notAttempted
+                ),
+            ],
+            control: control,
+            logger: TestFixtures.nullLogger(),
+            retryDelaysMS: [1]
+        )
+
+        #expect(!outcome.hasPending)
+        #expect(outcome.verifyCount == 3)
+        #expect(control.targetedWindowInventoryIdentitySets == [
+            [first.identity, second.identity],
+            [second.identity],
+            [first.identity, second.identity],
+        ])
+    }
+
+    @Test func convergeFinalRecheckDetectsSiblingReflowAfterRetry() {
+        let firstVisible = TestFixtures.window(id: 1, bundleID: "app.shared", isAXBacked: true)
+        let secondVisible = TestFixtures.window(id: 2, bundleID: "app.shared", isAXBacked: true)
+
+        func entries(
+            for window: WindowSnapshot,
+            slot: Int
+        ) -> (original: SlotEntry, desired: SlotEntry) {
+            var original = SlotEntry(
+                layoutName: "work",
+                spaceID: 1,
+                slot: slot,
+                origin: .layout,
+                definitionFingerprint: "fp-\(slot)",
+                layoutSpaceID: 1,
+                bundleID: window.bundleID,
+                windowID: window.windowID,
+                lastVisibleFrame: window.frame,
+                visibilityState: .visible
+            )
+            var desired = original
+            desired.spaceID = 2
+            desired.layoutSpaceID = 2
+            desired.visibilityState = .hiddenOffscreen
+            desired.lastHiddenFrame = ResolvedFrame(
+                x: -window.frame.width + 1,
+                y: window.frame.y,
+                width: window.frame.width,
+                height: window.frame.height
+            )
+            original.lastHiddenFrame = nil
+            return (original, desired)
+        }
+
+        let firstEntries = entries(for: firstVisible, slot: 1)
+        let secondEntries = entries(for: secondVisible, slot: 2)
+        let firstHidden = TestFixtures.window(
+            id: firstVisible.windowID,
+            bundleID: firstVisible.bundleID,
+            frame: firstEntries.desired.lastHiddenFrame!,
+            isAXBacked: true
+        )
+        let secondHidden = TestFixtures.window(
+            id: secondVisible.windowID,
+            bundleID: secondVisible.bundleID,
+            frame: secondEntries.desired.lastHiddenFrame!,
+            isAXBacked: true
+        )
+        let control = MockWindowControl(
+            windows: [firstHidden, secondVisible],
+            displays: [TestFixtures.display]
+        )
+        control.windowListSequence = [
+            [firstHidden, secondVisible],
+            [firstHidden, secondHidden],
+            [firstVisible, secondHidden],
+        ]
+
+        let outcome = VisibilityApplier.converge(
+            changes: [
+                AppliedVisibilityChange(
+                    window: firstVisible,
+                    originalEntry: firstEntries.original,
+                    effectiveEntry: firstEntries.desired,
+                    desiredEntry: firstEntries.desired,
+                    restoredFromMinimized: false
+                ),
+                AppliedVisibilityChange(
+                    window: secondVisible,
+                    originalEntry: secondEntries.original,
+                    effectiveEntry: secondEntries.desired,
+                    desiredEntry: secondEntries.desired,
+                    restoredFromMinimized: false,
+                    geometryMutationResult: .notAttempted
+                ),
+            ],
+            control: control,
+            logger: TestFixtures.nullLogger(),
+            retryDelaysMS: [1]
+        )
+
+        #expect(outcome.hasPending)
+        #expect(outcome.desiredUnresolvedWindowIdentities == [firstVisible.identity])
+        #expect(outcome.changes.first?.effectiveEntry == firstEntries.original)
+        #expect(control.targetedWindowInventoryIdentitySets == [
+            [firstVisible.identity, secondVisible.identity],
+            [secondVisible.identity],
+            [firstVisible.identity, secondVisible.identity],
+        ])
     }
 
     @Test func unavailableInventoryDoesNotRollbackOrRetrySuccessfulMutation() {

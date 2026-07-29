@@ -77,29 +77,36 @@ public struct ConvergenceOutcome: Equatable, Sendable {
 public enum VisibilityApplier {
     public static let defaultRetryDelaysMS = [40, 80, 160]
 
+    private struct PlanApplication {
+        let desiredEntry: SlotEntry
+        let mutationResult: WindowGeometryMutationResult
+    }
+
     public static func apply(
         plans: [VisibilityPlan],
         control: WindowControl,
         logger: ShitsuraeLogger
     ) -> [AppliedVisibilityChange] {
         plans.map { plan in
-            let result = apply(plan: plan, control: control, logger: logger)
+            let application = apply(plan: plan, control: control, logger: logger)
             return AppliedVisibilityChange(
                 window: plan.window,
                 originalEntry: plan.originalEntry,
-                effectiveEntry: result.isApplied ? plan.desiredEntry : plan.originalEntry,
-                desiredEntry: plan.desiredEntry,
+                effectiveEntry: application.mutationResult.isApplied
+                    ? application.desiredEntry
+                    : plan.originalEntry,
+                desiredEntry: application.desiredEntry,
                 restoredFromMinimized: plan.restoreFromMinimized,
-                geometryMutationResult: result
+                geometryMutationResult: application.mutationResult
             )
         }
     }
 
-    static func apply(
+    private static func apply(
         plan: VisibilityPlan,
         control: WindowControl,
         logger: ShitsuraeLogger
-    ) -> WindowGeometryMutationResult {
+    ) -> PlanApplication {
         // v2: unminimize before showing — without this a minimized window can
         // never come back through a space switch (v1 bug).
         if plan.restoreFromMinimized,
@@ -124,7 +131,7 @@ public enum VisibilityApplier {
 
         switch plan.mutation {
         case .none:
-            return .applied
+            return PlanApplication(desiredEntry: plan.desiredEntry, mutationResult: .applied)
 
         case let .frame(frame):
             let tolerance = 2.0
@@ -134,7 +141,7 @@ public enum VisibilityApplier {
                abs(plan.window.frame.width - frame.width) <= tolerance,
                abs(plan.window.frame.height - frame.height) <= tolerance
             {
-                return .applied
+                return PlanApplication(desiredEntry: plan.desiredEntry, mutationResult: .applied)
             }
             let result = control.setWindowFrame(
                 windowID: plan.window.windowID,
@@ -154,14 +161,14 @@ public enum VisibilityApplier {
                     ]
                 )
             }
-            return result
+            return PlanApplication(desiredEntry: plan.desiredEntry, mutationResult: result)
 
         case let .position(position):
             let tolerance: CGFloat = 2.0
             if abs(plan.window.frame.x - position.x) <= tolerance,
                abs(plan.window.frame.y - position.y) <= tolerance
             {
-                return .applied
+                return PlanApplication(desiredEntry: plan.desiredEntry, mutationResult: .applied)
             }
             let result = control.setWindowPosition(
                 windowID: plan.window.windowID,
@@ -170,18 +177,55 @@ public enum VisibilityApplier {
                 bundleID: plan.window.bundleID,
                 position: position
             )
-            if !result.isApplied {
+            guard result == .rejected,
+                  plan.desiredEntry.visibilityState == .hiddenOffscreen
+            else {
+                if !result.isApplied {
+                    logger.error(
+                        event: "visibility.apply.setPositionFailed",
+                        fields: [
+                            "windowID": Int(plan.window.windowID),
+                            "bundleID": plan.window.bundleID,
+                            "action": plan.action,
+                            "result": String(describing: result),
+                        ]
+                    )
+                }
+                return PlanApplication(desiredEntry: plan.desiredEntry, mutationResult: result)
+            }
+
+            let minimizeResult = control.setWindowMinimized(
+                windowID: plan.window.windowID,
+                pid: plan.window.pid,
+                processStartTime: plan.window.processStartTime,
+                bundleID: plan.window.bundleID,
+                minimized: true
+            )
+            guard minimizeResult.isSuccess else {
                 logger.error(
-                    event: "visibility.apply.setPositionFailed",
+                    event: "visibility.apply.managedMinimizeFailed",
                     fields: [
                         "windowID": Int(plan.window.windowID),
                         "bundleID": plan.window.bundleID,
                         "action": plan.action,
-                        "result": String(describing: result),
+                        "result": String(describing: minimizeResult),
                     ]
                 )
+                return PlanApplication(desiredEntry: plan.desiredEntry, mutationResult: result)
             }
-            return result
+
+            var minimizedEntry = plan.desiredEntry
+            minimizedEntry.visibilityState = .hiddenMinimized
+            minimizedEntry.lastHiddenFrame = nil
+            logger.log(
+                event: "visibility.apply.managedMinimize",
+                fields: [
+                    "windowID": Int(plan.window.windowID),
+                    "bundleID": plan.window.bundleID,
+                    "reason": "offscreenParkingRejected",
+                ]
+            )
+            return PlanApplication(desiredEntry: minimizedEntry, mutationResult: .applied)
         }
     }
 
@@ -199,12 +243,44 @@ public enum VisibilityApplier {
         }
 
         var workingChanges = changes
-        var latestInventory = control.windowInventory()
+        let settlingDelayMS = control.visibilityVerificationSettlingDelayMS()
+        if settlingDelayMS > 0 {
+            control.sleep(milliseconds: settlingDelayMS)
+        }
         var verifyCount = 1
         var retryCount = 0
-        var verification = desiredStateVerification(changes: workingChanges, inventory: latestInventory)
+        var latestWindowsByIdentity: [WindowIdentity: WindowSnapshot] = [:]
+
+        func observe(
+            identities: Set<WindowIdentity>
+        ) -> [WindowIdentity: DesiredStateVerification] {
+            let inventory = control.windowInventory(identities: identities)
+            if inventory.isAuthoritative {
+                let requestedHandles = Set(identities.map(\.handle))
+                latestWindowsByIdentity = latestWindowsByIdentity.filter {
+                    !requestedHandles.contains($0.key.handle)
+                }
+                for window in inventory.windows {
+                    latestWindowsByIdentity[window.identity] = window
+                }
+            }
+            let observedChanges = workingChanges.filter {
+                identities.contains($0.window.identity)
+            }
+            return desiredStateVerification(
+                changes: observedChanges,
+                inventory: inventory
+            )
+        }
+
+        var verification = observe(
+            identities: Set(workingChanges.map(\.window.identity))
+        )
 
         for delayMS in retryDelaysMS where verification.values.contains(where: { $0 != .desired }) {
+            let unresolvedIdentities = Set(verification.compactMap { identity, result in
+                result == .desired ? nil : identity
+            })
             let retryableIndices = workingChanges.indices.filter {
                 workingChanges[$0].geometryMutationResult.canRetry
                     && verification[workingChanges[$0].window.identity] == .notDesired
@@ -223,9 +299,20 @@ public enum VisibilityApplier {
                 )
             }
             control.sleep(milliseconds: delayMS)
-            latestInventory = control.windowInventory()
             verifyCount += 1
-            verification = desiredStateVerification(changes: workingChanges, inventory: latestInventory)
+            verification.merge(observe(identities: unresolvedIdentities)) {
+                _, latest in latest
+            }
+        }
+
+        // Retrying one window can make its application reflow a sibling that
+        // was already verified. Recheck the complete change set once after any
+        // physical retry, while still avoiding a global inventory.
+        if retryCount > 0 {
+            verifyCount += 1
+            verification = observe(
+                identities: Set(workingChanges.map(\.window.identity))
+            )
         }
 
         let desiredUnresolvedWindowIdentities = Set(verification.compactMap { identity, result in
@@ -248,7 +335,10 @@ public enum VisibilityApplier {
         }
         let effectivePending = resolved.filter {
             !unverifiedWindowIdentities.contains($0.window.identity)
-                && !matchesEffectiveState(change: $0, windows: latestInventory.windows)
+                && !matchesEffectiveState(
+                    change: $0,
+                    windows: Array(latestWindowsByIdentity.values)
+                )
         }
 
         // [diagnostic] convergence-failure investigation — remove after root
@@ -260,7 +350,7 @@ public enum VisibilityApplier {
         if !effectivePending.isEmpty {
             let entries = effectivePending.map { change -> String in
                 let identity = change.window.identity
-                let actual = latestInventory.windows.first(where: { $0.identity == identity })
+                let actual = latestWindowsByIdentity[identity]
                 let desired = String(describing: change.desiredEntry.visibilityState)
                 let expected: String
                 switch change.desiredEntry.visibilityState {
@@ -270,6 +360,8 @@ public enum VisibilityApplier {
                 case .hiddenOffscreen:
                     expected = change.desiredEntry.lastHiddenFrame
                         .map { "\(Int($0.x)),\(Int($0.y))" } ?? "?"
+                case .hiddenMinimized:
+                    expected = "minimized"
                 }
                 let actualFrame = actual
                     .map { "\(Int($0.frame.x)),\(Int($0.frame.y)),\(Int($0.frame.width)),\(Int($0.frame.height))" } ?? "gone"
@@ -378,8 +470,11 @@ public enum VisibilityApplier {
     ) -> Bool {
         switch entry.visibilityState {
         case .visible:
-            guard !actual.minimized else {
-                return false
+            if actual.minimized {
+                // A visible entry may be user-minimized. Shitsurae does not
+                // own that state and must neither unminimize nor report it as
+                // failed visibility convergence.
+                return true
             }
             if let expectedFrame = entry.lastVisibleFrame ?? fallbackVisibleFrame {
                 return frameMatches(actual.frame, expectedFrame)
@@ -393,6 +488,8 @@ public enum VisibilityApplier {
                 return false
             }
             return positionMatches(actual.frame, expectedFrame)
+        case .hiddenMinimized:
+            return actual.minimized
         }
     }
 
@@ -437,6 +534,14 @@ public enum VisibilityApplier {
                     bundleID: change.window.bundleID,
                     position: CGPoint(x: frame.x, y: frame.y)
                 )
+            case .hiddenMinimized:
+                result = control.setWindowMinimized(
+                    windowID: change.window.windowID,
+                    pid: change.window.pid,
+                    processStartTime: change.window.processStartTime,
+                    bundleID: change.window.bundleID,
+                    minimized: true
+                ).isSuccess ? .applied : .notAttempted
             }
 
             changes[index].geometryMutationResult = result

@@ -3,6 +3,12 @@
 # expected exit code: 0
 # Since v1.1, mode.space is gone - Shitsurae always manages virtual workspaces.
 
+monitors:
+  main:
+    primary: true
+  calendar:
+    id: uuid-sub
+
 shortcuts:
   moveCurrentWindowToSpace:
     - slot: 1
@@ -12,10 +18,10 @@ shortcuts:
       key: "2"
       modifiers: [alt]
   switchVirtualSpace:
-    - slot: 1
+    - spaceID: 1
       key: "1"
       modifiers: [ctrl]
-    - slot: 2
+    - spaceID: 2
       key: "2"
       modifiers: [ctrl]
 
@@ -24,7 +30,7 @@ layouts:
     initialFocus:
       slot: 1
     display:
-      monitor: primary
+      monitor: main
     spaces:
       - spaceID: 1
         windows:
@@ -67,13 +73,13 @@ layouts:
               width: "50%"
               height: "100%"
 
-  # A single-space layout hosted on the secondary display: effectively an
+  # A single-space layout hosted on the calendar display: effectively an
   # always-visible pinned surface, independent from virtualWork's switching.
-  # Keep secondary-hosted matchers narrow (dedicated bundleID or a
+  # Keep calendar-hosted matchers narrow (dedicated bundleID or a
   # title/profile discriminator) so primary-display windows stay adoptable.
   pinnedDashboard:
     display:
-      monitor: secondary
+      monitor: calendar
     spaces:
       - spaceID: 1
         windows:

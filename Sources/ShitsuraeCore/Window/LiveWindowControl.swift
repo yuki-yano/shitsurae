@@ -13,6 +13,8 @@ import Foundation
 ///   _SLPSSetFrontProcessWithOptions + synthesized key-window events; plain
 ///   AX focus cannot raise one window above its siblings
 public struct LiveWindowControl: WindowControl {
+    private static let initialVisibilitySettlingDelayMS = 40
+
     public init() {}
 
     public func listWindows() -> [WindowSnapshot] {
@@ -27,8 +29,20 @@ public struct LiveWindowControl: WindowControl {
         WindowEnumerator.allWindowInventory()
     }
 
+    public func windowInventory(identities: Set<WindowIdentity>) -> WindowInventory {
+        WindowEnumerator.windowInventory(identities: identities)
+    }
+
     public func focusedWindowObservation() -> WindowObservation {
         WindowEnumerator.focusedWindowObservation()
+    }
+
+    public func focusedWindowIdentity() -> WindowIdentity? {
+        WindowEnumerator.focusedWindowIdentity()
+    }
+
+    public func frontmostWindowIdentity() -> WindowIdentity? {
+        WindowEnumerator.frontmostWindowIdentity()
     }
 
     public func onScreenWindowIdentities() -> Set<WindowIdentity> {
@@ -45,6 +59,10 @@ public struct LiveWindowControl: WindowControl {
 
     public func accessibilityGranted() -> Bool {
         SystemProbe.accessibilityGranted()
+    }
+
+    public func visibilityVerificationSettlingDelayMS() -> Int {
+        Self.initialVisibilitySettlingDelayMS
     }
 
     // MARK: - Frame

@@ -46,6 +46,9 @@ struct CommandRouterTests {
             .appendingPathComponent("shitsurae-router-config-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
         try """
+        monitors:
+          main:
+            primary: true
         layouts:
           work:
             initialFocus:
@@ -158,6 +161,57 @@ struct CommandRouterTests {
         let scopedPayload = try #require(scopedResponse["payload"] as? [String: Any])
         #expect(scopedPayload["layoutName"] as? String == "work")
         #expect((scopedPayload["space"] as? [String: Any])?["spaceID"] as? Int == 1)
+    }
+
+    @Test func spaceSwitchSupportsMonitorAliasAndFocusPolicy() async throws {
+        let (router, _, _, cleanup) = try makeRouter(windows: standardWindows())
+        defer { cleanup() }
+
+        var bootstrap = CommandRequest(command: "arrange")
+        bootstrap.layouts = ["work"]
+        bootstrap.stateOnly = true
+        bootstrap.spaceID = 1
+        _ = try await send(router, bootstrap)
+
+        var request = CommandRequest(command: "spaceSwitch")
+        request.spaceID = 2
+        request.monitor = "main"
+        request.focus = .preserve
+        let response = try await send(router, request)
+
+        #expect(response["ok"] as? Bool == true)
+        let payload = try #require(response["payload"] as? [String: Any])
+        #expect(payload["spaceID"] as? Int == 2)
+    }
+
+    @Test func spaceSwitchRejectsLayoutAndMonitorTogether() async throws {
+        let (router, _, _, cleanup) = try makeRouter(windows: [])
+        defer { cleanup() }
+
+        var request = CommandRequest(command: "spaceSwitch")
+        request.spaceID = 1
+        request.layout = "work"
+        request.monitor = "main"
+        let response = try await send(router, request)
+
+        #expect(response["ok"] as? Bool == false)
+        let error = try #require(response["error"] as? [String: Any])
+        #expect((error["message"] as? String)?.contains("mutually exclusive") == true)
+    }
+
+    @Test func spaceSwitchDistinguishesUndefinedMonitorAlias() async throws {
+        let (router, _, _, cleanup) = try makeRouter(windows: [])
+        defer { cleanup() }
+
+        var request = CommandRequest(command: "spaceSwitch")
+        request.spaceID = 1
+        request.monitor = "missing"
+        let response = try await send(router, request)
+
+        #expect(response["ok"] as? Bool == false)
+        let error = try #require(response["error"] as? [String: Any])
+        #expect(error["subcode"] as? String == "monitorNotFound")
+        #expect((error["message"] as? String)?.contains("missing") == true)
     }
 
     @Test func unknownCommandFailsCleanly() async throws {

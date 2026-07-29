@@ -299,20 +299,38 @@ public struct IgnoreWindowRule: Codable, Equatable, Sendable {
 }
 
 public struct MonitorsDefinition: Codable, Equatable, Sendable {
-    public let primary: MonitorTargetDefinition?
-    public let secondary: MonitorTargetDefinition?
+    public let targets: [String: MonitorTargetDefinition]
 
-    public init(primary: MonitorTargetDefinition? = nil, secondary: MonitorTargetDefinition? = nil) {
-        self.primary = primary
-        self.secondary = secondary
+    public init(_ targets: [String: MonitorTargetDefinition] = [:]) {
+        self.targets = targets
+    }
+
+    public subscript(alias: String) -> MonitorTargetDefinition? {
+        targets[alias]
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        targets = try container.decode([String: MonitorTargetDefinition].self)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(targets)
     }
 }
 
 public struct MonitorTargetDefinition: Codable, Equatable, Sendable {
     public let id: String?
+    public let primary: Bool?
+    public let width: Int?
+    public let height: Int?
 
-    public init(id: String? = nil) {
+    public init(id: String? = nil, primary: Bool? = nil, width: Int? = nil, height: Int? = nil) {
         self.id = id
+        self.primary = primary
+        self.width = width
+        self.height = height
     }
 }
 
@@ -325,22 +343,17 @@ public struct OverlayDefinition: Codable, Equatable, Sendable {
 }
 
 public struct DisplayDefinition: Codable, Equatable, Sendable {
-    public let monitor: MonitorRole?
+    public let monitor: String?
     public let id: String?
     public let width: Int?
     public let height: Int?
 
-    public init(monitor: MonitorRole? = nil, id: String? = nil, width: Int? = nil, height: Int? = nil) {
+    public init(monitor: String? = nil, id: String? = nil, width: Int? = nil, height: Int? = nil) {
         self.monitor = monitor
         self.id = id
         self.width = width
         self.height = height
     }
-}
-
-public enum MonitorRole: String, Codable, CaseIterable, Sendable {
-    case primary
-    case secondary
 }
 
 // MARK: - Frame / length
@@ -389,7 +402,7 @@ public struct FrameDefinition: Codable, Equatable, Sendable {
 public struct ShortcutsDefinition: Codable, Equatable, Sendable {
     public let focusBySlot: [FocusBySlotShortcut]?
     public let moveCurrentWindowToSpace: [FocusBySlotShortcut]?
-    public let switchVirtualSpace: [FocusBySlotShortcut]?
+    public let switchVirtualSpace: [SwitchVirtualSpaceShortcut]?
     public let nextWindow: HotkeyDefinition?
     public let prevWindow: HotkeyDefinition?
     public let cycle: CycleShortcutDefinition?
@@ -403,7 +416,7 @@ public struct ShortcutsDefinition: Codable, Equatable, Sendable {
     public init(
         focusBySlot: [FocusBySlotShortcut]? = nil,
         moveCurrentWindowToSpace: [FocusBySlotShortcut]? = nil,
-        switchVirtualSpace: [FocusBySlotShortcut]? = nil,
+        switchVirtualSpace: [SwitchVirtualSpaceShortcut]? = nil,
         nextWindow: HotkeyDefinition? = nil,
         prevWindow: HotkeyDefinition? = nil,
         cycle: CycleShortcutDefinition? = nil,
@@ -426,6 +439,33 @@ public struct ShortcutsDefinition: Codable, Equatable, Sendable {
         self.focusBySlotEnabledInApps = focusBySlotEnabledInApps
         self.cycleExcludedApps = cycleExcludedApps
         self.switcherExcludedApps = switcherExcludedApps
+    }
+}
+
+public enum SpaceSwitchFocusPolicy: String, Codable, CaseIterable, Sendable {
+    case target
+    case preserve
+}
+
+public struct SwitchVirtualSpaceShortcut: Codable, Equatable, Sendable {
+    public let key: String
+    public let modifiers: [String]
+    public let spaceID: Int
+    public let monitor: String?
+    public let focus: SpaceSwitchFocusPolicy?
+
+    public init(
+        key: String,
+        modifiers: [String],
+        spaceID: Int,
+        monitor: String? = nil,
+        focus: SpaceSwitchFocusPolicy? = nil
+    ) {
+        self.key = key
+        self.modifiers = modifiers
+        self.spaceID = spaceID
+        self.monitor = monitor
+        self.focus = focus
     }
 }
 
@@ -616,7 +656,7 @@ public extension ShitsuraeConfig {
 public struct ResolvedShortcuts: Equatable, Sendable {
     public let focusBySlot: [Int: HotkeyDefinition]
     public let moveCurrentWindowToSpace: [Int: HotkeyDefinition]
-    public let switchVirtualSpace: [Int: HotkeyDefinition]
+    public let switchVirtualSpace: [ResolvedSpaceSwitchShortcut]
     public let focusBySlotEnabledInApps: [String: Bool]
     public let cycleExcludedApps: Set<String>
     public let switcherExcludedApps: Set<String>
@@ -656,13 +696,34 @@ public struct ResolvedShortcuts: Equatable, Sendable {
         }
         moveCurrentWindowToSpace = moveToSpaceShortcuts
 
-        var switchVirtualSpaceShortcuts: [Int: HotkeyDefinition] = [:]
+        var switchVirtualSpaceShortcuts: [ResolvedSpaceSwitchShortcut] = []
         for slot in 1 ... 9 {
-            switchVirtualSpaceShortcuts[slot] = HotkeyDefinition(key: String(slot), modifiers: ["ctrl"])
+            switchVirtualSpaceShortcuts.append(
+                ResolvedSpaceSwitchShortcut(
+                    hotkey: HotkeyDefinition(key: String(slot), modifiers: ["ctrl"]),
+                    spaceID: slot,
+                    monitor: nil,
+                    focus: .target
+                )
+            )
         }
         if let overrides = shortcuts?.switchVirtualSpace {
-            for item in overrides where (1 ... 9).contains(item.slot) {
-                switchVirtualSpaceShortcuts[item.slot] = HotkeyDefinition(key: item.key, modifiers: item.modifiers)
+            for item in overrides where item.spaceID > 0 {
+                let resolved = ResolvedSpaceSwitchShortcut(
+                    hotkey: HotkeyDefinition(key: item.key, modifiers: item.modifiers),
+                    spaceID: item.spaceID,
+                    monitor: item.monitor,
+                    focus: item.focus ?? .target
+                )
+                if item.monitor == nil,
+                   let index = switchVirtualSpaceShortcuts.firstIndex(where: {
+                       $0.monitor == nil && $0.spaceID == item.spaceID
+                   })
+                {
+                    switchVirtualSpaceShortcuts[index] = resolved
+                } else {
+                    switchVirtualSpaceShortcuts.append(resolved)
+                }
             }
         }
         switchVirtualSpace = switchVirtualSpaceShortcuts
@@ -688,5 +749,28 @@ public struct ResolvedShortcuts: Equatable, Sendable {
 
         globalActions = shortcuts?.globalActions ?? []
         disabledInApps = shortcuts?.disabledInApps ?? [:]
+    }
+}
+
+public struct ResolvedSpaceSwitchShortcut: Equatable, Sendable {
+    public let hotkey: HotkeyDefinition
+    public let spaceID: Int
+    public let monitor: String?
+    public let focus: SpaceSwitchFocusPolicy
+
+    public init(
+        hotkey: HotkeyDefinition,
+        spaceID: Int,
+        monitor: String?,
+        focus: SpaceSwitchFocusPolicy
+    ) {
+        self.hotkey = hotkey
+        self.spaceID = spaceID
+        self.monitor = monitor
+        self.focus = focus
+    }
+
+    public var shortcutID: String {
+        "switchVirtualSpace:\(monitor ?? "primary"):\(spaceID)"
     }
 }

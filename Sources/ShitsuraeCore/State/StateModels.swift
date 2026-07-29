@@ -3,6 +3,18 @@ import Foundation
 public enum VisibilityState: String, Codable, Equatable, Sendable {
     case visible
     case hiddenOffscreen
+    /// The window rejected offscreen parking, so Shitsurae minimized this
+    /// exact window and owns the matching unminimize operation.
+    case hiddenMinimized
+
+    public var isManagedHidden: Bool {
+        switch self {
+        case .visible:
+            false
+        case .hiddenOffscreen, .hiddenMinimized:
+            true
+        }
+    }
 }
 
 public enum SlotOrigin: String, Codable, Equatable, Sendable {
@@ -310,7 +322,7 @@ public struct ActiveWorkspace: Codable, Equatable, Sendable {
 }
 
 public struct RuntimeState: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 5
+    public static let currentSchemaVersion = 6
 
     public var schemaVersion: Int
     public var updatedAt: String

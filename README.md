@@ -29,9 +29,9 @@ shitsurae arrange work
 
 ## How it works
 
-Shitsurae never touches native macOS Spaces (Mission Control). Every virtual workspace lives on a single desktop: switching workspaces moves the target windows on-screen and parks the rest 1px outside the display edge.
+Shitsurae never touches native macOS Spaces (Mission Control). Every virtual workspace lives on a single desktop: switching workspaces moves the target windows on-screen and parks the rest 1px outside the display edge. If an app such as Chromium rejects offscreen placement, Shitsurae minimizes only that managed window and restores it on return; this may briefly show the system minimize animation or a Dock item.
 
-- Workspace switch = coordinate moves, no animation, instant
+- Workspace switch normally uses instant coordinate moves; managed-minimize fallback follows the system animation setting
 - Independent of Mission Control and native desktop settings
 - Dialogs, sheets, and other transient companion windows stay on-screen during a switch; their main window is temporarily protected from geometry changes and returns to its assigned workspace after the dialog closes
 
@@ -122,23 +122,31 @@ shitsurae switcher list --json --include-all-spaces true
 ### 8. Multi-display support
 
 - Each display hosts its own independent workspace: `layouts.<name>.display` declares the layout's host display, and arranging a layout only replaces the active layout of *that* display
-- Match displays by `primary` / `secondary` role, by resolution, or by display UUID (`display.id`)
-- Space switching without `--layout`, cycle, switcher and slot focus target the primary display's workspace. `space switch --layout <name>` switches only the named workspace without disturbing other displays
+- Give displays stable aliases under `monitors`, selecting each by `primary: true`, exact UUID, or a unique width/height pair. Layouts reference those aliases with `display.monitor`
+- Space switching without `--layout` / `--monitor`, cycle, switcher and slot focus target the primary display's workspace. `space switch --monitor research --focus preserve` switches that display while preserving focus on another display
 - `shitsurae arrange main calendar` applies layouts that resolve to distinct displays in one request. Shitsurae validates every layout, connected host and display collision before serializing window mutations; physical window operations are not atomic. Multi-layout arrange does not accept `--dry-run`, `--state-only` or `--space`
 - Add `--layout <name>` to `space list`, `space current` or `space switch` to target only that layout's active workspace. A configured but inactive layout is rejected instead of being implicitly bootstrapped
-- A single-space layout hosted on a secondary display is effectively an always-visible pinned surface (see the example below)
+- A single-space layout hosted on a non-primary display is effectively an always-visible pinned surface (see the example below)
 - When a declared display disconnects, its workspace goes dormant and windows moved by macOS are left untouched; on reconnect the layout is repositioned automatically (no apps are launched). Reconnects that change the display UUID are handled by re-resolving the declaration — but a layout pinned with `display.id` cannot recover from a UUID change until the config is updated, so prefer role / resolution declarations
-- Untracked windows on non-primary displays are never auto-adopted: secondary displays stay free-form unless a layout claims their windows
+- Untracked windows on non-primary displays are never auto-adopted: those displays stay free-form unless a layout claims their windows
 
 ```yaml
+monitors:
+  main:
+    primary: true
+  calendar:
+    id: 37D8832A-2D66-02CA-B9F7-8F30A301B230
+
 layouts:
   main:
+    display:
+      monitor: main
     spaces:
       - spaceID: 1
         windows: [...]
   calendar:
     display:
-      monitor: secondary
+      monitor: calendar
     spaces:
       - spaceID: 1
         windows:
@@ -154,7 +162,7 @@ layouts:
 ```
 
 > [!IMPORTANT]
-> Give secondary-hosted layouts *narrow* matchers (a dedicated bundleID, or `title` / `profile` discriminators). Windows that match another display's layout rules are excluded from adoption on the primary display, so a broad matcher (bare browser bundleID etc.) would leave all of that app's primary-display windows unmanaged. Completely identical matchers across layouts that can be active simultaneously are a config-load error.
+> Give non-primary layouts *narrow* matchers (a dedicated bundleID, or `title` / `profile` discriminators). Windows that match another display's layout rules are excluded from adoption on the primary display, so a broad matcher (bare browser bundleID etc.) would leave all of that app's primary-display windows unmanaged. Completely identical matchers across layouts that can be active simultaneously are a config-load error.
 
 In the GUI Arrange screen, select a Layout and Space for each connected display. Use the row’s **Apply** button to apply only that display, or **Apply Display Set** to apply every selected display’s complete workspace set together. The Virtual Workspaces card exposes Space buttons for every active workspace, so a secondary workspace can be switched independently. Workspace State also lists every active layout and does not classify secondary-owned windows as unmanaged.
 
@@ -355,9 +363,11 @@ shortcuts:
       modifiers: [alt]
 
   switchVirtualSpace:
-    - slot: 1
+    - spaceID: 1
       key: "1"
       modifiers: [ctrl]
+      monitor: research
+      focus: preserve # target | preserve
 
   cycleExcludedApps:
     - com.hnc.Discord

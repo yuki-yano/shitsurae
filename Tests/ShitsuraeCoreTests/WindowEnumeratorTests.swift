@@ -11,10 +11,22 @@ struct WindowEnumeratorTests {
         #expect(ProcessGenerationResolver.startTime(pid: pid) != nil)
     }
 
-    @Test func excludesBackgroundOnlyProcessOwnersBeforeAXEnumeration() {
+    @Test func excludesOnlyBackgroundProcessOwnersBeforeAXEnumeration() {
         #expect(WindowEnumerator.isEligibleProcessOwner(activationPolicy: .regular))
         #expect(WindowEnumerator.isEligibleProcessOwner(activationPolicy: .accessory))
         #expect(!WindowEnumerator.isEligibleProcessOwner(activationPolicy: .prohibited))
+    }
+
+    @Test func frontmostWindowIDUsesFirstUsableLayerZeroWindowForProcess() {
+        let raw = [
+            rawWindow(id: 1, pid: 100, layer: 25),
+            rawWindow(id: 2, pid: 200),
+            rawWindow(id: 3, pid: 100, width: 0),
+            rawWindow(id: 4, pid: 100),
+            rawWindow(id: 5, pid: 100),
+        ]
+
+        #expect(WindowEnumerator.frontmostWindowID(rawWindowInfo: raw, pid: 100) == 4)
     }
 
     private func ax(

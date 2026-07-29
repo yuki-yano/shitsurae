@@ -50,6 +50,8 @@ public enum ConfigValidator {
             )
         }
 
+        validateMonitors(config.monitors, sourcePath: sourcePath, errors: &errors)
+
         for (layoutName, layout) in config.layouts {
             if !matches(layoutNamePattern, text: layoutName) {
                 errors.append(
@@ -85,6 +87,7 @@ public enum ConfigValidator {
             validateLayoutDisplayDefinition(
                 layoutName: layoutName,
                 layout: layout,
+                config: config,
                 sourcePath: sourcePath,
                 errors: &errors
             )
@@ -201,7 +204,12 @@ public enum ConfigValidator {
 
         validateCrossLayoutMatcherUniqueness(config: config, sourcePath: sourcePath, errors: &errors)
         validateIgnore(config.ignore, sourcePath: sourcePath, errors: &errors)
-        validateShortcuts(config.resolvedShortcuts, sourcePath: sourcePath, errors: &errors)
+        validateShortcuts(
+            config.resolvedShortcuts,
+            config: config,
+            sourcePath: sourcePath,
+            errors: &errors
+        )
 
         return errors.sorted {
             if $0.path != $1.path { return $0.path < $1.path }
@@ -222,6 +230,60 @@ public enum ConfigValidator {
                 }
             }
             return $0.code < $1.code
+        }
+    }
+
+    private static func validateMonitors(
+        _ monitors: MonitorsDefinition?,
+        sourcePath: String,
+        errors: inout [ValidateErrorItem]
+    ) {
+        guard let monitors else { return }
+
+        for (alias, target) in monitors.targets {
+            if !matches(layoutNamePattern, text: alias) {
+                errors.append(
+                    ValidateErrorItem(
+                        code: .validationError,
+                        path: sourcePath,
+                        message: "monitor alias is invalid: \(alias)"
+                    )
+                )
+            }
+
+            if target.primary == false {
+                errors.append(
+                    ValidateErrorItem(
+                        code: .validationError,
+                        path: sourcePath,
+                        message: "monitors.\(alias).primary must be true when present"
+                    )
+                )
+            }
+            if (target.width == nil) != (target.height == nil) {
+                errors.append(
+                    ValidateErrorItem(
+                        code: .validationError,
+                        path: sourcePath,
+                        message: "monitors.\(alias) resolution requires both width and height"
+                    )
+                )
+            }
+
+            let selectorCount = [
+                target.id == nil ? nil : "id",
+                target.primary == true ? "primary" : nil,
+                target.width != nil && target.height != nil ? "resolution" : nil,
+            ].compactMap { $0 }.count
+            if selectorCount != 1 {
+                errors.append(
+                    ValidateErrorItem(
+                        code: .validationError,
+                        path: sourcePath,
+                        message: "monitors.\(alias) must declare exactly one selector: id, primary: true, or width and height"
+                    )
+                )
+            }
         }
     }
 
@@ -271,6 +333,7 @@ public enum ConfigValidator {
     private static func validateLayoutDisplayDefinition(
         layoutName: String,
         layout: LayoutDefinition,
+        config: ShitsuraeConfig,
         sourcePath: String,
         errors: inout [ValidateErrorItem]
     ) {
@@ -282,6 +345,24 @@ public enum ConfigValidator {
                     code: .validationError,
                     path: sourcePath,
                     message: "display.monitor and display.id are mutually exclusive in layout \(layoutName)"
+                )
+            )
+        }
+        if let monitor = display.monitor, config.monitors?[monitor] == nil {
+            errors.append(
+                ValidateErrorItem(
+                    code: .validationError,
+                    path: sourcePath,
+                    message: "display.monitor references undefined monitor alias \(monitor) in layout \(layoutName)"
+                )
+            )
+        }
+        if (display.width == nil) != (display.height == nil) {
+            errors.append(
+                ValidateErrorItem(
+                    code: .validationError,
+                    path: sourcePath,
+                    message: "display resolution requires both width and height in layout \(layoutName)"
                 )
             )
         }
@@ -340,8 +421,7 @@ public enum ConfigValidator {
     /// Comparison key of the display a layout would be hosted on. Two layouts
     /// with the same key can never be active at the same time (arrange
     /// replaces the active layout per display). An undeclared display and
-    /// `monitor: primary` denote the same host unless monitors.primary.id
-    /// pins the primary role to an arbitrary display UUID.
+    /// a monitor alias backed by `primary: true` denote the same host.
     private static func hostComparisonKey(layout: LayoutDefinition, config: ShitsuraeConfig) -> String {
         guard let display = layout.display else {
             return "primary-implicit"
@@ -350,10 +430,10 @@ public enum ConfigValidator {
             return "id:\(id)"
         }
         if let monitor = display.monitor {
-            if monitor == .primary, config.monitors?.primary?.id == nil {
+            if config.monitors?[monitor]?.primary == true {
                 return "primary-implicit"
             }
-            return "monitor:\(monitor.rawValue)"
+            return "monitor:\(monitor)"
         }
         return "res:\(display.width.map(String.init) ?? "*")x\(display.height.map(String.init) ?? "*")"
     }
@@ -425,6 +505,7 @@ public enum ConfigValidator {
 
     private static func validateShortcuts(
         _ shortcuts: ResolvedShortcuts,
+        config: ShitsuraeConfig,
         sourcePath: String,
         errors: inout [ValidateErrorItem]
     ) {
@@ -435,8 +516,42 @@ public enum ConfigValidator {
             if let shortcut = shortcuts.moveCurrentWindowToSpace[slot] {
                 validateHotkey(shortcut, sourcePath: sourcePath, messagePrefix: "moveCurrentWindowToSpace:\(slot)", requireModifier: true, errors: &errors)
             }
-            if let shortcut = shortcuts.switchVirtualSpace[slot] {
-                validateHotkey(shortcut, sourcePath: sourcePath, messagePrefix: "switchVirtualSpace:\(slot)", requireModifier: true, errors: &errors)
+        }
+
+        var switchTargetsByChord: [String: ResolvedSpaceSwitchShortcut] = [:]
+        for shortcut in shortcuts.switchVirtualSpace {
+            validateHotkey(
+                shortcut.hotkey,
+                sourcePath: sourcePath,
+                messagePrefix: shortcut.shortcutID,
+                requireModifier: true,
+                errors: &errors
+            )
+            if let monitor = shortcut.monitor, config.monitors?[monitor] == nil {
+                errors.append(
+                    ValidateErrorItem(
+                        code: .validationError,
+                        path: sourcePath,
+                        message: "\(shortcut.shortcutID) references undefined monitor alias \(monitor)"
+                    )
+                )
+            }
+
+            let target = canonicalMonitorTarget(shortcut.monitor, config: config)
+            let modifiers = Set(shortcut.hotkey.modifiers.map { $0.lowercased() })
+                .sorted()
+                .joined(separator: "+")
+            let chord = "\(target)|\(shortcut.hotkey.key.lowercased())|\(modifiers)"
+            if let existing = switchTargetsByChord[chord] {
+                errors.append(
+                    ValidateErrorItem(
+                        code: .validationError,
+                        path: sourcePath,
+                        message: "\(shortcut.shortcutID) duplicates \(existing.shortcutID) on the same monitor and key chord"
+                    )
+                )
+            } else {
+                switchTargetsByChord[chord] = shortcut
             }
         }
 
@@ -551,6 +666,14 @@ public enum ConfigValidator {
                 )
             }
         }
+    }
+
+    private static func canonicalMonitorTarget(
+        _ alias: String?,
+        config: ShitsuraeConfig
+    ) -> String {
+        guard let alias else { return "primary" }
+        return config.monitors?[alias]?.primary == true ? "primary" : alias
     }
 
     private static func validateHotkey(
@@ -673,10 +796,21 @@ public enum ConfigValidator {
             return true
         }
 
-        for prefix in ["focusBySlot:", "moveCurrentWindowToSpace:", "switchVirtualSpace:"] {
+        for prefix in ["focusBySlot:", "moveCurrentWindowToSpace:"] {
             if shortcutID.hasPrefix(prefix),
                let slot = Int(shortcutID.dropFirst(prefix.count)),
                (1 ... 9).contains(slot)
+            {
+                return true
+            }
+        }
+
+        if shortcutID.hasPrefix("switchVirtualSpace:") {
+            let components = shortcutID.split(separator: ":", omittingEmptySubsequences: false)
+            if components.count == 3,
+               !components[1].isEmpty,
+               let spaceID = Int(components[2]),
+               spaceID > 0
             {
                 return true
             }

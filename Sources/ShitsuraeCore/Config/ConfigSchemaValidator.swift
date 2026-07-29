@@ -82,6 +82,13 @@ enum ConfigSchemaValidator {
         "modifiers": scalarSequence,
         "slot": .scalar,
     ])
+    private static let spaceSwitchHotkey = Schema.mapping(fields: [
+        "key": .scalar,
+        "modifiers": scalarSequence,
+        "spaceID": .scalar,
+        "monitor": .scalar,
+        "focus": .scalar,
+    ])
     private static let titleMatcher = Schema.mapping(fields: [
         "equals": .scalar,
         "contains": .scalar,
@@ -155,7 +162,7 @@ enum ConfigSchemaValidator {
     private static let shortcuts = Schema.mapping(fields: [
         "focusBySlot": .sequence(indexedHotkey),
         "moveCurrentWindowToSpace": .sequence(indexedHotkey),
-        "switchVirtualSpace": .sequence(indexedHotkey),
+        "switchVirtualSpace": .sequence(spaceSwitchHotkey),
         "nextWindow": hotkey,
         "prevWindow": hotkey,
         "cycle": .mapping(fields: [
@@ -183,10 +190,15 @@ enum ConfigSchemaValidator {
             "focus": ignoreRuleSet,
         ]),
         "overlay": .mapping(fields: ["showThumbnails": .scalar]),
-        "monitors": .mapping(fields: [
-            "primary": .mapping(fields: ["id": .scalar]),
-            "secondary": .mapping(fields: ["id": .scalar]),
-        ]),
+        "monitors": .mapping(
+            fields: [:],
+            dynamicValues: .mapping(fields: [
+                "id": .scalar,
+                "primary": .scalar,
+                "width": .scalar,
+                "height": .scalar,
+            ])
+        ),
         "layouts": .mapping(fields: [:], dynamicValues: layout),
         "shortcuts": shortcuts,
         "mode": .mapping(fields: [

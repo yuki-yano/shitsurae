@@ -169,10 +169,13 @@ struct ConfigLoaderTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         try write(
             """
+            monitors:
+              calendar:
+                id: uuid-sub
             layouts:
               calendar:
                 display:
-                  monitor: secondary
+                  monitor: calendar
                 spaces:
                   - spaceID: 1
                     windows:
@@ -190,7 +193,7 @@ struct ConfigLoaderTests {
         )
 
         let loaded = try ConfigLoader().load(from: dir)
-        #expect(loaded.config.layouts["calendar"]?.display?.monitor == .secondary)
+        #expect(loaded.config.layouts["calendar"]?.display?.monitor == "calendar")
     }
 
     @Test func acceptsModeFollowFocus() throws {

@@ -9,37 +9,37 @@ import ShitsuraeCore
 /// permission is a hard requirement of the app, so the tap is always
 /// available when the app works at all.
 enum HotkeyFastPathAction: Equatable, Sendable {
-    case switchSpace(Int)
+    case switchSpace(
+        candidates: [ResolvedSpaceSwitchShortcut],
+        cursorLocation: CGPoint
+    )
 
     static func match(
         eventKeyCode: Int,
         modifiers: Set<String>,
+        cursorLocation: CGPoint,
         shortcuts: ResolvedShortcuts,
         frontmostBundleID: String?,
         frontmostBelongsToActiveWorkspace: Bool
     ) -> HotkeyFastPathAction? {
-        for (slot, hotkey) in shortcuts.switchVirtualSpace {
-            guard keyCode(for: hotkey.key) == eventKeyCode,
-                  Set(hotkey.modifiers.map { $0.lowercased() }) == modifiers
+        let candidates = shortcuts.switchVirtualSpace.filter { shortcut in
+            guard keyCode(for: shortcut.hotkey.key) == eventKeyCode,
+                  Set(shortcut.hotkey.modifiers.map { $0.lowercased() }) == modifiers
             else {
-                continue
+                return false
             }
-
-            let shortcutID = "switchVirtualSpace:\(slot)"
-            guard !PolicyEngine.isShortcutDisabled(
+            return !PolicyEngine.isShortcutDisabled(
                 frontmostBundleID: frontmostBundleID,
-                shortcutID: shortcutID,
+                shortcutID: shortcut.shortcutID,
                 disabledInApps: shortcuts.disabledInApps,
                 focusBySlotEnabledInApps: shortcuts.focusBySlotEnabledInApps,
                 frontmostBelongsToActiveWorkspace: frontmostBelongsToActiveWorkspace
-            ) else {
-                return nil
-            }
-
-            return .switchSpace(slot)
+            )
         }
 
-        return nil
+        return candidates.isEmpty
+            ? nil
+            : .switchSpace(candidates: candidates, cursorLocation: cursorLocation)
     }
 }
 
@@ -75,16 +75,17 @@ enum HotkeyEventRouting {
 }
 
 enum HotkeyFastPathExecutionResult: Sendable {
-    case success(SpaceSwitchOutcome)
-    case partial(SpaceSwitchOutcome, String)
+    case success(RoutedSpaceSwitchOutcome)
+    case partial(RoutedSpaceSwitchOutcome, String)
     case failure(String)
 }
 
-private struct HotkeyEventSnapshot: Sendable {
+struct HotkeyEventSnapshot: Sendable {
     let typeRawValue: UInt32
     let keyCode: Int
     let modifiers: Set<String>
     let key: String
+    let location: CGPoint
 
     var type: CGEventType? {
         CGEventType(rawValue: typeRawValue)
@@ -95,6 +96,7 @@ private struct HotkeyEventSnapshot: Sendable {
         keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
         modifiers = eventModifierSet(flags: event.flags)
         key = normalizedKey(from: event)
+        location = event.location
     }
 }
 
@@ -157,6 +159,7 @@ private final class HotkeyFastPathState: @unchecked Sendable {
         return HotkeyFastPathAction.match(
             eventKeyCode: event.keyCode,
             modifiers: event.modifiers,
+            cursorLocation: event.location,
             shortcuts: shortcuts,
             frontmostBundleID: current.frontmostBundleID,
             frontmostBelongsToActiveWorkspace: current.frontmostBelongsToActiveWorkspace
@@ -187,13 +190,16 @@ private final class HotkeyFastPathExecutor: @unchecked Sendable {
 
     func execute(_ action: HotkeyFastPathAction) {
         switch action {
-        case let .switchSpace(spaceID):
-            switchSpace(to: spaceID)
+        case let .switchSpace(candidates, cursorLocation):
+            switchSpace(candidates: candidates, cursorLocation: cursorLocation)
         }
     }
 
-    private func switchSpace(to spaceID: Int) {
-        let label = "switch to space \(spaceID)"
+    private func switchSpace(
+        candidates: [ResolvedSpaceSwitchShortcut],
+        cursorLocation: CGPoint
+    ) {
+        let label = "switch workspace"
         guard let config = configManager.configIfLoaded() else {
             onFinish(label, .failure("config not loaded"))
             return
@@ -215,7 +221,12 @@ private final class HotkeyFastPathExecutor: @unchecked Sendable {
             }
 
             do {
-                let outcome = try await engine.switchSpace(to: spaceID, config: config)
+                let routed = try await engine.routeAndSwitchSpace(
+                    candidates: candidates,
+                    cursorLocation: cursorLocation,
+                    config: config
+                )
+                let outcome = routed.outcome
                 if let message = SpaceSwitchCompletion.incompleteMessage(
                     converged: outcome.converged,
                     unresolvedSlotCount: outcome.unresolvedSlots.count
@@ -230,9 +241,9 @@ private final class HotkeyFastPathExecutor: @unchecked Sendable {
                             "unresolvedSlots": outcome.unresolvedSlots.count,
                         ]
                     )
-                    self.onFinish(label, .partial(outcome, message))
+                    self.onFinish(label, .partial(routed, message))
                 } else {
-                    self.onFinish(label, .success(outcome))
+                    self.onFinish(label, .success(routed))
                 }
             } catch {
                 let message = (error as? VirtualSpaceEngineError).map {
@@ -602,13 +613,6 @@ final class HotkeyManager {
                !disabled("focusBySlot:\(slot)")
             {
                 model?.focusSlot(slot)
-                return true
-            }
-            if let hotkey = shortcuts.switchVirtualSpace[slot],
-               eventMatchesHotkey(event: event, key: hotkey.key, modifiers: hotkey.modifiers),
-               !disabled("switchVirtualSpace:\(slot)")
-            {
-                model?.switchSpace(to: slot)
                 return true
             }
             if let hotkey = shortcuts.moveCurrentWindowToSpace[slot],

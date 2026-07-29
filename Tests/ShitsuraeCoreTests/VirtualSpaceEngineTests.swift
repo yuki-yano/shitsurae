@@ -119,6 +119,21 @@ struct VirtualSpaceEngineTests {
         #expect(state.firstPendingVisibilityConvergence == nil)
     }
 
+    @Test func switchSpaceUsesFullInventoryOnlyForPreflightAndTargetedConvergence() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        let inventoryCountBeforeSwitch = control.listAllWindowsCallCount
+        let targetedCountBeforeSwitch = control.targetedWindowInventoryCallCount
+
+        _ = try await engine.switchSpace(to: 2, config: config)
+
+        #expect(control.listAllWindowsCallCount == inventoryCountBeforeSwitch + 1)
+        #expect(control.targetedWindowInventoryCallCount == targetedCountBeforeSwitch + 1)
+        #expect(control.targetedWindowInventoryIdentitySets.last == Set(standardWindows().map(\.identity)))
+    }
+
     @Test func terminationFocusRestoreKeepsActiveWorkspaceAndUsesMRU() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -339,6 +354,26 @@ struct VirtualSpaceEngineTests {
         #expect(control.focusedWindowIDs.count(where: { $0 == 1 }) == 1)
     }
 
+    @Test func switchSpaceDoesNotTreatCGFrontmostWindowAsAXFocused() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        await engine.markActivated(window: control.window(1)!)
+        _ = try await engine.switchSpace(to: 2, config: config)
+
+        // CG z-order can expose the intended target before AX focus moves.
+        // The switch must still perform and verify the exact focus mutation.
+        control.setFrontmostWindowID(1)
+        let focusAttemptsBefore = control.focusedWindowIDs.count
+
+        let outcome = try await engine.switchSpace(to: 1, config: config)
+
+        #expect(outcome.focusedWindowID == 1)
+        #expect(Array(control.focusedWindowIDs.dropFirst(focusAttemptsBefore)) == [1])
+        #expect(control.focusedWindowIdentity() == control.window(1)?.identity)
+    }
+
     @Test func switchSpaceKeepsUserChosenWindowWhenFocusLeavesTargetWorkspace() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -402,6 +437,7 @@ struct VirtualSpaceEngineTests {
         // keeps their persisted state truthful (rolled back to visible), but
         // the requested switch remains incomplete until quarantine takes over.
         control.failPositionWindowIDs = [1, 2]
+        control.failMinimizeWindowIDs = [1, 2]
 
         let outcome = try await engine.switchSpace(to: 2, config: config)
 
@@ -427,6 +463,7 @@ struct VirtualSpaceEngineTests {
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
         control.failPositionWindowIDs = [1]
+        control.failMinimizeWindowIDs = [1]
 
         let outcome = try await engine.switchSpace(to: 2, config: config)
 
@@ -485,6 +522,7 @@ struct VirtualSpaceEngineTests {
         // pinned window is not at.
         _ = try await engine.switchSpace(to: 2, config: config)
         control.pinnedFrameWindowIDs = [1: ResolvedFrame(x: 500, y: 500, width: 320, height: 252)]
+        control.failMinimizeWindowIDs = [1]
 
         // Each switch that plans window 1 stays unconverged until quarantine.
         let first = try await engine.switchSpace(to: 1, config: config)
@@ -514,6 +552,7 @@ struct VirtualSpaceEngineTests {
         try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
         _ = try await engine.switchSpace(to: 2, config: config)
         control.pinnedFrameWindowIDs = [1: ResolvedFrame(x: 500, y: 500, width: 320, height: 252)]
+        control.failMinimizeWindowIDs = [1]
 
         // Drive window 1 into quarantine (three unconverged switches that plan it).
         _ = try await engine.switchSpace(to: 1, config: config)
@@ -555,6 +594,7 @@ struct VirtualSpaceEngineTests {
         try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
         _ = try await engine.switchSpace(to: 2, config: config)
         control.pinnedFrameWindowIDs = [1: ResolvedFrame(x: 500, y: 500, width: 320, height: 252)]
+        control.failMinimizeWindowIDs = [1]
 
         // Drive window 1 into quarantine (three unconverged switches that plan it).
         _ = try await engine.switchSpace(to: 1, config: config)
@@ -587,6 +627,7 @@ struct VirtualSpaceEngineTests {
         try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
         _ = try await engine.switchSpace(to: 2, config: config)
         control.pinnedFrameWindowIDs = [1: ResolvedFrame(x: 500, y: 500, width: 320, height: 252)]
+        control.failMinimizeWindowIDs = [1]
         _ = try await engine.switchSpace(to: 1, config: config)
         _ = try await engine.switchSpace(to: 2, config: config)
         _ = try await engine.switchSpace(to: 1, config: config)
@@ -616,6 +657,7 @@ struct VirtualSpaceEngineTests {
         _ = try await engine.switchSpace(to: 2, config: config)
         let pinnedFrame = ResolvedFrame(x: 500, y: 500, width: 320, height: 252)
         control.pinnedFrameWindowIDs = [1: pinnedFrame]
+        control.failMinimizeWindowIDs = [1]
         _ = try await engine.switchSpace(to: 1, config: config)
         _ = try await engine.switchSpace(to: 2, config: config)
         _ = try await engine.switchSpace(to: 1, config: config)
@@ -642,6 +684,7 @@ struct VirtualSpaceEngineTests {
         try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
         _ = try await engine.switchSpace(to: 2, config: config)
         control.pinnedFrameWindowIDs = [1: ResolvedFrame(x: 500, y: 500, width: 320, height: 252)]
+        control.failMinimizeWindowIDs = [1]
 
         // Drive window 1 into quarantine (three unconverged switches that plan it).
         _ = try await engine.switchSpace(to: 1, config: config)
@@ -689,6 +732,44 @@ struct VirtualSpaceEngineTests {
                 isAXBacked: true
             ).frame
         )
+    }
+
+    @Test func managedMinimizeFallbackRoundTripsWithoutFrameDriftAndPreservesFocusPolicy() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        let originalFrame = try #require(control.window(1)?.frame)
+        control.failPositionWindowIDs = [1]
+        control.setFocusedWindowID(1)
+
+        let away = try await engine.switchSpace(
+            to: 2,
+            config: config,
+            focusPolicy: .preserve
+        )
+
+        #expect(away.converged)
+        #expect(control.window(1)?.minimized == true)
+        #expect(control.focusedWindowIDs.last == 3)
+        var entry = try #require((await engine.currentState).slots.first { $0.windowID == 1 })
+        #expect(entry.visibilityState == .hiddenMinimized)
+        #expect(entry.lastVisibleFrame == originalFrame)
+        #expect(entry.lastHiddenFrame == nil)
+
+        let back = try await engine.switchSpace(to: 1, config: config)
+        #expect(back.converged)
+        #expect(control.window(1)?.minimized == false)
+        #expect(control.window(1)?.frame == originalFrame)
+        entry = try #require((await engine.currentState).slots.first { $0.windowID == 1 })
+        #expect(entry.visibilityState == .visible)
+
+        let awayAgain = try await engine.switchSpace(to: 2, config: config)
+        #expect(awayAgain.converged)
+        #expect(control.window(1)?.minimized == true)
+        entry = try #require((await engine.currentState).slots.first { $0.windowID == 1 })
+        #expect(entry.visibilityState == .hiddenMinimized)
+        #expect(entry.lastVisibleFrame == originalFrame)
+        #expect(entry.lastHiddenFrame == nil)
     }
 
     @Test func switchBackPreservesManualResize() async throws {
@@ -767,8 +848,7 @@ struct VirtualSpaceEngineTests {
         #expect(hiddenCount == 1)
     }
 
-    // バグ2-b 回帰: 手動最小化されたウィンドウが show 時に復元される
-    @Test func minimizedWindowIsRestoredOnShow() async throws {
+    @Test func userMinimizedWindowRemainsMinimizedOnShow() async throws {
         var windows = standardWindows()
         windows[2] = TestFixtures.window(
             id: 3,
@@ -786,8 +866,7 @@ struct VirtualSpaceEngineTests {
 
         #expect(outcome.converged)
         let notes = control.window(3)!
-        #expect(notes.minimized == false)
-        #expect(!VisibilityPlanner.isHiddenWindowFrame(frame: notes.frame, displays: [TestFixtures.display]))
+        #expect(notes.minimized)
     }
 
     @Test func unresolvedSlotRecordsPending() async throws {
@@ -881,7 +960,7 @@ struct VirtualSpaceEngineTests {
         #expect(control.window(chatGPT.windowID)?.frame == originalFrame)
     }
 
-    @Test func ownWindowRequiresExplicitAssignmentAndStaysOnWorkspaceOne() async throws {
+    @Test func ownWindowCannotBeAssignedToVirtualWorkspace() async throws {
         let originalFrame = ResolvedFrame(x: 200, y: 100, width: 500, height: 700)
         let ownWindow = TestFixtures.window(
             id: 9,
@@ -901,34 +980,23 @@ struct VirtualSpaceEngineTests {
             $0.boundIdentity == ownWindow.identity
         })
 
-        let assigned = try await engine.windowWorkspace(
-            selector: WindowTargetSelector(
-                windowID: ownWindow.windowID,
-                pid: ownWindow.pid,
-                processStartTime: ownWindow.processStartTime,
-                bundleID: ownWindow.bundleID
-            ),
-            toSpaceID: 1,
-            config: config
-        )
+        await #expect(throws: VirtualSpaceEngineError.windowNotTracked) {
+            try await engine.windowWorkspace(
+                selector: WindowTargetSelector(
+                    windowID: ownWindow.windowID,
+                    pid: ownWindow.pid,
+                    processStartTime: ownWindow.processStartTime,
+                    bundleID: ownWindow.bundleID
+                ),
+                toSpaceID: 1,
+                config: config
+            )
+        }
 
-        #expect(assigned.didCreateTrackingEntry)
-        #expect(assigned.spaceID == 1)
-        #expect(VisibilityPlanner.isHiddenWindowFrame(
-            frame: try #require(control.window(ownWindow.windowID)).frame,
-            displays: [TestFixtures.display]
-        ))
-        #expect((await engine.currentState).slots.contains {
-            $0.boundIdentity == ownWindow.identity && $0.spaceID == 1
-        })
-
-        #expect(try await engine.switchSpace(to: 1, config: config).converged)
         #expect(control.window(ownWindow.windowID)?.frame == originalFrame)
-        #expect(try await engine.switchSpace(to: 2, config: config).converged)
-        #expect(VisibilityPlanner.isHiddenWindowFrame(
-            frame: try #require(control.window(ownWindow.windowID)).frame,
-            displays: [TestFixtures.display]
-        ))
+        #expect(!(await engine.currentState).slots.contains {
+            $0.boundIdentity == ownWindow.identity
+        })
     }
 
     @Test func visibilityPendingDoesNotBlockExplicitWorkspaceMove() async throws {
@@ -1096,6 +1164,35 @@ struct VirtualSpaceEngineTests {
         #expect(textEditEntries.first?.windowID == 21)
         #expect(textEditEntries.first?.spaceID == 1)
         #expect(textEditEntries.first?.lastActivatedAt != nil)
+    }
+
+    @Test func exactTrackedFocusEventUpdatesMRUWithoutGlobalInventory() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        _ = try await engine.switchSpace(to: 2, config: config)
+        let notes = try #require(control.window(3))
+        control.setFocusedWindowID(notes.windowID)
+        let fullInventoryCount = control.listAllWindowsCallCount
+        let targetedInventoryCount = control.targetedWindowInventoryCallCount
+
+        let outcome = try #require(await engine.processFocusEvent(
+            sequence: 1,
+            windowID: notes.windowID,
+            pid: notes.pid,
+            processStartTime: notes.processStartTime,
+            bundleID: notes.bundleID,
+            config: config
+        ))
+
+        #expect(outcome.identity == notes.identity)
+        #expect(outcome.spaceID == 2)
+        #expect(!outcome.didAdopt)
+        #expect(control.listAllWindowsCallCount == fullInventoryCount)
+        #expect(control.targetedWindowInventoryCallCount == targetedInventoryCount)
+        let state = await engine.currentState
+        #expect(state.slots.first { $0.boundIdentity == notes.identity }?.lastActivatedAt != nil)
     }
 
     @Test func modalFocusDoesNotRebindExistingLayoutEntry() async throws {
@@ -1966,6 +2063,7 @@ struct VirtualSpaceEngineTests {
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
         control.failPositionWindowIDs = [finder.windowID]
+        control.failMinimizeWindowIDs = [finder.windowID]
 
         await #expect(throws: VirtualSpaceEngineError.self) {
             _ = try await engine.windowWorkspace(
@@ -2008,6 +2106,7 @@ struct VirtualSpaceEngineTests {
             width: finder.frame.width,
             height: finder.frame.height
         )
+        control.failMinimizeWindowIDs = [finder.windowID]
 
         await #expect(throws: VirtualSpaceEngineError.self) {
             _ = try await engine.windowWorkspace(
@@ -2435,6 +2534,42 @@ struct VirtualSpaceEngineTests {
         })
     }
 
+    @Test func shutdownRecoversManagedMinimizeCrashWindowFromOffscreenWriteAhead() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        let textEdit = try #require(control.window(1))
+
+        var crashState = await engine.currentState
+        let entryIndex = try #require(crashState.slots.firstIndex {
+            $0.bundleID == textEdit.bundleID
+        })
+        crashState.slots[entryIndex] = crashState.slots[entryIndex].bound(to: textEdit)
+        crashState.slots[entryIndex].visibilityState = .hiddenOffscreen
+        crashState.slots[entryIndex].lastVisibleFrame = textEdit.frame
+        crashState.slots[entryIndex].lastHiddenFrame = ResolvedFrame(
+            x: -textEdit.frame.width + 1,
+            y: textEdit.frame.y,
+            width: textEdit.frame.width,
+            height: textEdit.frame.height
+        )
+        try await engine.replaceState(crashState)
+        #expect(control.setWindowMinimized(
+            windowID: textEdit.windowID,
+            pid: textEdit.pid,
+            processStartTime: textEdit.processStartTime,
+            bundleID: textEdit.bundleID,
+            minimized: true
+        ).isSuccess)
+
+        #expect(await engine.restoreAllForShutdown(config: config))
+        #expect(control.window(textEdit.windowID)?.minimized == false)
+        #expect(control.window(textEdit.windowID)?.frame == textEdit.frame)
+        #expect((await engine.currentState).slots.first {
+            $0.bundleID == textEdit.bundleID
+        }?.visibilityState == .visible)
+    }
+
     @Test func switchWriteAheadDoesNotClaimManuallyMinimizedWindowWasHidden() async throws {
         var windows = standardWindows()
         windows[1] = TestFixtures.window(
@@ -2484,7 +2619,7 @@ struct VirtualSpaceEngineTests {
         #expect(recoveryControl.window(2)?.minimized == true)
     }
 
-    @Test func showWriteAheadKeepsOriginallyVisibleMinimizedWindowVisible() async throws {
+    @Test func reconcileDoesNotWriteAheadOrRestoreUserMinimizedWindow() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
@@ -2498,8 +2633,6 @@ struct VirtualSpaceEngineTests {
             bundleID: notesBeforeMinimize.bundleID,
             minimized: true
         ).isSuccess)
-        let physicalStateBeforeMutation = control.currentWindows()
-
         var writeAheadState: RuntimeState?
         control.onFrameMutationAttempt = {
             guard writeAheadState == nil else { return }
@@ -2507,26 +2640,12 @@ struct VirtualSpaceEngineTests {
         }
         _ = try await engine.switchSpace(to: 2, config: config, reconcile: true)
 
-        let captured = try #require(writeAheadState)
-        let notes = try #require(captured.slots.first { $0.bundleID == "com.apple.Notes" })
+        #expect(writeAheadState == nil)
+        let notes = try #require((await engine.currentState).slots.first {
+            $0.bundleID == "com.apple.Notes"
+        })
         #expect(notes.visibilityState == .visible)
-
-        let (recoveryStore, recoveryURL) = TestFixtures.tempStateStore()
-        defer { try? FileManager.default.removeItem(at: recoveryURL.deletingLastPathComponent()) }
-        _ = try recoveryStore.saveStrict(state: captured)
-        let recoveryControl = MockWindowControl(
-            windows: physicalStateBeforeMutation,
-            displays: [TestFixtures.display]
-        )
-        let recoveryEngine = try VirtualSpaceEngine(
-            store: recoveryStore,
-            control: recoveryControl,
-            logger: TestFixtures.nullLogger(),
-            retryDelaysMS: [1]
-        )
-
-        #expect(await recoveryEngine.restoreAllForShutdown(config: config))
-        #expect(recoveryControl.window(3)?.minimized == true)
+        #expect(control.window(notesBeforeMinimize.windowID)?.minimized == true)
     }
 
     @Test func switchWriteAheadReplacesStalePendingTransactionMetadata() async throws {
@@ -2705,6 +2824,50 @@ struct VirtualSpaceEngineTests {
         #expect(finderEntries.count == 1)
         #expect(finderEntries.first?.id == adopted.id)
         #expect(finderEntries.first?.windowID == 9)
+    }
+
+    @Test func switchPrunesPreviouslyAdoptedShitsuraeWindowEvenWhenAXInvisible() async throws {
+        let ownWindow = TestFixtures.window(
+            id: 9,
+            bundleID: "com.yuki-yano.shitsurae",
+            pid: 90,
+            title: "Shitsurae",
+            isAXBacked: false,
+            frontIndex: 3
+        )
+        let (engine, control, url) = makeEngine(windows: standardWindows() + [ownWindow])
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        var seeded = await engine.currentState
+        seeded.slots.append(
+            SlotEntry(
+                layoutName: "work",
+                spaceID: 1,
+                slot: 0,
+                origin: .adopted,
+                definitionFingerprint: "adopted\u{0}com.yuki-yano.shitsurae\u{0}9",
+                bundleID: ownWindow.bundleID,
+                pid: ownWindow.pid,
+                processStartTime: ownWindow.processStartTime,
+                windowID: ownWindow.windowID,
+                lastKnownTitle: ownWindow.title,
+                displayID: TestFixtures.display.id,
+                lastVisibleFrame: ownWindow.frame,
+                visibilityState: .visible
+            )
+        )
+        try await engine.replaceState(seeded)
+
+        let outcome = try await engine.switchSpace(to: 2, config: config)
+
+        let state = await engine.currentState
+        #expect(!state.slots.contains {
+            WindowEligibility.isShitsuraeApplication(bundleID: $0.bundleID)
+        })
+        #expect(!control.frameMutationAttemptWindowIDs.contains(ownWindow.windowID))
+        #expect(outcome.converged)
+        #expect(!state.recoveryRequired)
     }
 
     @Test func focusSlotNeverBindsCGOnlySurface() async throws {

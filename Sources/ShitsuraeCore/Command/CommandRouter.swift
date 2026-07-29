@@ -5,11 +5,13 @@ import Foundation
 public struct CommandRequest: Codable, Sendable {
     public var command: String
     public var layout: String?
+    public var monitor: String?
     public var layouts: [String]?
     public var spaceID: Int?
     public var dryRun: Bool?
     public var stateOnly: Bool?
     public var reconcile: Bool?
+    public var focus: SpaceSwitchFocusPolicy?
     public var forceClearPending: Bool?
     public var windowID: UInt32?
     public var pid: Int?
@@ -197,6 +199,12 @@ public final class CommandRouter: Sendable {
 
         case "spaceSwitch":
             let spaceID = try require(request.spaceID, "spaceID")
+            if request.layout != nil, request.monitor != nil {
+                throw ShitsuraeError(
+                    .validationError,
+                    "--layout and --monitor are mutually exclusive"
+                )
+            }
             let config = try configManager.config()
             let outcome: SpaceSwitchOutcome
             if let layoutName = request.layout {
@@ -204,13 +212,23 @@ public final class CommandRouter: Sendable {
                     layoutName: layoutName,
                     to: spaceID,
                     config: config,
-                    reconcile: request.reconcile ?? false
+                    reconcile: request.reconcile ?? false,
+                    focusPolicy: request.focus ?? .target
+                )
+            } else if let monitor = request.monitor {
+                outcome = try await engine.switchSpace(
+                    monitor: monitor,
+                    to: spaceID,
+                    config: config,
+                    reconcile: request.reconcile ?? false,
+                    focusPolicy: request.focus ?? .target
                 )
             } else {
                 outcome = try await engine.switchSpace(
                     to: spaceID,
                     config: config,
-                    reconcile: request.reconcile ?? false
+                    reconcile: request.reconcile ?? false,
+                    focusPolicy: request.focus ?? .target
                 )
             }
             let result = SpaceSwitchJSON(requestID: UUID().uuidString.lowercased(), outcome: outcome)
@@ -372,7 +390,7 @@ public final class CommandRouter: Sendable {
             state: DiagnosticsJSON.StateSummary(
                 activeWorkspaces: workspaces,
                 slotCount: state.slots.count,
-                hiddenCount: state.slots.filter { $0.visibilityState == .hiddenOffscreen }.count,
+                hiddenCount: state.slots.filter(\.visibilityState.isManagedHidden).count,
                 recoveryRequired: state.recoveryRequired,
                 pendingUnresolvedSlots: state.pendingVisibilityConvergences.flatMap(\.unresolvedSlots),
                 configGeneration: state.configGeneration,
@@ -436,6 +454,12 @@ public final class CommandRouter: Sendable {
             )
         case .hostDisplayUnavailable:
             return ShitsuraeError(.validationError, "host display is unavailable", subcode: "hostDisplayUnavailable")
+        case let .monitorNotFound(alias):
+            return ShitsuraeError(
+                .validationError,
+                "undefined monitor alias: \(alias)",
+                subcode: "monitorNotFound"
+            )
         case .windowNotTracked:
             return ShitsuraeError(.targetWindowNotFound, "target window not found or not tracked")
         case .ambiguousWindow:

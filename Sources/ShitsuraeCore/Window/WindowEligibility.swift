@@ -25,6 +25,14 @@ public enum WindowEligibility {
     }
 
     public static func classification(of window: WindowSnapshot) -> Classification {
+        // Shitsurae's own settings and overlay windows are control surfaces,
+        // never user workspace content. Bundle identity is authoritative even
+        // when AppKit has already detached the AX window but CG still retains
+        // its surface.
+        if isShitsuraeApplication(bundleID: window.bundleID) {
+            return .companion
+        }
+
         guard window.isAXBacked else {
             return .unknown
         }

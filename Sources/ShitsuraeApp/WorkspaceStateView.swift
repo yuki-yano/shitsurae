@@ -82,7 +82,7 @@ struct WorkspaceStateSection: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Workspace State")
                     .font(.title2.bold())
-                Text("Read-only view of virtual workspace membership and live windows")
+                Text("Read-only snapshot of virtual workspace membership and live windows")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -398,6 +398,8 @@ private struct WorkspaceTrackedWindowRow: View {
             WorkspaceStatePill(label: "Tracked visible", systemImage: "eye", tint: .secondary)
         case .hiddenOffscreen:
             WorkspaceStatePill(label: "Tracked offscreen", systemImage: "rectangle.dashed", tint: .secondary)
+        case .hiddenMinimized:
+            WorkspaceStatePill(label: "Tracked minimized", systemImage: "minus.square", tint: .secondary)
         }
     }
 

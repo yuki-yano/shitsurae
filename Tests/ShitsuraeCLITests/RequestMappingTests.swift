@@ -59,7 +59,9 @@ struct RequestMappingTests {
         let currentRequest = CLIRequestBuilder.spaceQuery(command: "spaceCurrent", layout: nil)
         let switchRequest = CLIRequestBuilder.spaceSwitch(
             spaceID: 7,
-            layout: "calendar",
+            layout: nil,
+            monitor: "research",
+            focus: .preserve,
             reconcile: true
         )
         let recoverRequest = CLIRequestBuilder.spaceRecover()
@@ -70,7 +72,9 @@ struct RequestMappingTests {
         #expect(currentRequest.layout == nil)
         #expect(switchRequest.command == "spaceSwitch")
         #expect(switchRequest.spaceID == 7)
-        #expect(switchRequest.layout == "calendar")
+        #expect(switchRequest.layout == nil)
+        #expect(switchRequest.monitor == "research")
+        #expect(switchRequest.focus == .preserve)
         #expect(switchRequest.reconcile == true)
         #expect(recoverRequest.command == "spaceRecover")
         #expect(recoverRequest.forceClearPending == true)
@@ -86,6 +90,17 @@ struct RequestMappingTests {
         #expect(switchCommand.layout == "calendar")
         #expect(switchCommand.spaceID == 2)
         #expect(switchCommand.reconcile)
+    }
+
+    @Test func spaceSwitchParsesMonitorAndFocusPolicy() throws {
+        let command = try Space.Switch.parse([
+            "2",
+            "--monitor", "research",
+            "--focus", "preserve",
+        ])
+
+        #expect(command.monitor == "research")
+        #expect(command.focus == "preserve")
     }
 
     @Test(arguments: [

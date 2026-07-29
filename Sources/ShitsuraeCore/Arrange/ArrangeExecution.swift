@@ -171,9 +171,7 @@ public extension VirtualSpaceEngine {
            replacedLayoutName != layoutName
         {
             let previousEntries = currentState.slots(layoutName: replacedLayoutName)
-            let previousHiddenEntries = previousEntries.filter {
-                $0.visibilityState == .hiddenOffscreen
-            }
+            let previousHiddenEntries = previousEntries.filter(\.visibilityState.isManagedHidden)
             guard restoreHiddenEntriesBeforeArrange(
                 previousHiddenEntries,
                 registryEntries: previousEntries.map(\.registryEntry),
@@ -504,7 +502,7 @@ public extension VirtualSpaceEngine {
 
         let hiddenEntries = currentState.slots(layoutName: layoutName)
             .filter {
-                $0.visibilityState == .hiddenOffscreen
+                $0.visibilityState.isManagedHidden
                     && $0.origin == .layout
                     && (arrangedFingerprints.contains($0.definitionFingerprint)
                         || !configuredFingerprints.contains($0.definitionFingerprint))

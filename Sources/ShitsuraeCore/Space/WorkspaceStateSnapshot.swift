@@ -86,12 +86,16 @@ public struct WorkspaceTrackedWindowState: Equatable, Sendable, Identifiable {
 
     public var id: String { entryID }
 
-    /// Only off-screen parking is owned by Shitsurae. A user-minimized or
-    /// application-hidden window is therefore informative, not a mismatch.
+    /// Shitsurae owns off-screen parking and managed minimization. A
+    /// user-minimized visible entry or application-hidden window is only
+    /// informative and is not treated as a mismatch.
     public var hasVisibilityMismatch: Bool {
         guard let actualVisibility = liveWindow?.actualVisibility else { return false }
         return switch (trackedVisibility, actualVisibility) {
-        case (.hiddenOffscreen, .visible), (.visible, .hiddenOffscreen):
+        case (.hiddenOffscreen, .visible),
+             (.hiddenMinimized, .visible),
+             (.hiddenMinimized, .hiddenOffscreen),
+             (.visible, .hiddenOffscreen):
             true
         default:
             false
@@ -140,21 +144,60 @@ public struct WorkspaceStateSnapshot: Equatable, Sendable {
         workspaces.reduce(0) { count, workspace in
             count + workspace.windows.count(where: { window in
                 window.liveWindow?.actualVisibility == .hiddenOffscreen
+                    || (
+                        window.trackedVisibility == .hiddenMinimized
+                            && window.liveWindow?.actualVisibility == .minimized
+                    )
             })
         }
     }
 }
 
 public extension VirtualSpaceEngine {
+    func workspaceStateRevision() -> UInt64 {
+        currentState.revision
+    }
+
     /// A read-only projection for GUI status surfaces. Runtime membership and
     /// one coherent live observation are joined through the same global
     /// assignment used by workspace switches, without mutating bindings or
     /// adopting untracked windows.
     func workspaceStateSnapshot(config: LoadedConfig?) -> WorkspaceStateSnapshot {
-        let state = currentState
         let observation = control.focusedWindowObservation()
-        let inventory = observation.inventory
         let displays = control.displays()
+        return makeWorkspaceStateSnapshot(
+            config: config,
+            observation: observation,
+            displays: displays
+        )
+    }
+
+    /// Joins a live observation captured outside the engine actor only when
+    /// no mutation has committed since capture started. GUI polling can then
+    /// perform slow AX work without blocking latency-critical commands.
+    func workspaceStateSnapshot(
+        config: LoadedConfig?,
+        observation: WindowObservation,
+        displays: [DisplayInfo],
+        expectedRevision: UInt64
+    ) -> WorkspaceStateSnapshot? {
+        guard currentState.revision == expectedRevision else {
+            return nil
+        }
+        return makeWorkspaceStateSnapshot(
+            config: config,
+            observation: observation,
+            displays: displays
+        )
+    }
+
+    private func makeWorkspaceStateSnapshot(
+        config: LoadedConfig?,
+        observation: WindowObservation,
+        displays: [DisplayInfo]
+    ) -> WorkspaceStateSnapshot {
+        let state = currentState
+        let inventory = observation.inventory
         let blockedIdentities = WindowEligibility.geometryBlockedIdentities(in: observation)
         var seenLayoutNames = Set<String>()
         let layoutNames = state.activeWorkspaces.compactMap { workspace in
@@ -203,7 +246,11 @@ public extension VirtualSpaceEngine {
                     }
                     let previewFrame: ResolvedFrame?
                     let previewFrameSource: WorkspaceWindowPreviewFrameSource?
-                    if let liveWindow, liveWindow.actualVisibility != .hiddenOffscreen {
+                    if let liveWindow,
+                       liveWindow.actualVisibility != .hiddenOffscreen,
+                       !(entry.visibilityState == .hiddenMinimized
+                           && liveWindow.actualVisibility == .minimized)
+                    {
                         previewFrame = liveWindow.frame
                         previewFrameSource = .liveFrame
                     } else if let lastVisibleFrame = entry.lastVisibleFrame {

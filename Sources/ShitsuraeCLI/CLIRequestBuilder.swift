@@ -38,10 +38,18 @@ enum CLIRequestBuilder {
         return request
     }
 
-    static func spaceSwitch(spaceID: Int, layout: String?, reconcile: Bool) -> CommandRequest {
+    static func spaceSwitch(
+        spaceID: Int,
+        layout: String?,
+        monitor: String? = nil,
+        focus: SpaceSwitchFocusPolicy = .target,
+        reconcile: Bool
+    ) -> CommandRequest {
         var request = CommandRequest(command: "spaceSwitch")
         request.spaceID = spaceID
         request.layout = layout
+        request.monitor = monitor
+        request.focus = focus
         request.reconcile = reconcile ? true : nil
         return request
     }

@@ -137,6 +137,12 @@ struct FrontmostApplicationTracker {
     }
 }
 
+private struct WorkspaceLiveCapture: Sendable {
+    let expectedRevision: UInt64
+    let observation: WindowObservation
+    let displays: [DisplayInfo]
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     let logger = ShitsuraeLogger()
@@ -189,12 +195,15 @@ final class AppModel: ObservableObject {
     private let interactiveActivationGrace: TimeInterval = 0.18
     private static let activationFocusRetryDelayNanoseconds: UInt64 = 40_000_000
     private static let terminationFollowFocusDelayNanoseconds: UInt64 = 100_000_000
+    private var focusEventTask: Task<Void, Never>?
     private var frontmostApplicationTracker = FrontmostApplicationTracker()
 
     private var observers: [NSObjectProtocol] = []
     private var shutdownInProgress = false
     private var shutdownCompletions: [() -> Void] = []
     private var workspaceStateRefreshSequence: UInt64 = 0
+    private var workspaceStateCaptureTask: Task<WorkspaceLiveCapture, Never>?
+    private var workspaceStateCaptureGeneration: UInt64 = 0
 
     init() {
         let focusEventGate = FocusEventGate()
@@ -425,7 +434,6 @@ final class AppModel: ObservableObject {
                 selectedSpaceID = activeSpaceID
             }
             diagnostics = await router.diagnostics()
-            await refreshWorkspaceState()
         }
     }
 
@@ -433,123 +441,68 @@ final class AppModel: ObservableObject {
         workspaceStateRefreshSequence &+= 1
         let sequence = workspaceStateRefreshSequence
         let config = configManager.configIfLoaded()
-        let snapshot = await engine.workspaceStateSnapshot(config: config)
-        guard sequence == workspaceStateRefreshSequence else { return }
-        if workspaceState != snapshot {
-            workspaceState = snapshot
+        for _ in 0..<2 {
+            let liveCapture = await captureWorkspaceLiveState()
+            guard sequence == workspaceStateRefreshSequence else { return }
+            guard let snapshot = await engine.workspaceStateSnapshot(
+                config: config,
+                observation: liveCapture.observation,
+                displays: liveCapture.displays,
+                expectedRevision: liveCapture.expectedRevision
+            ) else {
+                // A space/window action committed during capture. Retry once
+                // from the new revision so an explicit Refresh is not silently
+                // discarded; a continuously mutating state keeps the current UI.
+                continue
+            }
+            guard sequence == workspaceStateRefreshSequence else { return }
+            if workspaceState != snapshot {
+                workspaceState = snapshot
+            }
+            return
         }
     }
 
-    /// Keeps live window flags current only while the read-only status screen
-    /// is mounted. SwiftUI cancels this task when the user navigates away.
-    func monitorWorkspaceState() async {
-        while !Task.isCancelled {
-            await refreshWorkspaceState()
-            do {
-                try await Task.sleep(nanoseconds: 2_000_000_000)
-            } catch {
-                return
+    private func captureWorkspaceLiveState() async -> WorkspaceLiveCapture {
+        let captureTask: Task<WorkspaceLiveCapture, Never>
+        let captureGeneration: UInt64
+        if let existing = workspaceStateCaptureTask {
+            captureTask = existing
+            captureGeneration = workspaceStateCaptureGeneration
+        } else {
+            let engine = engine
+            let created = Task.detached(priority: .utility) {
+                let expectedRevision = await engine.workspaceStateRevision()
+                let control = LiveWindowControl()
+                return WorkspaceLiveCapture(
+                    expectedRevision: expectedRevision,
+                    observation: control.focusedWindowObservation(),
+                    displays: control.displays()
+                )
             }
+            workspaceStateCaptureGeneration &+= 1
+            workspaceStateCaptureTask = created
+            captureTask = created
+            captureGeneration = workspaceStateCaptureGeneration
         }
+        let liveCapture = await captureTask.value
+        if workspaceStateCaptureGeneration == captureGeneration {
+            workspaceStateCaptureTask = nil
+        }
+        return liveCapture
+    }
+
+    /// Captures one coherent snapshot when the read-only status screen is
+    /// mounted. Recurring AX inventory can contend with interactive space and
+    /// switcher commands, so later updates are explicitly user-triggered.
+    func monitorWorkspaceState() async {
+        await refreshWorkspaceState()
     }
 
     // MARK: - Actions
 
     func applyLayout(_ name: String, spaceID: Int?) {
-        applyLayout(name, spaceID: spaceID, shitsuraeWindow: nil)
-    }
-
-    func applyLayoutFromMainWindow(_ name: String, spaceID: Int?) {
-        let label = "arrange \(name)"
-        guard let shitsuraeWindow = shitsuraeMainWindowSelector() else {
-            let message = "Shitsurae main window is unavailable"
-            lastActionMessage = "\(label): \(message)"
-            actionStatus = .failed(label, message)
-            return
-        }
-        applyLayout(name, spaceID: spaceID, shitsuraeWindow: shitsuraeWindow)
-    }
-
-    func applyLayoutsFromMainWindow(_ names: [String]) {
-        let label = "arrange \(names.joined(separator: ", "))"
-        guard names.count >= 2 else {
-            let message = "select at least two display layouts"
-            lastActionMessage = "\(label): \(message)"
-            actionStatus = .failed(label, message)
-            return
-        }
-        guard let shitsuraeWindow = shitsuraeMainWindowSelector() else {
-            let message = "Shitsurae main window is unavailable"
-            lastActionMessage = "\(label): \(message)"
-            actionStatus = .failed(label, message)
-            return
-        }
-
-        let currentDisplays = displays
-        let primaryDisplayID = currentDisplays.first(where: \.isPrimary)?.id
-        let loadedConfig = configManager.configIfLoaded()?.config
-        let includesPrimaryLayout = names.contains { name in
-            guard let layout = loadedConfig?.layouts[name] else { return false }
-            return DisplayResolver.hostDisplay(
-                layout: layout,
-                config: loadedConfig,
-                displays: currentDisplays
-            )?.id == primaryDisplayID
-        }
-
-        runEngineAction(label, urgency: .interactive) { engine, config in
-            if includesPrimaryLayout {
-                let primaryLayoutName = names.first { name in
-                    guard let layout = config.config.layouts[name] else { return false }
-                    return DisplayResolver.hostDisplay(
-                        layout: layout,
-                        config: config.config,
-                        displays: currentDisplays
-                    )?.isPrimary == true
-                }
-                if let primaryLayoutName,
-                   let layout = config.config.layouts[primaryLayoutName],
-                   !layout.spaces.contains(where: { $0.spaceID == 1 })
-                {
-                    throw VirtualSpaceEngineError.spaceNotFound(
-                        layoutName: primaryLayoutName,
-                        spaceID: 1
-                    )
-                }
-            }
-
-            let result = try await engine.arrange(layoutNames: names, config: config)
-            if result.layouts.contains(where: { $0.result == "failed" }) {
-                let failed = result.layouts
-                    .filter { $0.result == "failed" }
-                    .map(\.layout)
-                    .joined(separator: ", ")
-                throw VirtualSpaceEngineError.stateError(
-                    "arrange failed for: \(failed)"
-                )
-            }
-            if includesPrimaryLayout {
-                _ = try await engine.windowWorkspace(
-                    selector: shitsuraeWindow,
-                    toSpaceID: 1,
-                    config: config
-                )
-            }
-        }
-    }
-
-    private func applyLayout(
-        _ name: String,
-        spaceID: Int?,
-        shitsuraeWindow: WindowTargetSelector?
-    ) {
         runEngineAction("arrange \(name)", urgency: .interactive) { engine, config in
-            if shitsuraeWindow != nil,
-               let layout = config.config.layouts[name],
-               !layout.spaces.contains(where: { $0.spaceID == 1 })
-            {
-                throw VirtualSpaceEngineError.spaceNotFound(layoutName: name, spaceID: 1)
-            }
             let result = try await engine.arrange(layoutName: name, spaceID: spaceID, config: config)
             if result.result == "failed" {
                 let detail = result.hardErrors.map(\.message).joined(separator: "; ")
@@ -560,66 +513,98 @@ final class AppModel: ObservableObject {
                     message.isEmpty ? "arrange failed" : message
                 )
             }
-            if let shitsuraeWindow {
-                _ = try await engine.windowWorkspace(
-                    selector: shitsuraeWindow,
-                    toSpaceID: 1,
-                    config: config
+        }
+    }
+
+    func applyLayoutFromMainWindow(_ name: String, spaceID: Int?) {
+        applyLayout(name, spaceID: spaceID)
+    }
+
+    func applyLayoutsFromMainWindow(_ names: [String]) {
+        let label = "arrange \(names.joined(separator: ", "))"
+        guard names.count >= 2 else {
+            let message = "select at least two display layouts"
+            lastActionMessage = "\(label): \(message)"
+            actionStatus = .failed(label, message)
+            return
+        }
+
+        runEngineAction(label, urgency: .interactive) { engine, config in
+            let result = try await engine.arrange(layoutNames: names, config: config)
+            if result.layouts.contains(where: { $0.result == "failed" }) {
+                let failed = result.layouts
+                    .filter { $0.result == "failed" }
+                    .map(\.layout)
+                    .joined(separator: ", ")
+                throw VirtualSpaceEngineError.stateError(
+                    "arrange failed for: \(failed)"
                 )
             }
         }
     }
 
-    private func shitsuraeMainWindowSelector() -> WindowTargetSelector? {
-        let candidates = [NSApp.keyWindow, NSApp.mainWindow] + NSApp.windows.map(Optional.some)
-        guard let window = candidates.compactMap({ $0 }).first(where: {
-            $0.title == "Shitsurae" && $0.level == .normal && $0.windowNumber > 0
-        }), let bundleID = Bundle.main.bundleIdentifier
-        else {
-            return nil
-        }
-        let pid = Int(ProcessInfo.processInfo.processIdentifier)
-        guard let processStartTime = ProcessGenerationResolver.startTime(pid: pid) else {
-            return nil
-        }
-        return WindowTargetSelector(
-            windowID: UInt32(window.windowNumber),
-            pid: pid,
-            processStartTime: processStartTime,
-            bundleID: bundleID
+    func switchSpace(to spaceID: Int) {
+        performSpaceSwitch(layoutName: nil, to: spaceID, focusPolicy: .target)
+    }
+
+    func switchSpace(
+        layoutName: String,
+        to spaceID: Int,
+        focusPolicy: SpaceSwitchFocusPolicy = .target
+    ) {
+        performSpaceSwitch(
+            layoutName: layoutName,
+            to: spaceID,
+            focusPolicy: focusPolicy
         )
     }
 
-    func switchSpace(to spaceID: Int) {
-        performSpaceSwitch(layoutName: nil, to: spaceID)
-    }
-
-    func switchSpace(layoutName: String, to spaceID: Int) {
-        performSpaceSwitch(layoutName: layoutName, to: spaceID)
-    }
-
-    private func performSpaceSwitch(layoutName: String?, to spaceID: Int) {
+    private func performSpaceSwitch(
+        layoutName: String?,
+        to spaceID: Int,
+        focusPolicy: SpaceSwitchFocusPolicy
+    ) {
         // Mark before the switch: the engine focuses the target window
         // mid-switch and the OS activation notification must not re-trigger
         // follow-focus.
         markInteractiveActivation()
         let label = layoutName.map { "switch \($0) to space \(spaceID)" }
             ?? "switch to space \(spaceID)"
+        let primaryDisplayID = displays.first(where: \.isPrimary)?.id
+        let targetDisplayID = layoutName.flatMap { name in
+            configManager.configIfLoaded()?.config.layouts[name].flatMap { layout in
+                DisplayResolver.hostDisplay(
+                    layout: layout,
+                    config: configManager.configIfLoaded()?.config,
+                    displays: displays
+                )?.id
+            }
+        } ?? primaryDisplayID
+        let targetsPrimaryWorkspace = targetDisplayID == primaryDisplayID
         runEngineAction(label, urgency: .interactive) { [weak self] engine, config in
             let outcome: SpaceSwitchOutcome
             if let layoutName {
                 outcome = try await engine.switchSpace(
                     layoutName: layoutName,
                     to: spaceID,
-                    config: config
+                    config: config,
+                    focusPolicy: focusPolicy
                 )
             } else {
-                outcome = try await engine.switchSpace(to: spaceID, config: config)
+                outcome = try await engine.switchSpace(
+                    to: spaceID,
+                    config: config,
+                    focusPolicy: focusPolicy
+                )
             }
             await MainActor.run {
                 self?.markInteractiveActivation()
+                guard targetsPrimaryWorkspace else { return }
                 self?.lastActiveSpaceChangeAt = Date()
-                self?.frontmostWindowBelongsToActiveWorkspace = outcome.focusedWindowID != nil || !outcome.didChangeSpace
+                if focusPolicy == .target || outcome.focusedWindowBelongsToTargetWorkspace {
+                    self?.frontmostWindowBelongsToActiveWorkspace =
+                        outcome.focusedWindowID != nil || !outcome.didChangeSpace
+                }
             }
             if let message = SpaceSwitchCompletion.incompleteMessage(
                 converged: outcome.converged,
@@ -726,6 +711,8 @@ final class AppModel: ObservableObject {
     }
 
     func markInteractiveActivation() {
+        focusEventTask?.cancel()
+        focusEventTask = nil
         lastInteractiveActivationAt = Date()
         let sequence = AXWindowEventMonitor.nextSequence()
         focusEventCoordinator.invalidate(with: sequence)
@@ -743,26 +730,38 @@ final class AppModel: ObservableObject {
 
     func handleFastPathSwitchFinished(label: String, result: HotkeyFastPathExecutionResult) {
         switch result {
-        case let .success(outcome):
+        case let .success(routed):
             markInteractiveActivation()
             lastActionMessage = "\(label): ok"
             actionStatus = .success(label)
-            lastActiveSpaceChangeAt = Date()
-            frontmostWindowBelongsToActiveWorkspace = outcome.focusedWindowID != nil || !outcome.didChangeSpace
+            updatePrimarySwitchTracking(routed)
             refreshStatus()
 
-        case let .partial(outcome, message):
+        case let .partial(routed, message):
             markInteractiveActivation()
             lastActionMessage = "\(label): \(message)"
             actionStatus = .failed(label, message)
-            lastActiveSpaceChangeAt = Date()
-            frontmostWindowBelongsToActiveWorkspace = outcome.focusedWindowID != nil || !outcome.didChangeSpace
+            updatePrimarySwitchTracking(routed)
             refreshStatus()
 
         case let .failure(message):
             lastActionMessage = "\(label): \(message)"
             actionStatus = .failed(label, message)
+            NSSound.beep()
             refreshStatus()
+        }
+    }
+
+    private func updatePrimarySwitchTracking(_ routed: RoutedSpaceSwitchOutcome) {
+        guard displays.first(where: \.isPrimary)?.id == routed.target.displayID else {
+            return
+        }
+        lastActiveSpaceChangeAt = Date()
+        if routed.target.focus == .target {
+            frontmostWindowBelongsToActiveWorkspace =
+                routed.outcome.focusedWindowID != nil || !routed.outcome.didChangeSpace
+        } else if routed.outcome.focusedWindowBelongsToTargetWorkspace {
+            frontmostWindowBelongsToActiveWorkspace = true
         }
     }
 
@@ -1032,7 +1031,9 @@ final class AppModel: ObservableObject {
         let followFocusEnabled = config.config.resolvedFollowFocus
         let engine = engine
 
-        Task { [weak self] in
+        focusEventTask?.cancel()
+        focusEventTask = Task { [weak self] in
+            guard !Task.isCancelled else { return }
             // One engine call = one live snapshot: target resolution, the
             // global assignment, MRU/binding updates and adoption all happen
             // inside processFocusEvent. Nothing below re-runs them.
@@ -1051,6 +1052,7 @@ final class AppModel: ObservableObject {
                 return
             }
 
+            guard !Task.isCancelled else { return }
             guard self?.focusEventCoordinator.isCurrent(sequence) == true else { return }
 
             let decision = await MainActor.run { [weak self] in
@@ -1082,7 +1084,14 @@ final class AppModel: ObservableObject {
                 // before publishing that the current one terminated. Briefly
                 // coalesce cross-workspace focus so the termination handler
                 // can replace it with an in-workspace MRU target.
-                try? await Task.sleep(nanoseconds: Self.terminationFollowFocusDelayNanoseconds)
+                do {
+                    try await Task.sleep(
+                        nanoseconds: Self.terminationFollowFocusDelayNanoseconds
+                    )
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
                 guard self?.focusEventCoordinator.isCurrent(sequence) == true else { return }
                 guard let ownerLayoutName = outcome.layoutName else { return }
                 let switchOutcome = try? await engine.switchSpaceForFocusEvent(

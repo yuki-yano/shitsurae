@@ -8,6 +8,7 @@ public struct SpaceSwitchOutcome: Equatable, Sendable {
     public let shownCount: Int
     public let hiddenCount: Int
     public let focusedWindowID: UInt32?
+    public let focusedWindowBelongsToTargetWorkspace: Bool
     public let unresolvedSlots: [PendingUnresolvedSlot]
     public let converged: Bool
 }
@@ -27,6 +28,7 @@ public enum VirtualSpaceEngineError: Error, Equatable, Sendable {
     case workspaceNotActive(String)
     case invalidArrangeBatch(String)
     case hostDisplayUnavailable
+    case monitorNotFound(String)
     case windowNotTracked
     case ambiguousWindow
     case stateError(String)
@@ -347,7 +349,8 @@ public actor VirtualSpaceEngine {
         to targetSpaceID: Int,
         config: LoadedConfig,
         reconcile: Bool = false,
-        adoptionIgnoreRules: IgnoreRuleSet? = nil
+        adoptionIgnoreRules: IgnoreRuleSet? = nil,
+        focusPolicy: SpaceSwitchFocusPolicy = .target
     ) throws -> SpaceSwitchOutcome {
         guard let workspace = primaryWorkspace() else {
             throw VirtualSpaceEngineError.noActiveLayout
@@ -357,8 +360,69 @@ public actor VirtualSpaceEngine {
             to: targetSpaceID,
             config: config,
             reconcile: reconcile,
-            adoptionIgnoreRules: adoptionIgnoreRules
+            adoptionIgnoreRules: adoptionIgnoreRules,
+            focusPolicy: focusPolicy
         )
+    }
+
+    @discardableResult
+    public func switchSpace(
+        monitor: String,
+        to targetSpaceID: Int,
+        config: LoadedConfig,
+        reconcile: Bool = false,
+        focusPolicy: SpaceSwitchFocusPolicy = .target
+    ) throws -> SpaceSwitchOutcome {
+        guard config.config.monitors?[monitor] != nil else {
+            throw VirtualSpaceEngineError.monitorNotFound(monitor)
+        }
+        let displays = control.displays()
+        guard let display = DisplayResolver.display(
+            for: monitor,
+            config: config.config,
+            displays: displays
+        ) else {
+            throw VirtualSpaceEngineError.hostDisplayUnavailable
+        }
+        guard let workspace = state.activeWorkspace(displayID: display.id) else {
+            throw VirtualSpaceEngineError.stateError(
+                "no active workspace on monitor \(monitor)"
+            )
+        }
+        return try switchSpace(
+            layoutName: workspace.layoutName,
+            to: targetSpaceID,
+            config: config,
+            reconcile: reconcile,
+            focusPolicy: focusPolicy
+        )
+    }
+
+    @discardableResult
+    public func routeAndSwitchSpace(
+        candidates: [ResolvedSpaceSwitchShortcut],
+        cursorLocation: CGPoint,
+        config: LoadedConfig
+    ) throws -> RoutedSpaceSwitchOutcome {
+        let displays = control.displays()
+        switch SpaceShortcutRouter.route(
+            candidates: candidates,
+            cursorLocation: cursorLocation,
+            config: config.config,
+            displays: displays,
+            activeWorkspaces: state.activeWorkspaces
+        ) {
+        case let .execute(target):
+            let outcome = try switchSpace(
+                layoutName: target.layoutName,
+                to: target.spaceID,
+                config: config,
+                focusPolicy: target.focus
+            )
+            return RoutedSpaceSwitchOutcome(target: target, outcome: outcome)
+        case let .failure(message):
+            throw VirtualSpaceEngineError.stateError(message)
+        }
     }
 
     /// Core switch, scoped to one layout's workspace. Only this layout's
@@ -371,7 +435,8 @@ public actor VirtualSpaceEngine {
         config: LoadedConfig,
         reconcile: Bool = false,
         adoptionIgnoreRules: IgnoreRuleSet? = nil,
-        shouldFocusTarget: Bool = true
+        shouldFocusTarget: Bool = true,
+        focusPolicy: SpaceSwitchFocusPolicy = .target
     ) throws -> SpaceSwitchOutcome {
         try ensureAccessibility()
         guard let layout = config.config.layouts[layoutName] else {
@@ -407,6 +472,7 @@ public actor VirtualSpaceEngine {
                 shownCount: 0,
                 hiddenCount: 0,
                 focusedWindowID: nil,
+                focusedWindowBelongsToTargetWorkspace: false,
                 unresolvedSlots: [],
                 converged: true
             )
@@ -617,6 +683,7 @@ public actor VirtualSpaceEngine {
         let focusCandidates = plan.focusCandidates.filter {
             !unresolvedVisibilityIdentities.contains($0.window.identity)
         }
+        let targetIdentities = Set(focusCandidates.map(\.window.identity))
 
         // Geometry retries can make AppKit activate a sibling application. Do
         // not focus before those mutations settle: an early focus followed by
@@ -625,21 +692,56 @@ public actor VirtualSpaceEngine {
         // window to a non-target window while the switch was running, preserve
         // that newer choice instead of taking focus back from the user.
         var focusedIdentity: WindowIdentity?
-        if shouldFocusTarget, !focusedMainIsBlocked, !focusCandidates.isEmpty {
+        if shouldFocusTarget,
+           focusPolicy == .target,
+           !focusedMainIsBlocked,
+           !focusCandidates.isEmpty
+        {
             let intendedTopIdentity = focusCandidates[0].window.identity
-            let liveFocus = control.focusedWindowObservation().focusedIdentity
-            let targetIdentities = Set(focusCandidates.map(\.window.identity))
-            let focusMovedOutsideTarget = liveFocus.map { identity in
+            // CG can conservatively report a non-focused layer-0 surface as
+            // frontmost. A false positive only preserves the user's apparent
+            // newer choice; exact target success is still verified through AX.
+            let liveFrontmost = control.frontmostWindowIdentity()
+            let focusMovedOutsideTarget = liveFrontmost.map { identity in
                 identity != focusBeforeVisibilityMutation && !targetIdentities.contains(identity)
             } ?? false
 
-            if liveFocus == intendedTopIdentity {
+            if liveFrontmost == intendedTopIdentity,
+               control.focusedWindowIdentity() == intendedTopIdentity
+            {
                 focusedIdentity = intendedTopIdentity
             } else if !focusMovedOutsideTarget {
                 focusedIdentity = focusTarget(
                     from: focusCandidates,
                     retryPreferredTransientFailure: true
                 )
+            }
+        } else if shouldFocusTarget,
+                  focusPolicy == .preserve,
+                  let focusBeforeVisibilityMutation
+        {
+            let initialWillHide = plan.hides.contains {
+                $0.window.identity == focusBeforeVisibilityMutation
+            }
+            if initialWillHide, !focusedMainIsBlocked, !focusCandidates.isEmpty {
+                focusedIdentity = focusTarget(
+                    from: focusCandidates,
+                    retryPreferredTransientFailure: true
+                )
+            } else if let originalWindow = allWindows.first(where: {
+                $0.identity == focusBeforeVisibilityMutation
+            }) {
+                let liveFocused = control.focusedWindowIdentity()
+                let mutatedIdentities = Set(allVisibilityPlans.map(\.window.identity))
+                let mutatedBundleIDs = Set(allVisibilityPlans.map(\.window.bundleID))
+                let focusLooksStolen = liveFocused != focusBeforeVisibilityMutation
+                    && (
+                        liveFocused.map(mutatedIdentities.contains) == true
+                            || liveFocused.map { mutatedBundleIDs.contains($0.bundleID) } == true
+                    )
+                if focusLooksStolen, restoreFocus(to: originalWindow) {
+                    focusedIdentity = originalWindow.identity
+                }
             }
         }
 
@@ -729,10 +831,10 @@ public actor VirtualSpaceEngine {
             suspendedCompanionMainSpaces.removeValue(forKey: identity)
         }
 
-        // Record intended, reported, and actual focus together with the same
-        // convergence value returned to callers. This distinguishes a focus
-        // steal from a partial visibility plan without misleading the GUI.
-        let diagnosticActualFocused = control.focusedWindow()
+        // `focusedIdentity` is set only after exact AX verification. Do not
+        // issue another diagnostic AX query here: on a focus-preserving path
+        // it can cold-connect to an unrelated process and delay the switch.
+        let diagnosticActualFocused = focusedIdentity
         let converged = !requiresRecovery
         logger.log(
             event: "space.switch",
@@ -762,6 +864,7 @@ public actor VirtualSpaceEngine {
             shownCount: plan.shows.count,
             hiddenCount: plan.hides.count,
             focusedWindowID: focusedIdentity?.windowID,
+            focusedWindowBelongsToTargetWorkspace: focusedIdentity.map(targetIdentities.contains) ?? false,
             unresolvedSlots: plan.unresolvedSlots,
             converged: converged
         )
@@ -837,7 +940,7 @@ public actor VirtualSpaceEngine {
             }
         }
 
-        let actual = control.focusedWindow()
+        let actual = control.focusedWindowIdentity()
 
         logger.log(
             level: "warn",
@@ -854,14 +957,40 @@ public actor VirtualSpaceEngine {
         return false
     }
 
+    private func restoreFocus(to window: WindowSnapshot) -> Bool {
+        let first = control.focusWindow(
+            windowID: window.windowID,
+            pid: window.pid,
+            processStartTime: window.processStartTime,
+            bundleID: window.bundleID
+        )
+        if first.isSuccess, waitForFocusedWindow(identity: window.identity) {
+            return true
+        }
+        guard control.activateApplication(
+            pid: window.pid,
+            processStartTime: window.processStartTime,
+            bundleID: window.bundleID
+        ) else {
+            return false
+        }
+        let retry = control.focusWindow(
+            windowID: window.windowID,
+            pid: window.pid,
+            processStartTime: window.processStartTime,
+            bundleID: window.bundleID
+        )
+        return retry.isSuccess && waitForFocusedWindow(identity: window.identity)
+    }
+
     func waitForFocusedWindow(identity: WindowIdentity) -> Bool {
-        if control.focusedWindowObservation().focusedIdentity == identity {
+        if control.focusedWindowIdentity() == identity {
             return true
         }
 
         for delayMS in Self.focusVerificationDelaysMS {
             control.sleep(milliseconds: delayMS)
-            if control.focusedWindowObservation().focusedIdentity == identity {
+            if control.focusedWindowIdentity() == identity {
                 return true
             }
         }
@@ -1162,7 +1291,7 @@ public actor VirtualSpaceEngine {
         })
         let replacedLayoutName = state.activeWorkspace(displayID: hostDisplay.id)?.layoutName
         let hiddenEntriesThatWouldLoseRecovery = state.slots.filter { entry in
-            guard entry.visibilityState == .hiddenOffscreen else { return false }
+            guard entry.visibilityState.isManagedHidden else { return false }
             if let replacedLayoutName,
                replacedLayoutName != layoutName,
                entry.layoutName == replacedLayoutName
@@ -1290,11 +1419,11 @@ public actor VirtualSpaceEngine {
         let layoutName = workspace.layoutName
         guard let layout = config.config.layouts[layoutName] else {
             return state.slots(layoutName: layoutName)
-                .allSatisfy { $0.visibilityState != .hiddenOffscreen }
+                .allSatisfy { !$0.visibilityState.isManagedHidden }
         }
 
         let hiddenEntries = state.slots(layoutName: layoutName)
-            .filter { $0.visibilityState == .hiddenOffscreen }
+            .filter { $0.visibilityState.isManagedHidden }
         guard !hiddenEntries.isEmpty else {
             return state.pendingVisibilityConvergence(displayID: workspace.displayID) == nil
                 && !state.liveArrangeRecoveryRequired
@@ -1607,6 +1736,9 @@ public actor VirtualSpaceEngine {
         }
 
         return Set(adoptedEntries.compactMap { entry in
+            if WindowEligibility.isShitsuraeApplication(bundleID: entry.bundleID) {
+                return entry.id
+            }
             guard let identity = entry.boundIdentity,
                   let window = windows.first(where: { $0.identity == identity })
             else {
@@ -1668,18 +1800,21 @@ public actor VirtualSpaceEngine {
     }
 
     /// A write-ahead entry must be safe on both sides of the physical AX
-    /// mutation. Preserve `hiddenOffscreen` when either side is hidden: this
-    /// makes a hidden→visible crash recoverable and records visible→hidden
-    /// before parking. When both sides are visible, keep it visible so a
-    /// pre-mutation crash cannot make shutdown unminimize a manually minimized
-    /// window that Shitsurae never hid. The final persist records the exact
-    /// converged state.
+    /// mutation. Preserve the original managed-hidden state during restore;
+    /// otherwise record the planned hidden state before mutation. A rejected
+    /// parking write is therefore persisted as `hiddenOffscreen` until the
+    /// post-mutation save can truthfully commit `hiddenMinimized`. When both
+    /// sides are visible, keep it visible so a pre-mutation crash cannot make
+    /// shutdown unminimize a window that Shitsurae never hid.
     private static func writeAheadEntry(for plan: VisibilityPlan) -> SlotEntry {
         var entry = plan.desiredEntry
-        entry.visibilityState = plan.originalEntry.visibilityState == .hiddenOffscreen
-            || plan.desiredEntry.visibilityState == .hiddenOffscreen
-            ? .hiddenOffscreen
-            : .visible
+        if plan.originalEntry.visibilityState.isManagedHidden {
+            entry.visibilityState = plan.originalEntry.visibilityState
+        } else if plan.desiredEntry.visibilityState.isManagedHidden {
+            entry.visibilityState = plan.desiredEntry.visibilityState
+        } else {
+            entry.visibilityState = .visible
+        }
         if entry.lastVisibleFrame == nil {
             entry.lastVisibleFrame = plan.originalEntry.lastVisibleFrame ?? plan.window.frame
         }

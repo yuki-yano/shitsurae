@@ -25,7 +25,13 @@ struct ConfigValidatorTests {
     }
 
     private func makeConfig(layouts: [String: LayoutDefinition]) -> ShitsuraeConfig {
-        ShitsuraeConfig(layouts: layouts)
+        ShitsuraeConfig(
+            monitors: MonitorsDefinition([
+                "main": MonitorTargetDefinition(primary: true),
+                "calendar": MonitorTargetDefinition(id: "uuid-sub"),
+            ]),
+            layouts: layouts
+        )
     }
 
     @Test func acceptsValidLayout() {
@@ -148,7 +154,7 @@ struct ConfigValidatorTests {
     @Test func rejectsMonitorAndIDTogetherInLayoutDisplay() {
         let config = makeConfig(layouts: [
             "work": LayoutDefinition(
-                display: DisplayDefinition(monitor: .primary, id: "uuid-x"),
+                display: DisplayDefinition(monitor: "main", id: "uuid-x"),
                 spaces: [
                     SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
                 ]
@@ -179,7 +185,7 @@ struct ConfigValidatorTests {
                 SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
             ]),
             "calendar": LayoutDefinition(
-                display: DisplayDefinition(monitor: .secondary),
+                display: DisplayDefinition(monitor: "calendar"),
                 spaces: [
                     SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
                 ]
@@ -201,7 +207,7 @@ struct ConfigValidatorTests {
                 SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
             ]),
             "focus": LayoutDefinition(
-                display: DisplayDefinition(monitor: .primary),
+                display: DisplayDefinition(monitor: "main"),
                 spaces: [
                     SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
                 ]
@@ -217,13 +223,13 @@ struct ConfigValidatorTests {
         // so a monitor: primary layout and an undeclared layout can be active
         // simultaneously and must be validated as a normal pair.
         let config = ShitsuraeConfig(
-            monitors: MonitorsDefinition(primary: MonitorTargetDefinition(id: "uuid-x")),
+            monitors: MonitorsDefinition(["main": MonitorTargetDefinition(id: "uuid-x")]),
             layouts: [
                 "work": LayoutDefinition(spaces: [
                     SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
                 ]),
                 "focus": LayoutDefinition(
-                    display: DisplayDefinition(monitor: .primary),
+                    display: DisplayDefinition(monitor: "main"),
                     spaces: [
                         SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
                     ]
@@ -271,5 +277,86 @@ struct ConfigValidatorTests {
         let config = makeConfig(layouts: [:])
         let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
         #expect(errors.contains { $0.message.contains("at least one layout is required") })
+    }
+
+    @Test func rejectsUndefinedMonitorAlias() {
+        let config = makeConfig(layouts: [
+            "research": LayoutDefinition(
+                display: DisplayDefinition(monitor: "missing"),
+                spaces: [SpaceDefinition(spaceID: 1, windows: [])]
+            ),
+        ])
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.contains { $0.message.contains("undefined monitor alias missing") })
+    }
+
+    @Test func rejectsMonitorWithoutExactlyOneSelector() {
+        let config = ShitsuraeConfig(
+            monitors: MonitorsDefinition([
+                "research": MonitorTargetDefinition(id: "uuid-research", primary: true),
+            ]),
+            layouts: [
+                "work": LayoutDefinition(spaces: [SpaceDefinition(spaceID: 1, windows: [])]),
+            ]
+        )
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.contains { $0.message.contains("exactly one selector") })
+    }
+
+    @Test func rejectsDuplicateSpaceShortcutChordOnSameMonitor() {
+        let config = ShitsuraeConfig(
+            monitors: MonitorsDefinition([
+                "research": MonitorTargetDefinition(id: "uuid-research"),
+            ]),
+            layouts: [
+                "research": LayoutDefinition(
+                    display: DisplayDefinition(monitor: "research"),
+                    spaces: [
+                        SpaceDefinition(spaceID: 1, windows: []),
+                        SpaceDefinition(spaceID: 2, windows: []),
+                    ]
+                ),
+            ],
+            shortcuts: ShortcutsDefinition(switchVirtualSpace: [
+                SwitchVirtualSpaceShortcut(
+                    key: "x",
+                    modifiers: ["ctrl"],
+                    spaceID: 1,
+                    monitor: "research"
+                ),
+                SwitchVirtualSpaceShortcut(
+                    key: "x",
+                    modifiers: ["ctrl"],
+                    spaceID: 2,
+                    monitor: "research"
+                ),
+            ])
+        )
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.contains { $0.message.contains("same monitor and key chord") })
+    }
+
+    @Test func rejectsPrimaryAliasChordThatDuplicatesDefaultShortcut() {
+        let config = ShitsuraeConfig(
+            monitors: MonitorsDefinition([
+                "main": MonitorTargetDefinition(primary: true),
+            ]),
+            layouts: [
+                "work": LayoutDefinition(spaces: [
+                    SpaceDefinition(spaceID: 1, windows: []),
+                    SpaceDefinition(spaceID: 2, windows: []),
+                ]),
+            ],
+            shortcuts: ShortcutsDefinition(switchVirtualSpace: [
+                SwitchVirtualSpaceShortcut(
+                    key: "2",
+                    modifiers: ["ctrl"],
+                    spaceID: 1,
+                    monitor: "main"
+                ),
+            ])
+        )
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.contains { $0.message.contains("same monitor and key chord") })
     }
 }

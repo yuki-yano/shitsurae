@@ -341,15 +341,29 @@ struct Space: ParsableCommand {
         @Option(name: .customLong("layout"), help: "Switch this active layout instead of the primary workspace")
         var layout: String?
 
+        @Option(name: .customLong("monitor"), help: "Switch the active workspace on this monitor alias")
+        var monitor: String?
+
+        @Option(name: .customLong("focus"), help: "Focus policy: target or preserve")
+        var focus = "target"
+
         @Flag(name: .customLong("reconcile"), help: "Force visibility reconciliation")
         var reconcile = false
 
         @OptionGroup var jsonFlag: JSONFlag
 
         func run() throws {
+            guard layout == nil || monitor == nil else {
+                throw ValidationError("--layout and --monitor are mutually exclusive")
+            }
+            guard let focusPolicy = SpaceSwitchFocusPolicy(rawValue: focus.lowercased()) else {
+                throw ValidationError("--focus must be target or preserve")
+            }
             let request = CLIRequestBuilder.spaceSwitch(
                 spaceID: spaceID,
                 layout: layout,
+                monitor: monitor,
+                focus: focusPolicy,
                 reconcile: reconcile
             )
             executeRemote(request, json: jsonFlag.json)

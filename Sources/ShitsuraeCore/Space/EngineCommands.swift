@@ -85,6 +85,9 @@ public extension VirtualSpaceEngine {
         bundleID: String,
         config: LoadedConfig
     ) -> FocusEventOutcome? {
+        guard !WindowEligibility.isShitsuraeApplication(bundleID: bundleID) else {
+            return nil
+        }
         guard focusEventGate.accept(sequence) else { return nil }
         guard sequence > latestFocusEventSequence else { return nil }
         latestFocusEventSequence = sequence
@@ -94,7 +97,50 @@ public extension VirtualSpaceEngine {
             windowID: windowID,
             bundleID: bundleID
         )
+
+        // The common case is a focus notification for an exact window already
+        // owned by one workspace. Validate the OS focus and on-screen state
+        // directly, then update only that entry's MRU. A global CG+AX census is
+        // reserved for untracked windows, rebinding, and companion projection.
+        if control.focusedWindowIdentity() == identity,
+           control.onScreenWindowIdentities().contains(identity),
+           focusEventGate.isCurrent(sequence),
+           !Task.isCancelled,
+           suspendedCompanionMainSpaces[identity] == nil
+        {
+            let exactEntries = currentState.slots.filter {
+                $0.boundIdentity == identity
+            }
+            if exactEntries.count == 1, let entry = exactEntries.first {
+                var newState = currentState
+                newState.slots = newState.slots.map { candidate in
+                    guard candidate.id == entry.id else { return candidate }
+                    var updated = candidate
+                    updated.lastActivatedAt = Date.rfc3339UTC()
+                    return updated
+                }
+                try? replaceState(newState)
+                let ownerWorkspace = currentState.activeWorkspace(
+                    layoutName: entry.layoutName
+                )
+                return FocusEventOutcome(
+                    sequence: sequence,
+                    identity: identity,
+                    layoutName: entry.layoutName,
+                    spaceID: entry.spaceID,
+                    activeSpaceID: ownerWorkspace?.spaceID,
+                    didAdopt: false
+                )
+            }
+        }
+
+        guard focusEventGate.isCurrent(sequence), !Task.isCancelled else {
+            return nil
+        }
         let observation = control.focusedWindowObservation()
+        guard focusEventGate.isCurrent(sequence), !Task.isCancelled else {
+            return nil
+        }
         guard observation.focusedIdentity == identity else { return nil }
         guard let focusedWindow = observation.inventory.windows.first(where: {
             $0.identity == identity
@@ -222,8 +268,11 @@ public extension VirtualSpaceEngine {
         else {
             return nil
         }
-        let observation = control.focusedWindowObservation()
-        guard observation.focusedIdentity == identity else { return nil }
+        guard control.focusedWindowIdentity() == identity,
+              focusEventGate.isCurrent(sequence)
+        else {
+            return nil
+        }
         guard let layout = config.config.layouts[layoutName],
               DisplayResolver.hostDisplay(
                   layout: layout,
@@ -1177,9 +1226,10 @@ public extension VirtualSpaceEngine {
 
         return entries.compactMap { entry -> BoundWindow? in
             guard let window = assignments[entry.id] else { return nil }
-            guard !window.minimized, !window.hidden else { return nil }
+            guard !window.hidden else { return nil }
+            guard !window.minimized || entry.visibilityState == .hiddenMinimized else { return nil }
             guard onScreenIdentities.contains(window.identity)
-                || entry.visibilityState == .hiddenOffscreen
+                || entry.visibilityState.isManagedHidden
             else {
                 return nil
             }

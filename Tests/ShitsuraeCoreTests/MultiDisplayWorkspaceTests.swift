@@ -13,7 +13,7 @@ struct MultiDisplayWorkspaceTests {
     }
 
     private func calendarLayout(
-        display: DisplayDefinition = DisplayDefinition(monitor: .secondary),
+        display: DisplayDefinition = DisplayDefinition(monitor: "calendar"),
         match: WindowMatchRule = WindowMatchRule(bundleID: calendarBundleID)
     ) -> LayoutDefinition {
         LayoutDefinition(
@@ -28,7 +28,7 @@ struct MultiDisplayWorkspaceTests {
 
     private func twoSpaceCalendarLayout() -> LayoutDefinition {
         LayoutDefinition(
-            display: DisplayDefinition(monitor: .secondary),
+            display: DisplayDefinition(monitor: "calendar"),
             spaces: [
                 SpaceDefinition(spaceID: 1, windows: [
                     WindowDefinition(
@@ -89,7 +89,12 @@ struct MultiDisplayWorkspaceTests {
     @Test func displayResolverFallbackTable() {
         let primary = TestFixtures.display
         let secondary = TestFixtures.secondaryDisplay()
-        let config = ShitsuraeConfig(layouts: [:])
+        let config = ShitsuraeConfig(
+            monitors: MonitorsDefinition([
+                "calendar": MonitorTargetDefinition(id: secondary.id),
+            ]),
+            layouts: [:]
+        )
 
         func resolve(_ display: DisplayDefinition?, displays: [DisplayInfo]) -> String? {
             DisplayResolver.hostDisplay(
@@ -103,11 +108,11 @@ struct MultiDisplayWorkspaceTests {
         #expect(resolve(nil, displays: [primary, secondary]) == primary.id)
         #expect(resolve(DisplayDefinition(), displays: [primary, secondary]) == primary.id)
         // Declared and resolvable: the declared display.
-        #expect(resolve(DisplayDefinition(monitor: .secondary), displays: [primary, secondary]) == secondary.id)
+        #expect(resolve(DisplayDefinition(monitor: "calendar"), displays: [primary, secondary]) == secondary.id)
         #expect(resolve(DisplayDefinition(id: secondary.id), displays: [primary, secondary]) == secondary.id)
         #expect(resolve(DisplayDefinition(width: 2560, height: 1440), displays: [primary, secondary]) == secondary.id)
         // Declared but absent: nil, never a silent primary fallback.
-        #expect(resolve(DisplayDefinition(monitor: .secondary), displays: [primary]) == nil)
+        #expect(resolve(DisplayDefinition(monitor: "calendar"), displays: [primary]) == nil)
         #expect(resolve(DisplayDefinition(id: secondary.id), displays: [primary]) == nil)
         #expect(resolve(DisplayDefinition(width: 2560, height: 1440), displays: [primary]) == nil)
     }
@@ -247,6 +252,106 @@ struct MultiDisplayWorkspaceTests {
                 displays: control.displays()
             )
         )
+    }
+
+    @Test func preserveFocusRestoresOutsideWorkspaceFocusAfterVisibilitySteal() async throws {
+        let config = TestFixtures.loadedConfig(layouts: [
+            "work": TestFixtures.twoSpaceLayout(),
+            "calendar": twoSpaceCalendarLayout(),
+        ])
+        let (engine, control, url) = makeEngine(windows: primaryWindows() + [calendarWindow()])
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        try await engine.bootstrapState(layoutName: "calendar", activeSpaceID: 1, config: config)
+        control.setFocusedWindowID(1)
+        control.stealFocusOnPositionAttempt = 5
+
+        _ = try await engine.switchSpace(
+            layoutName: "calendar",
+            to: 2,
+            config: config,
+            focusPolicy: .preserve
+        )
+
+        #expect(control.focusedWindowIdentity()?.windowID == 1)
+        #expect(control.focusedWindowIDs.last == 1)
+    }
+
+    @Test func preserveFocusMovesToTargetWhenOriginalFocusMustBeHidden() async throws {
+        let second = TestFixtures.window(
+            id: 6,
+            bundleID: "com.example.Research",
+            isAXBacked: true,
+            frontIndex: 4,
+            displayID: "uuid-sub"
+        )
+        let layout = LayoutDefinition(
+            display: DisplayDefinition(monitor: "calendar"),
+            spaces: [
+                SpaceDefinition(spaceID: 1, windows: [
+                    WindowDefinition(
+                        match: WindowMatchRule(bundleID: Self.calendarBundleID),
+                        slot: 1,
+                        launch: false,
+                        frame: fullFrame()
+                    ),
+                ]),
+                SpaceDefinition(spaceID: 2, windows: [
+                    WindowDefinition(
+                        match: WindowMatchRule(bundleID: "com.example.Research"),
+                        slot: 1,
+                        launch: false,
+                        frame: fullFrame()
+                    ),
+                ]),
+            ]
+        )
+        let config = TestFixtures.loadedConfig(layouts: [
+            "work": TestFixtures.twoSpaceLayout(),
+            "calendar": layout,
+        ])
+        let (engine, control, url) = makeEngine(
+            windows: primaryWindows() + [calendarWindow(), second]
+        )
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        try await engine.bootstrapState(layoutName: "calendar", activeSpaceID: 1, config: config)
+        control.setFocusedWindowID(5)
+
+        _ = try await engine.switchSpace(
+            layoutName: "calendar",
+            to: 2,
+            config: config,
+            focusPolicy: .preserve
+        )
+
+        #expect(control.focusedWindowIdentity()?.windowID == 6)
+    }
+
+    @Test func preserveFocusDoesNotRestoreWhenPostMutationFocusIsUnknown() async throws {
+        let config = TestFixtures.loadedConfig(layouts: [
+            "work": TestFixtures.twoSpaceLayout(),
+            "calendar": twoSpaceCalendarLayout(),
+        ])
+        let (engine, control, url) = makeEngine(windows: primaryWindows() + [calendarWindow()])
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        try await engine.bootstrapState(layoutName: "calendar", activeSpaceID: 1, config: config)
+        control.setFocusedWindowID(1)
+        control.stealFocusOnPositionAttempt = 999
+
+        _ = try await engine.switchSpace(
+            layoutName: "calendar",
+            to: 2,
+            config: config,
+            focusPolicy: .preserve
+        )
+
+        #expect(control.focusedWindowIdentity() == nil)
+        #expect(control.focusedWindowIDs == [1, 999])
     }
 
     @Test func layoutScopedQueriesAndSwitchTargetOnlyRequestedWorkspace() async throws {
@@ -712,56 +817,21 @@ struct MultiDisplayWorkspaceTests {
         #expect(state.activeWorkspace(displayID: "uuid-main")?.layoutName == "work")
     }
 
-    @Test func reconnectRestorePriorityIsDeterministic() async throws {
-        // Two dormant workspaces re-resolve to the same reconnected display:
-        // the id declaration beats the monitor role, deterministically.
+    @Test func ambiguousResolutionAliasNeverSelectsArbitraryDisplay() {
         let subA = TestFixtures.secondaryDisplay(id: "uuid-subA")
         let subB = TestFixtures.secondaryDisplay(id: "uuid-subB")
-        let config = TestFixtures.loadedConfig(layouts: [
-            "work": TestFixtures.twoSpaceLayout(),
-            "calRole": calendarLayout(display: DisplayDefinition(monitor: .secondary)),
-            "calPinned": LayoutDefinition(
-                display: DisplayDefinition(id: "uuid-subB"),
-                spaces: [
-                    SpaceDefinition(spaceID: 1, windows: [
-                        WindowDefinition(
-                            match: WindowMatchRule(bundleID: "com.example.Pinned"),
-                            slot: 1,
-                            launch: false,
-                            frame: fullFrame()
-                        ),
-                    ]),
-                ]
-            ),
-        ])
-        let pinnedWindow = TestFixtures.window(
-            id: 7,
-            bundleID: "com.example.Pinned",
-            isAXBacked: true,
-            frontIndex: 5,
-            displayID: "uuid-subB"
+        let config = ShitsuraeConfig(
+            monitors: MonitorsDefinition([
+                "calendar": MonitorTargetDefinition(width: 2560, height: 1440),
+            ]),
+            layouts: [:]
         )
-        let (engine, control, url) = makeEngine(
-            windows: primaryWindows() + [calendarWindow(displayID: "uuid-subA"), pinnedWindow],
+        let resolved = DisplayResolver.display(
+            for: "calendar",
+            config: config,
             displays: [TestFixtures.display, subA, subB]
         )
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-
-        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
-        try await engine.bootstrapState(layoutName: "calRole", activeSpaceID: 1, config: config)
-        try await engine.bootstrapState(layoutName: "calPinned", activeSpaceID: 1, config: config)
-
-        control.setDisplays([TestFixtures.display])
-        await engine.handleDisplayConfigurationChange(config: config)
-
-        // Only subB reconnects; both dormant declarations resolve to it.
-        control.setDisplays([TestFixtures.display, subB])
-        await engine.handleDisplayConfigurationChange(config: config)
-
-        let state = await engine.currentState
-        #expect(state.activeWorkspace(displayID: "uuid-subB")?.layoutName == "calPinned")
-        // The role-declared workspace stays dormant on its old record.
-        #expect(state.activeWorkspace(layoutName: "calRole")?.displayID == "uuid-subA")
+        #expect(resolved == nil)
     }
 
     // MARK: - Shutdown restore

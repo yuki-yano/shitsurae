@@ -5,8 +5,7 @@ import Foundation
 ///
 /// Resolution order:
 /// 1. explicit `display.id`
-/// 2. `display.monitor` role, mapped through the `monitors` config section
-///    when present (e.g. monitors.primary.id pins the role to a display UUID)
+/// 2. `display.monitor` alias, mapped through the `monitors` config section
 /// 3. resolution (width/height) condition
 /// 4. no declaration only: the primary display
 ///
@@ -51,8 +50,8 @@ public enum DisplayResolver {
             return displays.first(where: { $0.id == id })
         }
 
-        if let role = definition.monitor {
-            if let display = display(for: role, config: config, displays: displays) {
+        if let alias = definition.monitor {
+            if let display = display(for: alias, config: config, displays: displays) {
                 if definition.width != nil || definition.height != nil {
                     return matchesResolution(display, definition: definition) ? display : nil
                 }
@@ -62,37 +61,54 @@ public enum DisplayResolver {
         }
 
         if definition.width != nil || definition.height != nil {
-            return displays.first(where: { matchesResolution($0, definition: definition) })
+            let matches = displays.filter { matchesResolution($0, definition: definition) }
+            return matches.count == 1 ? matches[0] : nil
         }
 
         return nil
     }
 
     public static func display(
-        for role: MonitorRole,
+        for alias: String,
         config: ShitsuraeConfig?,
         displays: [DisplayInfo]
     ) -> DisplayInfo? {
-        let target: MonitorTargetDefinition?
-        switch role {
-        case .primary:
-            target = config?.monitors?.primary
-        case .secondary:
-            target = config?.monitors?.secondary
+        guard let target = config?.monitors?[alias] else {
+            return nil
         }
+        return resolve(target: target, displays: displays)
+    }
 
-        if let id = target?.id {
+    public static func resolve(
+        target: MonitorTargetDefinition,
+        displays: [DisplayInfo]
+    ) -> DisplayInfo? {
+        if let id = target.id {
             return displays.first(where: { $0.id == id })
         }
-
-        switch role {
-        case .primary:
+        if target.primary == true {
             return primaryDisplay(displays)
-        case .secondary:
-            return displays
-                .filter { !$0.isPrimary }
-                .sorted { $0.id < $1.id }
-                .first
+        }
+        if target.width != nil || target.height != nil {
+            let matches = displays.filter {
+                matchesResolution(
+                    $0,
+                    width: target.width,
+                    height: target.height
+                )
+            }
+            return matches.count == 1 ? matches[0] : nil
+        }
+        return nil
+    }
+
+    public static func alias(
+        for displayID: String,
+        config: ShitsuraeConfig?,
+        displays: [DisplayInfo]
+    ) -> String? {
+        config?.monitors?.targets.keys.sorted().first { alias in
+            display(for: alias, config: config, displays: displays)?.id == displayID
         }
     }
 
@@ -105,6 +121,20 @@ public enum DisplayResolver {
             return false
         }
         if let height = definition.height, display.height != height {
+            return false
+        }
+        return true
+    }
+
+    private static func matchesResolution(
+        _ display: DisplayInfo,
+        width: Int?,
+        height: Int?
+    ) -> Bool {
+        if let width, display.width != width {
+            return false
+        }
+        if let height, display.height != height {
             return false
         }
         return true
