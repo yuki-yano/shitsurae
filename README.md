@@ -1,200 +1,43 @@
 <p align="center">
-  <img src="Shitsurae/AssetSources/icon.png" alt="Shitsurae" width="256" />
+  <img src="Shitsurae/AssetSources/icon.png" alt="Shitsurae" width="192" />
 </p>
 
 # Shitsurae
 
 [日本語](README.ja.md)
 
-**Shitsurae** is a macOS window manager built around its own virtual desktops (virtual workspaces).
+**Shitsurae** is a macOS window manager that lets you define task-specific window arrangements in YAML and recall them from the keyboard, GUI, or CLI.
 
-The name comes from *shitsurai* (室礼) — the Japanese tradition of arranging a room's furnishings to suit the season and the occasion, making the space both beautiful and functional. Shitsurae brings that aesthetic to your digital workspace.
+It provides its own virtual workspaces, so you can switch between coding, research, communication, and other working contexts without creating more Mission Control desktops.
 
-> [!NOTE]
-> v1.1 drops Mission Control / native macOS Spaces integration entirely in favor of self-managed virtual workspaces. See [Migrating from v1](#migrating-from-v1).
+Its name comes from *shitsurai* (室礼), the Japanese practice of arranging a space for its purpose.
 
-## Problems it solves
+<p align="center">
+  <img src="https://github.com/yuki-yano/shitsurae/releases/download/app-v1.2.1/shitsurae-arrange.png" alt="The Shitsurae Arrange screen managing multiple displays and virtual workspaces" width="960" />
+</p>
 
-- Rearranging windows by hand every morning
-- Layouts breaking when an external display connects or disconnects
-- Hunting for the right window in a crowded `Cmd+Tab`
-- Repeating the same layout work for each activity (coding, review, meetings)
-- Slow Mission Control desktop-switch animations
+## What you can do
 
-Define your ideal arrangement in YAML and apply it with one command:
-
-```bash
-shitsurae arrange work
-```
-
-## How it works
-
-Shitsurae never touches native macOS Spaces (Mission Control). Every virtual workspace lives on a single desktop: switching workspaces moves the target windows on-screen and parks the rest 1px outside the display edge. If an app such as Chromium rejects offscreen placement, Shitsurae minimizes only that managed window and restores it on return; this may briefly show the system minimize animation or a Dock item.
-
-- Workspace switch normally uses instant coordinate moves; managed-minimize fallback follows the system animation setting
-- Independent of Mission Control and native desktop settings
-- Dialogs, sheets, and other transient companion windows stay on-screen during a switch; their main window is temporarily protected from geometry changes and returns to its assigned workspace after the dialog closes
-
-## Features
-
-### 1. One-shot layout application (`arrange`)
-
-Define layouts in YAML and run `shitsurae arrange <name>`:
-
-- Auto-launches apps that aren't running (`launch: true`)
-- Places windows at the configured position/size
-- Records virtual workspace assignments and parks windows of inactive workspaces
-- Sets the initial focus afterwards
-- `--state-only` updates the runtime state without touching windows
-
-Flexible units for position/size: `%` (screen ratio), `pt` (points), `px` (physical pixels), `r` (0.0–1.0 ratio).
-
-### 2. Keyboard-first control
-
-| Action | Default | Description |
-|--------|---------|-------------|
-| Focus slot | `Cmd+1` – `Cmd+9` | Jump straight to a numbered window |
-| Switch workspace | `Ctrl+1` – `Ctrl+9` | Switch the active virtual workspace |
-| Move window to workspace | `Alt+1` – `Alt+9` | Send the current window to a workspace |
-| Next window | `Cmd+Ctrl+J` | Cycle forward within the active workspace |
-| Previous window | `Cmd+Ctrl+K` | Cycle backward within the active workspace |
-| Switcher | `Cmd+Tab` | Open the built-in window switcher |
-| Snap | configurable | Preset placements (left half, maximize, …) |
-
-Every shortcut is configurable in YAML, including per-app disabling (e.g. keep Discord's own `Cmd+1` working).
-
-### 3. Built-in window switcher
-
-- Windows in MRU order — the previous window sits second, so one `Cmd+Tab` flips back (like Alt+Tab on Windows)
-- MRU tracking hooks `NSWorkspace.didActivateApplicationNotification`, so Dock clicks and direct clicks update the order too
-- Quick keys (`1`, `2`, `3`, …) for one-keystroke selection
-- Releasing the modifiers always commits the selection
-- Selecting a window of another workspace switches there automatically
-- The overlay appears on the display containing the pointer and lists only windows from that display
-- Trigger, accept/cancel keys and the quick-key string are configurable
-
-`Cmd+Ctrl+J/K` cycles windows on the display containing the pointer in a different, stable order: slotted windows first, then the rest. Set `shortcuts.cycle.mode: overlay` for an overlay UI on that display.
-
-### 4. Window snapping
-
-`leftHalf` / `rightHalf` / `topHalf` / `bottomHalf` / `leftThird` / `centerThird` / `rightThird` / `maximize` / `center`, bindable to any global shortcut.
-
-### 5. Follow-focus
-
-With `mode.followFocus` (default on), focusing any managed window — Dock click, direct click, `Cmd+Tab` — automatically switches to its virtual workspace.
-
-### 6. Menu bar + GUI app
-
-- **Layout submenus** — *Apply All* / *Apply Current Space*
-- **Open Shitsurae** — main window (Arrange / Layouts / General / Shortcuts / Permissions / Diagnostics)
-- **Open Config Directory**
-- **Quit** — restores every parked window on the way out
-
-### 7. CLI and automation
-
-The CLI talks to the app over a unix socket and launches the app automatically when needed.
-
-```bash
-shitsurae arrange <layout> --dry-run --json    # preview the plan (no changes)
-shitsurae arrange <layout> --json              # apply a layout
-shitsurae arrange <primary> <secondary> --json # batch layouts on distinct displays
-shitsurae arrange <layout> --space 2 --json    # apply one workspace only
-shitsurae arrange <layout> --state-only --json # update runtime state only
-shitsurae layouts list                         # list defined layouts
-shitsurae validate --json                      # validate config files
-shitsurae diagnostics --json                   # diagnostics
-shitsurae space current --json                 # active workspace info
-shitsurae space current --layout <layout> --json # one layout's active workspace
-shitsurae space list --json                    # workspace list
-shitsurae space switch 2 --json                # switch the active workspace
-shitsurae space switch 2 --layout <layout> --json # switch only that layout
-shitsurae space recover --force-clear-pending --yes --json
-shitsurae window current --json                # focused window info
-shitsurae window workspace 2 --json            # reassign a window to workspace 2
-shitsurae window set -x 0% -y 0% -w 50% -h 100%
-shitsurae focus --slot 1
-shitsurae focus --bundle-id com.apple.TextEdit
-shitsurae switcher list --json
-shitsurae switcher list --json --include-all-spaces true
-```
-
-`window workspace` / `window move` / `window resize` / `window set` target the focused window when no selector is given. Exact selector: `--window-id` + `--pid` + `--process-start-time` + `--bundle-id`. Rule selector: `--bundle-id`, optionally with `--pid` / `--title`.
-
-### 8. Multi-display support
-
-- Each display hosts its own independent workspace: `layouts.<name>.display` declares the layout's host display, and arranging a layout only replaces the active layout of *that* display
-- Give displays stable aliases under `monitors`, selecting each by `primary: true`, exact UUID, or a unique width/height pair. Layouts reference those aliases with `display.monitor`
-- Space switching without `--layout` / `--monitor` and slot focus target the primary display's workspace. Cycle and switcher target the active workspace on the display containing the pointer. `space switch --monitor research --focus preserve` switches that display while preserving focus on another display
-- `shitsurae arrange main calendar` applies layouts that resolve to distinct displays in one request. Shitsurae validates every layout, connected host and display collision before serializing window mutations; physical window operations are not atomic. Multi-layout arrange does not accept `--dry-run`, `--state-only` or `--space`
-- Add `--layout <name>` to `space list`, `space current` or `space switch` to target only that layout's active workspace. A configured but inactive layout is rejected instead of being implicitly bootstrapped
-- A single-space layout hosted on a non-primary display is effectively an always-visible pinned surface (see the example below)
-- When a declared display disconnects, its workspace goes dormant and windows moved by macOS are left untouched; on reconnect the layout is repositioned automatically (no apps are launched). Reconnects that change the display UUID are handled by re-resolving the declaration — but a layout pinned with `display.id` cannot recover from a UUID change until the config is updated, so prefer role / resolution declarations
-- Untracked windows on non-primary displays normally stay free-form. Invoking cycle or switcher while the pointer is on one of those displays adopts only eligible visible windows from that display into its active workspace
-
-```yaml
-monitors:
-  main:
-    primary: true
-  calendar:
-    id: 37D8832A-2D66-02CA-B9F7-8F30A301B230
-
-layouts:
-  main:
-    display:
-      monitor: main
-    spaces:
-      - spaceID: 1
-        windows: [...]
-  calendar:
-    display:
-      monitor: calendar
-    spaces:
-      - spaceID: 1
-        windows:
-          - slot: 1
-            launch: true
-            match:
-              bundleID: com.microsoft.edgemac.app.xxxxxxxxxxxx # Edge PWA
-            frame:
-              x: "0%"
-              y: "0%"
-              width: "100%"
-              height: "100%"
-```
-
-> [!IMPORTANT]
-> Give non-primary layouts *narrow* matchers (a dedicated bundleID, or `title` / `profile` discriminators). Windows that match another display's layout rules are excluded from adoption on the primary display, so a broad matcher (bare browser bundleID etc.) would leave all of that app's primary-display windows unmanaged. Completely identical matchers across layouts that can be active simultaneously are a config-load error.
-
-In the GUI Arrange screen, select a Layout and Space for each connected display. Use the row’s **Apply** button to apply only that display, or **Apply Display Set** to apply every selected display’s complete workspace set together. The Virtual Workspaces card exposes Space buttons for every active workspace, so a secondary workspace can be switched independently. Workspace State also lists every active layout and does not classify secondary-owned windows as unmanaged.
-
-For existing configs, `spaces[].display` was removed — move the block to `layouts.<name>.display` (one host display per layout; this was already enforced).
-
-### 9. Config auto-reload
-
-- Loads `*.yml` / `*.yaml` from the config directory in filename order
-- Watches for changes and reloads automatically
-- On syntax errors the last valid config stays active; errors show up in Diagnostics
+- Launch apps, place their windows, and set the initial focus in one action
+- Switch virtual workspaces with `Ctrl+1` through `Ctrl+9`
+- Focus a specific window with `Cmd+1` through `Cmd+9`
+- Use `Cmd+Tab` to switch between individual windows
+- Send the current window to another virtual workspace
+- Bind window snapping actions such as left half, right half, and maximize
+- Manage independent layouts and virtual workspaces on each display
+- Operate the same layouts from the GUI or CLI
 
 ## Requirements
 
-- macOS 15 (Sequoia) or later
+- macOS 15 Sequoia or later
 - Accessibility permission (required)
-- Screen Recording permission (optional — switcher thumbnails only)
+- Screen Recording permission (only for switcher thumbnails)
 
-No network access is needed in normal operation.
-
-## Architecture
-
-Shitsurae uses a two-process design:
-
-- **Shitsurae.app** — menu-bar resident GUI; the single owner of virtual workspace state; hotkeys, switcher, follow-focus, config reload
-- **shitsurae CLI** — a thin client connected over a unix domain socket
-
-The v1 resident agent (ShitsuraeAgent + XPC + launchctl) is gone.
+Normal operation does not require external network access.
 
 ## Installation
 
-### Homebrew Cask
+Install Shitsurae with Homebrew Cask.
 
 ```bash
 brew tap yuki-yano/shitsurae
@@ -203,46 +46,26 @@ xattr -dr com.apple.quarantine /Applications/Shitsurae.app
 open /Applications/Shitsurae.app
 ```
 
-This installs:
-
-- `Shitsurae.app` into `/Applications`
-- the `shitsurae` CLI symlinked into Homebrew's `bin`
+This installs `Shitsurae.app` in `/Applications` and makes the `shitsurae` CLI available on your normal `PATH`.
 
 > [!WARNING]
-> The distributed app is not notarized; run `xattr -dr com.apple.quarantine /Applications/Shitsurae.app` once before first launch, and only if you trust `https://github.com/yuki-yano/shitsurae`.
+> The distributed app is not notarized.
+> The `xattr` command removes the macOS quarantine attribute, so run it only if you trust the distribution source.
 
-To uninstall:
+After the first launch, open the Shitsurae **Permissions** screen and enable Accessibility access in System Settings.
 
-```bash
-brew uninstall --cask shitsurae
-brew zap shitsurae    # optional: also removes config and logs
-```
+Enable Screen Recording as well if you want window thumbnails in the switcher.
+Without it, the switcher continues to work with app icons.
 
-### Direct `.app` distribution (no notarization)
+## Your first layout
 
-```bash
-xattr -dr com.apple.quarantine Shitsurae.app
-open Shitsurae.app
-```
+### 1. Create a config file
 
-## Configuration
-
-### Config directory
-
-1. `$XDG_CONFIG_HOME/shitsurae/`
-2. `~/.config/shitsurae/`
-
-All `*.yml` / `*.yaml` files load in filename order; split them as you like (`work.yml`, `home.yml`, …).
-
-### YAML Schema / LSP
+Create `~/.config/shitsurae/work.yaml`.
 
 ```yaml
 # yaml-language-server: $schema=https://raw.githubusercontent.com/yuki-yano/shitsurae/refs/heads/main/schemas/shitsurae-config.schema.json
-```
 
-### Basic example
-
-```yaml
 layouts:
   work:
     initialFocus:
@@ -251,7 +74,7 @@ layouts:
       - spaceID: 1
         windows:
           - slot: 1
-            launch: false
+            launch: true
             match:
               bundleID: com.apple.TextEdit
             frame:
@@ -260,7 +83,7 @@ layouts:
               width: "50%"
               height: "100%"
           - slot: 2
-            launch: false
+            launch: true
             match:
               bundleID: com.apple.Terminal
             frame:
@@ -271,7 +94,7 @@ layouts:
       - spaceID: 2
         windows:
           - slot: 1
-            launch: false
+            launch: true
             match:
               bundleID: com.apple.Notes
             frame:
@@ -281,31 +104,122 @@ layouts:
               height: "100%"
 ```
 
-`spaceID` is the logical virtual-workspace number. More samples live in `samples/`.
+This layout places TextEdit and Terminal side by side in Space 1, with Notes filling Space 2.
 
-`windows[].frame` is optional. When omitted, arrange registers the window with its workspace and slot without changing its current position or size. Switching workspaces still moves it off-screen and restores it to that captured frame normally.
+### 2. Validate the config
 
-### Getting started
+```bash
+shitsurae validate --json
+```
 
-Run `shitsurae arrange <layout>` once — it launches, places and tracks every window and parks inactive workspaces. *Apply All* in the GUI does the same.
+If validation succeeds, preview the arrangement without moving any windows.
 
-- The runtime state is discarded every time the app quits; start each session with an apply
-- `--dry-run --json` previews the plan and `availableSpaceIDs`
-- `--state-only` builds tracking state without moving windows (advanced; normally unnecessary)
+```bash
+shitsurae arrange work --dry-run --json
+```
 
-### Window matching
+### 3. Apply the layout
 
-- `bundleID` (required)
-- `title` — `equals` / `contains` / `regex`
-- `profile` — Chromium browser profile directory name
-- `role` / `subrole` — accessibility roles
-- `index` — window index within the app (1-based)
-- `excludeTitleRegex`
+```bash
+shitsurae arrange work
+```
 
-> [!IMPORTANT]
-> When the same `bundleID` appears in multiple slots, every one of those slots must carry a discriminator (`title` / `profile` / `index`). Ambiguous matchers are a config-load error — they were the root cause of earlier window-tracking corruption.
+To use the GUI, open **Arrange**, select `work`, and press **Apply**.
 
-### Chromium profiles
+Shitsurae launches the configured apps, places their windows, and shows Space 1.
+You can then switch between the two virtual workspaces with `Ctrl+1` and `Ctrl+2`.
+
+When Shitsurae quits, it returns parked windows to the screen and discards the runtime workspace state.
+Apply a layout again after the next launch.
+
+## Everyday controls
+
+The default shortcuts are:
+
+| Action | Shortcut |
+| --- | --- |
+| Focus slot 1 through 9 | `Cmd+1` through `Cmd+9` |
+| Switch to Space 1 through 9 | `Ctrl+1` through `Ctrl+9` |
+| Send the current window to Space 1 through 9 | `Option+1` through `Option+9` |
+| Next window | `Cmd+Ctrl+J` |
+| Previous window | `Cmd+Ctrl+K` |
+| Window switcher | `Cmd+Tab` |
+
+`Cmd+Tab` lists windows in most-recently-used order.
+Selecting a window in another virtual workspace switches to that workspace before focusing it.
+
+`mode.followFocus` is enabled by default.
+Focusing a managed window from the Dock or with the mouse automatically switches to its virtual workspace.
+
+## GUI
+
+The main window is organized around the tasks you perform:
+
+- **Arrange**: select and apply a layout or Space for each display
+- **Workspace State**: inspect tracked windows and their current placement state
+- **Layouts**: preview every Space loaded from YAML
+- **General**: inspect application behavior such as launch at login
+- **Shortcuts**: inspect the active keyboard shortcuts
+- **Permissions**: check Accessibility and Screen Recording access
+- **Diagnostics**: inspect config errors, displays, and runtime state
+
+The menu bar also provides layout application, config-directory access, and quit actions.
+
+## Configuration
+
+### Config directory
+
+Shitsurae resolves its config directory in this order:
+
+1. `$XDG_CONFIG_HOME/shitsurae/`
+2. `~/.config/shitsurae/`
+
+It loads `*.yml` and `*.yaml` files directly inside that directory in filename order, so layouts and shortcuts can be split across multiple files.
+
+Config files reload automatically.
+If a reload fails, Shitsurae keeps the last valid config and shows the error in **Diagnostics**.
+
+To launch Shitsurae when you log in, add:
+
+```yaml
+app:
+  launchAtLogin: true
+```
+
+### Stored data
+
+Shitsurae stores the following data locally:
+
+| Data | Location |
+| --- | --- |
+| Config | `$XDG_CONFIG_HOME/shitsurae/` or `~/.config/shitsurae/` |
+| Runtime workspace state | `$XDG_STATE_HOME/shitsurae/runtime-state.json` or `~/.local/state/shitsurae/runtime-state.json` |
+| Logs | `~/Library/Logs/Shitsurae/shitsurae.log` |
+
+The runtime state file allows Shitsurae to return parked windows safely to the screen.
+Do not delete it while Shitsurae may still have managed windows parked offscreen.
+
+### Matching windows
+
+Each window is identified by a `match` definition:
+
+- **`bundleID`**: application bundle identifier (required)
+- **`title`**: window title matched with `equals`, `contains`, or `regex`
+- **`profile`**: Chromium profile directory name
+- **`role` / `subrole`**: Accessibility roles
+- **`index`**: window number within the application
+- **`excludeTitleRegex`**: titles to exclude
+
+Inspect the frontmost window with:
+
+```bash
+shitsurae window current --json
+```
+
+When the same `bundleID` appears in multiple slots, distinguish each definition with `title`, `profile`, or `index`.
+An ambiguous definition is rejected as a config error.
+
+Chromium-based browsers support per-profile launching and tracking:
 
 ```yaml
 - slot: 1
@@ -316,66 +230,27 @@ Run `shitsurae arrange <layout>` once — it launches, places and tracks every w
   frame:
     x: "0%"
     y: "0%"
-    width: "50%"
+    width: "100%"
     height: "100%"
 ```
 
-`profile` is the profile *directory* name (`Default`, `Profile 1`, …), not the display name. With `launch: true` the browser starts with `--profile-directory=<profile> --new-window`.
+### Position and size
 
-### Mode
+The `frame` fields accept:
 
-```yaml
-mode:
-  followFocus: true # default: true
-```
+- `%`: percentage of the display
+- `pt`: macOS logical points
+- `px`: physical pixels
+- `r`: a ratio from `0.0` to `1.0`
 
-### Ignore rules
+If `frame` is omitted, Shitsurae registers the window in the virtual workspace while preserving its current position and size.
 
-```yaml
-ignore:
-  apply:
-    apps:
-      - com.apple.finder
-    windows:
-      - bundleID: com.google.Chrome
-        titleRegex: "^DevTools"
-  focus:
-    apps:
-      - com.apple.SystemPreferences
-```
+### Shortcuts
 
-### App behavior
-
-```yaml
-app:
-  launchAtLogin: true
-```
-
-### Shortcut customization
+Every global shortcut can be changed in YAML.
 
 ```yaml
 shortcuts:
-  focusBySlotEnabledInApps:
-    com.hnc.Discord: false
-
-  moveCurrentWindowToSpace:
-    - slot: 1
-      key: "1"
-      modifiers: [alt]
-
-  switchVirtualSpace:
-    - spaceID: 1
-      key: "1"
-      modifiers: [ctrl]
-      monitor: research
-      focus: preserve # target | preserve
-
-  cycleExcludedApps:
-    - com.hnc.Discord
-
-  switcherExcludedApps:
-    - com.tinyspeck.slackmacgap
-
   nextWindow:
     key: j
     modifiers: [cmd, ctrl]
@@ -384,17 +259,11 @@ shortcuts:
     key: k
     modifiers: [cmd, ctrl]
 
-  cycle:
-    mode: overlay # direct | overlay
-    quickKeys: "123456789"
-    acceptKeys: [enter]
-    cancelKeys: [esc]
-
   switcher:
     trigger:
       key: tab
       modifiers: [cmd]
-    quickKeys: "1234567890qwertyuiopasdfghjklzxcvbnm"
+    quickKeys: "1234567890qwertyuiopasdfghjkl"
     acceptKeys: [enter]
     cancelKeys: [esc]
 
@@ -411,14 +280,146 @@ shortcuts:
         preset: rightHalf
 ```
 
-## Migrating from v1
+Available snap presets are `leftHalf`, `rightHalf`, `topHalf`, `bottomHalf`, `leftThird`, `centerThird`, `rightThird`, `maximize`, and `center`.
 
-1. **Config**: delete these keys (they are load errors now):
-   - `mode.space` (always virtual; `mode.followFocus` still works)
-   - `executionPolicy` (whole section)
-2. **Runtime state**: unsupported or corrupt state is preserved and startup stops instead of assuming no windows are parked. Quit the previous version normally to restore its windows, then move `~/.local/state/shitsurae/runtime-state.json` aside and apply the current layout. The same applies when upgrading right after a crash / SIGKILL (a clean quit clears the state, so the normal update path never hits this): launch the previous version once and quit it cleanly, or rescue any parked windows by hand before deleting the state file.
-3. **Same app in multiple slots**: each slot now needs a `title` / `profile` / `index` discriminator.
-4. **ShitsuraeAgent is gone**: you can delete `~/Library/LaunchAgents/com.yuki-yano.shitsurae.agent.plist` if it remains.
+You can disable individual Shitsurae shortcuts in applications where they conflict with app-specific bindings.
+See the [YAML Schema](schemas/shitsurae-config.schema.json) for every config field.
+
+### Multiple displays
+
+Give physical displays stable names under `monitors`, then reference those names from each layout's `display.monitor`.
+
+```yaml
+monitors:
+  main:
+    primary: true
+  side:
+    width: 2560
+    height: 1440
+
+layouts:
+  work:
+    display:
+      monitor: main
+    spaces:
+      - spaceID: 1
+        windows: []
+
+  reference:
+    display:
+      monitor: side
+    spaces:
+      - spaceID: 1
+        windows: []
+```
+
+Layouts assigned to different displays can be applied together:
+
+```bash
+shitsurae arrange work reference
+```
+
+When an external display disconnects, its workspace becomes dormant.
+After reconnection, Shitsurae resolves the declared display again and restores the window arrangement.
+
+> [!IMPORTANT]
+> Use narrow match rules for layouts on non-primary displays, such as a dedicated `bundleID`, `title`, or `profile`.
+> A broad rule such as a browser's bare `bundleID` can also match that application's windows on other displays.
+
+## How virtual workspaces work
+
+Shitsurae does not manipulate native macOS Spaces.
+
+When switching workspaces, it returns the target windows to the screen and moves other managed windows just outside the display.
+For applications that reject offscreen placement, Shitsurae minimizes only the affected window and restores it when you return.
+
+Transient windows such as dialogs and sheets remain visible.
+After the interaction finishes, their parent windows return to the assigned workspace.
+
+## CLI
+
+Common commands include:
+
+```bash
+shitsurae layouts list
+shitsurae validate --json
+shitsurae diagnostics --json
+
+shitsurae arrange work --dry-run --json
+shitsurae arrange work
+
+shitsurae space list --json
+shitsurae space current --json
+shitsurae space switch 2 --json
+
+shitsurae window current --json
+shitsurae window workspace 2 --json
+shitsurae window set -x 0% -y 0% -w 50% -h 100%
+
+shitsurae focus --slot 1
+shitsurae switcher list --json
+```
+
+The CLI connects to the Shitsurae app over a Unix domain socket.
+It launches the app automatically if it is not already running.
+
+Run `shitsurae <subcommand> --help` to see the options for each command.
+
+## Troubleshooting
+
+### A layout does not load
+
+Validate the config, then check **Diagnostics** for the filename and error details.
+
+```bash
+shitsurae validate --json
+```
+
+### A window cannot be found
+
+Check Accessibility access under **Permissions**, bring the target window to the front, and inspect its match data:
+
+```bash
+shitsurae window current --json
+```
+
+When registering multiple windows from the same application, distinguish them with `title`, `profile`, or `index`.
+
+### A shortcut does not respond
+
+Check the active assignment under **Shortcuts**.
+If macOS or the frontmost application uses the same key, change the Shitsurae binding or disable it only for the conflicting application with `shortcuts.disabledInApps`.
+
+### Recovery required appears
+
+This means an operation remains whose final window visibility could not be confirmed safely.
+First quit Shitsurae normally and verify that parked windows return to the screen.
+
+Clear the state manually only after confirming that every managed window is visible and the pending recovery data is no longer needed.
+
+```bash
+shitsurae space recover --force-clear-pending --yes --json
+```
+
+After clearing it, reconcile visibility by switching to the intended Space with `--reconcile`:
+
+```bash
+shitsurae space switch 1 --reconcile --json
+```
+
+## Uninstalling
+
+Remove the app with:
+
+```bash
+brew uninstall --cask shitsurae
+```
+
+To remove its config and logs as well, run:
+
+```bash
+brew zap shitsurae
+```
 
 ## Building from source
 
@@ -428,10 +429,7 @@ swift test
 make app
 ```
 
-Outputs:
-
-- `dist/Shitsurae.app`
-- bundled CLI: `dist/Shitsurae.app/Contents/Resources/shitsurae`
+The app bundle is written to `dist/Shitsurae.app`.
 
 ## License
 
