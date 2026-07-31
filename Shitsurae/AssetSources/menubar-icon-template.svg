@@ -1,14 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
-  <g transform="scale(8)" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round">
-    <rect x="1.8" y="1.8" width="12.4" height="12.4" rx="1.35" stroke-width="0.6"/>
-    <rect x="3.56" y="3.56" width="4.93" height="4.2" rx="0.35" ry="0.35" stroke-width="0.6"/>
-    <rect x="10.11" y="3.56" width="2.33" height="1.89" rx="0.15" ry="0.15" stroke-width="0.6"/>
-    <rect x="10.11" y="6.78" width="2.33" height="0.98" rx="0.1" ry="0.1" stroke-width="0.6"/>
-    <rect x="3.56" y="9.27" width="2.73" height="3.17" rx="0.3" ry="0.3" stroke-width="0.6"/>
-    <rect x="7.71" y="9.27" width="4.73" height="3.17" rx="0.3" ry="0.3" stroke-width="0.6"/>
-    <circle cx="4.36" cy="4.36" r="0.32" fill="#000" stroke="none"/>
-    <circle cx="5.18" cy="4.36" r="0.32" fill="#000" stroke="none"/>
-    <circle cx="6" cy="4.36" r="0.32" fill="#000" stroke="none"/>
-    <line x1="4.27" y1="5.56" x2="7.74" y2="5.56" stroke-width="0.6"/>
+  <!-- Enso Workspace: an open ring for fluid switching, with three arranged windows. -->
+  <g fill="#000">
+    <path
+      d="M96 96 A45 45 0 1 0 73 108"
+      fill="none"
+      stroke="#000"
+      stroke-width="14"
+      stroke-linecap="round"
+    />
+    <rect x="45" y="43" width="15" height="39" rx="3.5" />
+    <rect x="66" y="43" width="20" height="18" rx="3.5" />
+    <rect x="66" y="66" width="20" height="16" rx="3.5" />
   </g>
 </svg>
