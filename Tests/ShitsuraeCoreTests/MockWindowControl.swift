@@ -12,6 +12,9 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
 
     var failFrameWindowIDs: Set<UInt32> = []
     var failPositionWindowIDs: Set<UInt32> = []
+    /// Rejects frame requests larger than a window-specific limit. This models
+    /// macOS constraining a window after its display resolution shrinks.
+    var maximumAcceptedFrameSizeByWindowID: [UInt32: CGSize] = [:]
     /// Safe transient failures that occur before a geometry setter runs.
     var notAttemptedFrameAttemptsRemainingByWindowID: [UInt32: Int] = [:]
     var notAttemptedPositionAttemptsRemainingByWindowID: [UInt32: Int] = [:]
@@ -280,6 +283,11 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         }
         if let pinned = pinnedFrameWindowIDs[windowID] {
             windowsByID[windowID] = window.withFrame(pinned)
+            return .rejected
+        }
+        if let maximumSize = maximumAcceptedFrameSizeByWindowID[windowID],
+           (frame.width > maximumSize.width || frame.height > maximumSize.height)
+        {
             return .rejected
         }
         guard !failFrameWindowIDs.contains(windowID) else {

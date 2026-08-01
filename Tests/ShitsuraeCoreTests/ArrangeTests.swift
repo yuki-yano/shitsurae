@@ -209,6 +209,70 @@ struct ArrangeTests {
         }
     }
 
+    @Test func resolutionChangeRebasesConnectedWorkspaceBeforeReconcile() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let initial = try await engine.arrange(layoutName: "work", spaceID: nil, config: config)
+        #expect(initial.result == "success")
+
+        let compactDisplay = DisplayInfo(
+            id: TestFixtures.display.id,
+            width: 2000,
+            height: 1200,
+            scale: 2,
+            isPrimary: true,
+            frame: CGRect(x: 0, y: 0, width: 1000, height: 600),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1000, height: 575)
+        )
+        control.setDisplays([compactDisplay])
+
+        await engine.handleDisplayConfigurationChange(config: config)
+
+        #expect(control.window(1)?.frame == ResolvedFrame(x: 0, y: 0, width: 500, height: 575))
+        #expect(control.window(2)?.frame == ResolvedFrame(x: 500, y: 0, width: 500, height: 575))
+        let notesEntry = try #require((await engine.currentState).slots.first {
+            $0.bundleID == "com.apple.Notes"
+        })
+        #expect(notesEntry.lastVisibleFrame == ResolvedFrame(x: 0, y: 0, width: 1000, height: 575))
+        #expect(notesEntry.visibilityState == .hiddenOffscreen)
+    }
+
+    @Test func arrangeAfterResolutionShrinkRestoresHiddenWindowAtCurrentLayoutFrame() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let initial = try await engine.arrange(layoutName: "work", spaceID: nil, config: config)
+        #expect(initial.result == "success")
+        let staleNotesFrame = try #require((await engine.currentState).slots.first {
+            $0.bundleID == "com.apple.Notes"
+        }?.lastVisibleFrame)
+        #expect(staleNotesFrame == ResolvedFrame(x: 0, y: 0, width: 1440, height: 875))
+
+        let compactDisplay = DisplayInfo(
+            id: TestFixtures.display.id,
+            width: 2000,
+            height: 1200,
+            scale: 2,
+            isPrimary: true,
+            frame: CGRect(x: 0, y: 0, width: 1000, height: 600),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1000, height: 575)
+        )
+        control.setDisplays([compactDisplay])
+        control.maximumAcceptedFrameSizeByWindowID[3] = compactDisplay.visibleFrame.size
+
+        let result = try await engine.arrange(layoutName: "work", spaceID: nil, config: config)
+
+        #expect(result.result == "success")
+        #expect(control.window(1)?.frame == ResolvedFrame(x: 0, y: 0, width: 500, height: 575))
+        #expect(control.window(2)?.frame == ResolvedFrame(x: 500, y: 0, width: 500, height: 575))
+        let notesEntry = try #require((await engine.currentState).slots.first {
+            $0.bundleID == "com.apple.Notes"
+        })
+        #expect(notesEntry.lastVisibleFrame == ResolvedFrame(x: 0, y: 0, width: 1000, height: 575))
+        #expect(notesEntry.visibilityState == .hiddenOffscreen)
+    }
+
     @Test func stateOnlyRejectsRemovingRecoveryMetadataForHiddenWindow() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

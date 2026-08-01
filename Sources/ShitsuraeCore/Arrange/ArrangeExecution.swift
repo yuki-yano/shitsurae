@@ -177,7 +177,8 @@ public extension VirtualSpaceEngine {
                 registryEntries: previousEntries.map(\.registryEntry),
                 recoveryLayout: layout,
                 hostDisplay: hostDisplay,
-                displays: displays
+                displays: displays,
+                preferredVisibleFramesByFingerprint: [:]
             ) else {
                 return restoreIncompleteResult(layoutName: layoutName)
             }
@@ -201,6 +202,19 @@ public extension VirtualSpaceEngine {
                 definition: step.definition
             )
         })
+        let arrangedFramesByFingerprint: [String: ResolvedFrame] = Dictionary(
+            uniqueKeysWithValues: plan.steps.compactMap { step in
+                guard let frame = step.resolvedFrame else { return nil }
+                return (
+                    SlotEntry.fingerprint(
+                        layoutName: layoutName,
+                        spaceID: step.spaceID,
+                        definition: step.definition
+                    ),
+                    frame
+                )
+            }
+        )
         let configuredFingerprints: Set<String> = Set(layout.spaces.flatMap { space in
             space.windows.compactMap { definition in
                 guard !PolicyEngine.matchesIgnoreAppRule(
@@ -231,6 +245,7 @@ public extension VirtualSpaceEngine {
             layoutName: layoutName,
             layout: layout,
             arrangedFingerprints: arrangedFingerprints,
+            arrangedFramesByFingerprint: arrangedFramesByFingerprint,
             configuredFingerprints: configuredFingerprints,
             config: config
         ) else {
@@ -488,6 +503,7 @@ public extension VirtualSpaceEngine {
         layoutName: String,
         layout: LayoutDefinition,
         arrangedFingerprints: Set<String>,
+        arrangedFramesByFingerprint: [String: ResolvedFrame],
         configuredFingerprints: Set<String>,
         config: LoadedConfig
     ) -> Bool {
@@ -531,7 +547,8 @@ public extension VirtualSpaceEngine {
             registryEntries: registryEntries.map(\.entry) + discardedEntries,
             recoveryLayout: layout,
             hostDisplay: hostDisplay,
-            displays: displays
+            displays: displays,
+            preferredVisibleFramesByFingerprint: arrangedFramesByFingerprint
         )
     }
 
@@ -540,7 +557,8 @@ public extension VirtualSpaceEngine {
         registryEntries: [WindowRegistry.Entry],
         recoveryLayout: LayoutDefinition,
         hostDisplay: DisplayInfo,
-        displays: [DisplayInfo]
+        displays: [DisplayInfo],
+        preferredVisibleFramesByFingerprint: [String: ResolvedFrame]
     ) -> Bool {
         guard !hiddenEntries.isEmpty else { return true }
 
@@ -573,7 +591,8 @@ public extension VirtualSpaceEngine {
                 transition: .show,
                 layout: recoveryLayout,
                 hostDisplay: hostDisplay,
-                displays: displays
+                displays: displays,
+                preferredVisibleFrame: preferredVisibleFramesByFingerprint[entry.definitionFingerprint]
             ) else {
                 return false
             }

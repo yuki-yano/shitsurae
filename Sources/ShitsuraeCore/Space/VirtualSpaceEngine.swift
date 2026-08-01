@@ -71,6 +71,7 @@ public actor VirtualSpaceEngine {
     let arrangeWaitTimeoutMS: Int
     nonisolated let focusEventGate: FocusEventGate
     private var state: RuntimeState
+    private var observedDisplaysByID: [String: DisplayInfo]
     var latestFocusEventSequence: UInt64 = 0
     private static let focusVerificationDelaysMS = [20, 40, 80]
 
@@ -106,6 +107,9 @@ public actor VirtualSpaceEngine {
         self.arrangeWaitTimeoutMS = arrangeWaitTimeoutMS
         self.focusEventGate = focusEventGate
         self.state = try store.loadStrict()
+        self.observedDisplaysByID = Dictionary(
+            uniqueKeysWithValues: control.displays().map { ($0.id, $0) }
+        )
     }
 
     // MARK: - Queries
@@ -1594,10 +1598,33 @@ public actor VirtualSpaceEngine {
             )
         }
 
-        // Reconcile all workspaces whose host display is currently connected.
-        let liveConnectedIDs = Set(control.displays().map(\.id))
+        // Rebase layout-defined geometry before reconciling connected
+        // workspaces. A resolution change keeps the display UUID stable, so
+        // stale lastVisibleFrame values would otherwise win over percentage
+        // definitions and preserve the previous resolution indefinitely.
+        let liveDisplays = control.displays()
+        let liveConnectedIDs = Set(liveDisplays.map(\.id))
         for workspace in state.activeWorkspaces where liveConnectedIDs.contains(workspace.displayID) {
             do {
+                if let layout = config.config.layouts[workspace.layoutName],
+                   let hostDisplay = DisplayResolver.hostDisplay(
+                       layout: layout,
+                       config: config.config,
+                       displays: liveDisplays
+                   ),
+                   hostDisplay.id == workspace.displayID,
+                   observedDisplaysByID[hostDisplay.id] != hostDisplay
+                {
+                    let rebasedState = Self.rebasingLayoutFrames(
+                        in: state,
+                        layoutName: workspace.layoutName,
+                        layout: layout,
+                        hostDisplay: hostDisplay
+                    )
+                    if rebasedState.slots != state.slots {
+                        try persist(rebasedState)
+                    }
+                }
                 _ = try switchSpace(
                     layoutName: workspace.layoutName,
                     to: workspace.spaceID,
@@ -1616,6 +1643,51 @@ public actor VirtualSpaceEngine {
                 )
             }
         }
+        observedDisplaysByID = Dictionary(
+            uniqueKeysWithValues: liveDisplays.map { ($0.id, $0) }
+        )
+    }
+
+    private static func rebasingLayoutFrames(
+        in sourceState: RuntimeState,
+        layoutName: String,
+        layout: LayoutDefinition,
+        hostDisplay: DisplayInfo
+    ) -> RuntimeState {
+        var framesByFingerprint: [String: ResolvedFrame] = [:]
+        for space in layout.spaces {
+            for definition in space.windows {
+                let fingerprint = SlotEntry.fingerprint(
+                    layoutName: layoutName,
+                    spaceID: space.spaceID,
+                    definition: definition
+                )
+                if let definitionFrame = definition.frame,
+                   let frame = try? LengthParser.resolveFrame(
+                       definitionFrame,
+                       basis: hostDisplay.visibleFrame,
+                       scale: hostDisplay.scale
+                   )
+                {
+                    framesByFingerprint[fingerprint] = frame
+                }
+            }
+        }
+
+        var rebasedState = sourceState
+        rebasedState.slots = rebasedState.slots.map { entry in
+            guard entry.layoutName == layoutName,
+                  entry.origin == .layout,
+                  entry.spaceID == entry.layoutSpaceID,
+                  let frame = framesByFingerprint[entry.definitionFingerprint]
+            else {
+                return entry
+            }
+            var updated = entry
+            updated.lastVisibleFrame = frame
+            return updated
+        }
+        return rebasedState
     }
 
     /// Lower value wins. Mirrors the declaration specificity order the
@@ -1647,35 +1719,12 @@ public actor VirtualSpaceEngine {
         // Recompute definition frames against the (possibly UUID-changed)
         // host so the following reconcile shows windows at their declared
         // positions instead of stale coordinates of the old display.
-        var framesByFingerprint: [String: ResolvedFrame] = [:]
-        for space in layout.spaces {
-            for definition in space.windows {
-                let fingerprint = SlotEntry.fingerprint(
-                    layoutName: workspace.layoutName,
-                    spaceID: space.spaceID,
-                    definition: definition
-                )
-                if let definitionFrame = definition.frame,
-                   let frame = try? LengthParser.resolveFrame(
-                    definitionFrame,
-                    basis: hostDisplay.visibleFrame,
-                    scale: hostDisplay.scale
-                ) {
-                    framesByFingerprint[fingerprint] = frame
-                }
-            }
-        }
-        newState.slots = newState.slots.map { entry in
-            guard entry.layoutName == workspace.layoutName,
-                  entry.origin == .layout,
-                  let frame = framesByFingerprint[entry.definitionFingerprint]
-            else {
-                return entry
-            }
-            var updated = entry
-            updated.lastVisibleFrame = frame
-            return updated
-        }
+        newState = Self.rebasingLayoutFrames(
+            in: newState,
+            layoutName: workspace.layoutName,
+            layout: layout,
+            hostDisplay: hostDisplay
+        )
         do {
             try persist(newState)
         } catch {

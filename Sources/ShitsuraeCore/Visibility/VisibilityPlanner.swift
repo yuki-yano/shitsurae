@@ -45,7 +45,8 @@ public enum VisibilityPlanner {
         transition: VisibilityTransition,
         layout: LayoutDefinition,
         hostDisplay: DisplayInfo,
-        displays: [DisplayInfo]
+        displays: [DisplayInfo],
+        preferredVisibleFrame: ResolvedFrame? = nil
     ) -> VisibilityPlan? {
         guard WindowEligibility.isManageableForVirtualWorkspace(window) else {
             return nil
@@ -68,7 +69,7 @@ public enum VisibilityPlanner {
                     action: "unchanged"
                 )
             }
-            guard let visibleFrame = resolveVisibleFrame(
+            guard let visibleFrame = preferredVisibleFrame ?? resolveVisibleFrame(
                 entry: workingEntry,
                 window: window,
                 layout: layout,
