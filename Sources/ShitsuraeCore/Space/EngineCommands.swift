@@ -394,14 +394,56 @@ public extension VirtualSpaceEngine {
 
     /// Internal UI selection path. Unlike the CLI's windowID selector, an
     /// overlay candidate may outlive its original CGWindowID; accept it only
-    /// while the complete identity is still live and manageable.
+    /// while the complete identity is still CG-live. A tracked main window
+    /// protected by a sheet, or temporarily unavailable through AX, is
+    /// activated at the application level instead of forcing window focus.
     func focusWindow(identity: WindowIdentity, config: LoadedConfig) throws -> FocusJSON {
         try ensureAccessibility()
         let inventory = control.windowInventory()
-        guard let window = inventory.windows.first(where: {
-            $0.identity == identity && WindowEligibility.isManageableForVirtualWorkspace($0)
-        }) else {
+        guard inventory.isAuthoritative,
+              let window = inventory.windows.first(where: { $0.identity == identity })
+        else {
             throw VirtualSpaceEngineError.windowNotTracked
+        }
+
+        let classification = WindowEligibility.classification(of: window)
+        guard classification != .companion else {
+            throw VirtualSpaceEngineError.windowNotTracked
+        }
+
+        if window.geometryBlocked || classification == .unknown {
+            let exactEntries = currentState.slots.filter { $0.boundIdentity == identity }
+            guard exactEntries.count == 1, let exactEntry = exactEntries.first else {
+                throw VirtualSpaceEngineError.windowNotTracked
+            }
+            guard control.onScreenWindowIdentities().contains(identity),
+                  control.activateApplication(
+                    pid: window.pid,
+                    processStartTime: window.processStartTime,
+                    bundleID: window.bundleID
+                  )
+            else {
+                throw VirtualSpaceEngineError.stateError("activation failed for window \(window.windowID)")
+            }
+            // The switcher is ordered by explicit user selection, not by the exact
+            // AX-focused surface. While a sheet is active AX focus correctly stays
+            // on that companion, but the owning main window is still the app target
+            // the user selected and should become the next MRU entry.
+            var newState = currentState
+            newState.slots = newState.slots.map { entry in
+                guard entry.id == exactEntry.id else { return entry }
+                var updated = entry
+                updated.lastActivatedAt = Date.rfc3339UTC()
+                return updated
+            }
+            try replaceState(newState)
+            return FocusJSON(
+                windowID: window.windowID,
+                bundleID: window.bundleID,
+                slot: exactEntry.slot > 0 ? exactEntry.slot : nil,
+                spaceID: exactEntry.spaceID,
+                didSwitchSpace: false
+            )
         }
 
         var didSwitchSpace = false
@@ -1056,8 +1098,9 @@ public extension VirtualSpaceEngine {
             windows: inventory.windows,
             includeDisplayAffinity: true
         )
+        let trackedIdentities = Set(layoutSlots.compactMap(\.boundIdentity))
         let windows = inventory.windows.filter {
-            WindowEligibility.isManageableForVirtualWorkspace($0)
+            isSwitcherPresentationCandidate($0, trackedIdentities: trackedIdentities)
                 && !crossLayoutExcluded.contains($0.identity)
         }
         let resolution = WindowRegistry.resolve(
@@ -1164,8 +1207,9 @@ public extension VirtualSpaceEngine {
             windows: inventory.windows,
             includeDisplayAffinity: true
         )
+        let trackedIdentities = Set(layoutSlots.compactMap(\.boundIdentity))
         let windows = inventory.windows.filter {
-            WindowEligibility.isManageableForVirtualWorkspace($0)
+            isSwitcherPresentationCandidate($0, trackedIdentities: trackedIdentities)
                 && !crossLayoutExcluded.contains($0.identity)
         }
         let resolution = WindowRegistry.resolve(
@@ -1327,6 +1371,26 @@ public extension VirtualSpaceEngine {
                 return nil
             }
             return BoundWindow(entry: entry, window: window)
+        }
+    }
+
+    /// Switcher presentation is intentionally broader than geometry mutation.
+    /// A main window protected by a sheet remains a valid app-switch target,
+    /// even though moving or resizing it would be unsafe. An exact persisted
+    /// binding also remains presentable during a transient AX timeout as long
+    /// as CG still proves that exact process-generation/window identity alive.
+    /// Unknown or geometry-blocked windows are never matched by rule here.
+    private func isSwitcherPresentationCandidate(
+        _ window: WindowSnapshot,
+        trackedIdentities: Set<WindowIdentity>
+    ) -> Bool {
+        switch WindowEligibility.classification(of: window) {
+        case .manageable:
+            return !window.geometryBlocked || trackedIdentities.contains(window.identity)
+        case .unknown:
+            return trackedIdentities.contains(window.identity)
+        case .companion:
+            return false
         }
     }
 

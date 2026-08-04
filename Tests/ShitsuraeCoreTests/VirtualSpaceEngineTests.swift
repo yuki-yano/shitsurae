@@ -3148,6 +3148,119 @@ struct VirtualSpaceEngineTests {
         control.onScreenWindowIdentitiesOverride = nil
     }
 
+    @Test func switcherKeepsTrackedMainWindowPresentWhileSheetBlocksGeometry() async throws {
+        let blockedMain = TestFixtures.window(
+            id: 1,
+            bundleID: "com.apple.TextEdit",
+            geometryBlocked: true,
+            isAXBacked: true,
+            frontIndex: 0
+        )
+        let (engine, control, url) = makeEngine(
+            windows: [blockedMain] + Array(standardWindows().dropFirst())
+        )
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        var state = await engine.currentState
+        state.slots = state.slots.map { entry in
+            entry.bundleID == blockedMain.bundleID ? entry.bound(to: blockedMain) : entry
+        }
+        try await engine.replaceState(state)
+
+        let candidates = try await engine.switcherCandidates(
+            includeAllSpaces: false,
+            config: config
+        )
+        let candidate = try #require(candidates.first { $0.windowID == blockedMain.windowID })
+        let cycleCandidates = try await engine.cycleCandidates(config: config)
+        #expect(cycleCandidates.contains { $0.identity == blockedMain.identity })
+
+        let focused = try await engine.focusWindow(identity: candidate.identity, config: config)
+
+        #expect(focused.windowID == blockedMain.windowID)
+        #expect(control.activatedBundles == [blockedMain.bundleID])
+        #expect(control.focusedWindowIDs.isEmpty)
+        let updatedState = await engine.currentState
+        #expect(updatedState.slots.first { $0.boundIdentity == blockedMain.identity }?.lastActivatedAt != nil)
+    }
+
+    @Test func switcherDoesNotExposeUntrackedMainWindowWhileSheetBlocksGeometry() async throws {
+        let trackedButDifferentWindow = standardWindows()[0]
+        let blockedMain = TestFixtures.window(
+            id: 10,
+            bundleID: "com.apple.TextEdit",
+            title: trackedButDifferentWindow.title,
+            geometryBlocked: true,
+            isAXBacked: true,
+            frontIndex: 0
+        )
+        let (engine, _, url) = makeEngine(
+            windows: [blockedMain] + Array(standardWindows().dropFirst())
+        )
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        var state = await engine.currentState
+        state.slots = state.slots.map { entry in
+            entry.bundleID == blockedMain.bundleID
+                ? entry.bound(to: trackedButDifferentWindow)
+                : entry
+        }
+        try await engine.replaceState(state)
+        #expect(trackedButDifferentWindow.identity != blockedMain.identity)
+
+        let candidates = try await engine.switcherCandidates(
+            includeAllSpaces: false,
+            config: config
+        )
+
+        #expect(!candidates.contains { $0.identity == blockedMain.identity })
+    }
+
+    @Test func switcherKeepsExactTrackedWindowPresentDuringTransientAXDropout() async throws {
+        let responsiveMain = standardWindows()[0]
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        var state = await engine.currentState
+        state.slots = state.slots.map { entry in
+            entry.bundleID == responsiveMain.bundleID ? entry.bound(to: responsiveMain) : entry
+        }
+        try await engine.replaceState(state)
+
+        control.addWindow(
+            TestFixtures.window(
+                id: responsiveMain.windowID,
+                bundleID: responsiveMain.bundleID,
+                pid: responsiveMain.pid,
+                processStartTime: responsiveMain.processStartTime,
+                title: responsiveMain.title,
+                frame: responsiveMain.frame,
+                role: nil,
+                subrole: nil,
+                modal: nil,
+                isAXBacked: false,
+                frontIndex: responsiveMain.frontIndex
+            )
+        )
+
+        let candidates = try await engine.switcherCandidates(
+            includeAllSpaces: false,
+            config: config
+        )
+        let candidate = try #require(candidates.first { $0.windowID == responsiveMain.windowID })
+        let cycleCandidates = try await engine.cycleCandidates(config: config)
+        #expect(cycleCandidates.contains { $0.identity == responsiveMain.identity })
+
+        let focused = try await engine.focusWindow(identity: candidate.identity, config: config)
+
+        #expect(focused.windowID == responsiveMain.windowID)
+        #expect(control.activatedBundles == [responsiveMain.bundleID])
+        #expect(control.focusedWindowIDs.isEmpty)
+    }
+
     @Test func switcherAndCycleReturnNoCandidatesForUnavailableInventory() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
