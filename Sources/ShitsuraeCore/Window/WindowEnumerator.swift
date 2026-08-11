@@ -14,6 +14,7 @@ import Foundation
 /// windows — never reintroduce that.
 public enum WindowEnumerator {
     public static let sharedProfileCache = ProfileCache()
+    static let sharedAXEnumerationGate = AXEnumerationGate()
 
     /// Windows on the active (visible) portion of the desktop.
     public static func listWindows(displays: [DisplayInfo] = SystemProbe.displays()) -> [WindowSnapshot] {
@@ -594,7 +595,7 @@ public enum WindowEnumerator {
         var axBackedWindowIDs = Set<WindowIdentity>()
         var minimized = Set<WindowIdentity>()
 
-        for (pid, expectedOwner) in expectedBundlesByPID {
+        processLoop: for (pid, expectedOwner) in expectedBundlesByPID {
             guard let targetWindowIDs = targetIDsByPID[pid],
                   let ownerBefore = NSRunningApplication(
                       processIdentifier: pid_t(pid)
@@ -607,13 +608,33 @@ public enum WindowEnumerator {
                 continue
             }
 
+            guard let axLease = sharedAXEnumerationGate.begin(
+                pid: pid,
+                processStartTime: expectedOwner.processStartTime,
+                bundleID: expectedOwner.bundleID
+            ) else {
+                continue
+            }
+            var shouldBackOff = false
+            defer {
+                sharedAXEnumerationGate.finish(
+                    axLease,
+                    shouldBackOff: shouldBackOff
+                )
+            }
+
             let appElement = AXUIElementCreateApplication(pid_t(pid))
+            AXReadPolicy.apply(to: appElement)
             var windowsRef: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(
+            let windowsStatus = AXUIElementCopyAttributeValue(
                 appElement,
                 kAXWindowsAttribute as CFString,
                 &windowsRef
-            ) == .success,
+            )
+            if windowsStatus == .cannotComplete {
+                shouldBackOff = true
+            }
+            guard windowsStatus == .success,
                 let windowElements = windowsRef as? [AXUIElement]
             else {
                 continue
@@ -622,8 +643,13 @@ public enum WindowEnumerator {
             var processBacked = Set<WindowIdentity>()
             var processMinimized = Set<WindowIdentity>()
             for element in windowElements {
+                AXReadPolicy.apply(to: element)
                 var windowID: CGWindowID = 0
-                guard AXUIElementGetWindowID(element, &windowID) == .success,
+                let windowIDStatus = AXUIElementGetWindowID(element, &windowID)
+                if windowIDStatus == .cannotComplete {
+                    continue processLoop
+                }
+                guard windowIDStatus == .success,
                       targetWindowIDs.contains(UInt32(windowID))
                 else {
                     continue
@@ -637,11 +663,15 @@ public enum WindowEnumerator {
                 processBacked.insert(identity)
 
                 var minimizedRef: CFTypeRef?
-                if AXUIElementCopyAttributeValue(
+                let minimizedStatus = AXUIElementCopyAttributeValue(
                     element,
                     kAXMinimizedAttribute as CFString,
                     &minimizedRef
-                ) == .success,
+                )
+                if minimizedStatus == .cannotComplete {
+                    continue processLoop
+                }
+                if minimizedStatus == .success,
                     (minimizedRef as? Bool) == true
                 {
                     processMinimized.insert(identity)
@@ -682,7 +712,7 @@ public enum WindowEnumerator {
         var focusedWindowIdentities = Set<WindowIdentity>()
         var mainWindowIdentities = Set<WindowIdentity>()
 
-        for (pid, expectedOwner) in expectedBundlesByPID {
+        processLoop: for (pid, expectedOwner) in expectedBundlesByPID {
             guard let ownerBefore = NSRunningApplication(processIdentifier: pid_t(pid)),
                   !ownerBefore.isTerminated,
                   ownerBefore.bundleIdentifier == expectedOwner.bundleID,
@@ -690,10 +720,34 @@ public enum WindowEnumerator {
             else {
                 continue
             }
+
+            guard let axLease = sharedAXEnumerationGate.begin(
+                pid: pid,
+                processStartTime: expectedOwner.processStartTime,
+                bundleID: expectedOwner.bundleID
+            ) else {
+                continue
+            }
+            var shouldBackOff = false
+            defer {
+                sharedAXEnumerationGate.finish(
+                    axLease,
+                    shouldBackOff: shouldBackOff
+                )
+            }
             let appElement = AXUIElementCreateApplication(pid_t(pid))
+            AXReadPolicy.apply(to: appElement)
 
             var windowsRef: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+            let windowsStatus = AXUIElementCopyAttributeValue(
+                appElement,
+                kAXWindowsAttribute as CFString,
+                &windowsRef
+            )
+            if windowsStatus == .cannotComplete {
+                shouldBackOff = true
+            }
+            guard windowsStatus == .success,
                   let windowElements = windowsRef as? [AXUIElement]
             else {
                 // A failed query is not "this process has no AX windows":
@@ -709,8 +763,13 @@ public enum WindowEnumerator {
             var processSubroles: [WindowIdentity: String] = [:]
             var processModals: [WindowIdentity: Bool] = [:]
             for element in windowElements {
+                AXReadPolicy.apply(to: element)
                 var windowID: CGWindowID = 0
-                guard AXUIElementGetWindowID(element, &windowID) == .success else {
+                let windowIDStatus = AXUIElementGetWindowID(element, &windowID)
+                if windowIDStatus == .cannotComplete {
+                    continue processLoop
+                }
+                guard windowIDStatus == .success else {
                     continue
                 }
                 let identity = WindowIdentity(
@@ -722,62 +781,123 @@ public enum WindowEnumerator {
                 processBacked.insert(identity)
 
                 var minimizedRef: CFTypeRef?
-                if AXUIElementCopyAttributeValue(element, kAXMinimizedAttribute as CFString, &minimizedRef) == .success,
+                let minimizedStatus = AXUIElementCopyAttributeValue(
+                    element,
+                    kAXMinimizedAttribute as CFString,
+                    &minimizedRef
+                )
+                if minimizedStatus == .cannotComplete {
+                    continue processLoop
+                }
+                if minimizedStatus == .success,
                    (minimizedRef as? Bool) == true
                 {
                     processMinimized.insert(identity)
                 }
 
                 var roleRef: CFTypeRef?
-                if AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef) == .success,
+                let roleStatus = AXUIElementCopyAttributeValue(
+                    element,
+                    kAXRoleAttribute as CFString,
+                    &roleRef
+                )
+                if roleStatus == .cannotComplete {
+                    continue processLoop
+                }
+                if roleStatus == .success,
                    let role = roleRef as? String
                 {
                     processRoles[identity] = role
                 }
 
                 var subroleRef: CFTypeRef?
-                if AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleRef) == .success,
+                let subroleStatus = AXUIElementCopyAttributeValue(
+                    element,
+                    kAXSubroleAttribute as CFString,
+                    &subroleRef
+                )
+                if subroleStatus == .cannotComplete {
+                    continue processLoop
+                }
+                if subroleStatus == .success,
                    let subrole = subroleRef as? String
                 {
                     processSubroles[identity] = subrole
                 }
 
                 var modalRef: CFTypeRef?
-                if AXUIElementCopyAttributeValue(element, kAXModalAttribute as CFString, &modalRef) == .success,
+                let modalStatus = AXUIElementCopyAttributeValue(
+                    element,
+                    kAXModalAttribute as CFString,
+                    &modalRef
+                )
+                if modalStatus == .cannotComplete {
+                    continue processLoop
+                }
+                if modalStatus == .success,
                    let modal = modalRef as? Bool
                 {
                     processModals[identity] = modal
                 }
             }
 
-            func processWindowIdentity(attribute: CFString) -> WindowIdentity? {
+            func processWindowIdentity(
+                attribute: CFString
+            ) -> (identity: WindowIdentity?, status: AXError, shouldBackOff: Bool) {
                 var ref: CFTypeRef?
-                guard AXUIElementCopyAttributeValue(appElement, attribute, &ref) == .success,
+                let attributeStatus = AXUIElementCopyAttributeValue(
+                    appElement,
+                    attribute,
+                    &ref
+                )
+                guard attributeStatus == .success,
                       let resolved = ref
                 else {
-                    return nil
+                    return (
+                        nil,
+                        attributeStatus,
+                        attributeStatus == .cannotComplete
+                    )
                 }
+                let resolvedElement = resolved as! AXUIElement
+                AXReadPolicy.apply(to: resolvedElement)
                 var resolvedWindowID: CGWindowID = 0
-                guard AXUIElementGetWindowID((resolved as! AXUIElement), &resolvedWindowID) == .success else {
-                    return nil
+                let windowIDStatus = AXUIElementGetWindowID(
+                    resolvedElement,
+                    &resolvedWindowID
+                )
+                guard windowIDStatus == .success else {
+                    return (nil, windowIDStatus, false)
                 }
-                return WindowIdentity(
-                    pid: pid,
-                    processStartTime: expectedOwner.processStartTime,
-                    windowID: UInt32(resolvedWindowID),
-                    bundleID: expectedOwner.bundleID
+                return (
+                    WindowIdentity(
+                        pid: pid,
+                        processStartTime: expectedOwner.processStartTime,
+                        windowID: UInt32(resolvedWindowID),
+                        bundleID: expectedOwner.bundleID
+                    ),
+                    .success,
+                    false
                 )
             }
             // A background process can keep a sheet or dialog focused while
             // another application is frontmost. Preserve every process's
             // focused/main relationship so its exact main window is protected
             // from geometry and visibility mutation until the companion closes.
-            let processFocusedIdentity = processWindowIdentity(
+            let focusedObservation = processWindowIdentity(
                 attribute: kAXFocusedWindowAttribute as CFString
             )
-            let processMainIdentity = processWindowIdentity(
+            if focusedObservation.status == .cannotComplete {
+                shouldBackOff = shouldBackOff || focusedObservation.shouldBackOff
+                continue processLoop
+            }
+            let mainObservation = processWindowIdentity(
                 attribute: kAXMainWindowAttribute as CFString
             )
+            if mainObservation.status == .cannotComplete {
+                shouldBackOff = shouldBackOff || mainObservation.shouldBackOff
+                continue processLoop
+            }
 
             guard let ownerAfter = NSRunningApplication(processIdentifier: pid_t(pid)),
                   !ownerAfter.isTerminated,
@@ -791,10 +911,10 @@ public enum WindowEnumerator {
             roles.merge(processRoles, uniquingKeysWith: { current, _ in current })
             subroles.merge(processSubroles, uniquingKeysWith: { current, _ in current })
             modals.merge(processModals, uniquingKeysWith: { current, _ in current })
-            if let processFocusedIdentity {
+            if let processFocusedIdentity = focusedObservation.identity {
                 focusedWindowIdentities.insert(processFocusedIdentity)
             }
-            if let processMainIdentity {
+            if let processMainIdentity = mainObservation.identity {
                 mainWindowIdentities.insert(processMainIdentity)
             }
         }
@@ -848,6 +968,7 @@ public enum WindowEnumerator {
         }
 
         let appElement = AXUIElementCreateApplication(pid)
+        AXReadPolicy.apply(to: appElement)
         var ref: CFTypeRef?
         guard AXUIElementCopyAttributeValue(appElement, attribute, &ref) == .success,
               let resolved = ref
@@ -855,8 +976,10 @@ public enum WindowEnumerator {
             return nil
         }
 
+        let resolvedElement = resolved as! AXUIElement
+        AXReadPolicy.apply(to: resolvedElement)
         var resolvedWindowID: CGWindowID = 0
-        guard AXUIElementGetWindowID((resolved as! AXUIElement), &resolvedWindowID) == .success else {
+        guard AXUIElementGetWindowID(resolvedElement, &resolvedWindowID) == .success else {
             return nil
         }
         return UInt32(resolvedWindowID)

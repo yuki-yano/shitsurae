@@ -17,6 +17,97 @@ struct WindowEnumeratorTests {
         #expect(!WindowEnumerator.isEligibleProcessOwner(activationPolicy: .prohibited))
     }
 
+    @Test func serializesAndBacksOffUnresponsiveAXProcessGeneration() {
+        let gate = AXEnumerationGate(retryInterval: 5)
+        let base = Date(timeIntervalSince1970: 1_000)
+
+        let firstLease = gate.begin(
+            pid: 100,
+            processStartTime: 1,
+            bundleID: "com.example.Unresponsive",
+            now: base
+        )
+        #expect(firstLease != nil)
+        #expect(gate.begin(
+            pid: 100,
+            processStartTime: 1,
+            bundleID: "com.example.Unresponsive",
+            now: base
+        ) == nil)
+        guard let firstLease else { return }
+
+        gate.finish(
+            firstLease,
+            shouldBackOff: true,
+            now: base
+        )
+        #expect(gate.begin(
+            pid: 100,
+            processStartTime: 1,
+            bundleID: "com.example.Unresponsive",
+            now: base.addingTimeInterval(4.9)
+        ) == nil)
+        let secondLease = gate.begin(
+            pid: 100,
+            processStartTime: 1,
+            bundleID: "com.example.Unresponsive",
+            now: base.addingTimeInterval(5)
+        )
+        #expect(secondLease != nil)
+        guard let secondLease else { return }
+
+        // A stale owner must not clear a newer in-flight attempt.
+        gate.finish(
+            firstLease,
+            shouldBackOff: false,
+            now: base.addingTimeInterval(5)
+        )
+        #expect(gate.begin(
+            pid: 100,
+            processStartTime: 1,
+            bundleID: "com.example.Unresponsive",
+            now: base.addingTimeInterval(5)
+        ) == nil)
+
+        gate.finish(
+            secondLease,
+            shouldBackOff: false,
+            now: base.addingTimeInterval(5)
+        )
+        #expect(gate.begin(
+            pid: 100,
+            processStartTime: 1,
+            bundleID: "com.example.Unresponsive",
+            now: base.addingTimeInterval(5)
+        ) != nil)
+    }
+
+    @Test func axBackoffNeverCrossesProcessGeneration() {
+        let gate = AXEnumerationGate(retryInterval: 5)
+        let base = Date(timeIntervalSince1970: 1_000)
+
+        let oldLease = gate.begin(
+            pid: 100,
+            processStartTime: 1,
+            bundleID: "com.example.App",
+            now: base
+        )
+        #expect(oldLease != nil)
+        guard let oldLease else { return }
+        gate.finish(
+            oldLease,
+            shouldBackOff: true,
+            now: base
+        )
+
+        #expect(gate.begin(
+            pid: 100,
+            processStartTime: 2,
+            bundleID: "com.example.App",
+            now: base
+        ) != nil)
+    }
+
     @Test func frontmostWindowIDUsesFirstUsableLayerZeroWindowForProcess() {
         let raw = [
             rawWindow(id: 1, pid: 100, layer: 25),

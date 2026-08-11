@@ -6,6 +6,101 @@ import Foundation
 @_silgen_name("_AXUIElementGetWindow")
 func AXUIElementGetWindowID(_ element: AXUIElement, _ idOut: UnsafeMutablePointer<CGWindowID>) -> AXError
 
+/// Bounds read-only AX IPC without changing the timeout used by window
+/// mutations. A single application that stops servicing Accessibility must
+/// not serialize every Shitsurae command behind the system default timeout.
+public enum AXReadPolicy {
+    public static let messagingTimeoutSeconds: Float = 0.25
+
+    @discardableResult
+    public static func apply(to element: AXUIElement) -> AXError {
+        AXUIElementSetMessagingTimeout(element, messagingTimeoutSeconds)
+    }
+}
+
+/// Suppresses overlapping AX inventory reads for the same process generation
+/// and briefly backs off after an application-level
+/// `kAXErrorCannotComplete`. The CG inventory remains authoritative, so
+/// skipping AX metadata during this window cannot release a live binding.
+final class AXEnumerationGate: @unchecked Sendable {
+    fileprivate struct Key: Hashable {
+        let pid: Int
+        let processStartTime: UInt64
+        let bundleID: String
+    }
+
+    private enum Entry {
+        case inFlight(UInt64)
+        case retryAfter(Date)
+    }
+
+    struct Lease {
+        fileprivate let key: Key
+        fileprivate let token: UInt64
+
+        fileprivate init(key: Key, token: UInt64) {
+            self.key = key
+            self.token = token
+        }
+    }
+
+    private let lock = NSLock()
+    private var entries: [Key: Entry] = [:]
+    private var nextToken: UInt64 = 0
+    private let retryInterval: TimeInterval
+
+    init(retryInterval: TimeInterval = 5) {
+        self.retryInterval = retryInterval
+    }
+
+    func begin(
+        pid: Int,
+        processStartTime: UInt64,
+        bundleID: String,
+        now: Date = Date()
+    ) -> Lease? {
+        let key = Key(
+            pid: pid,
+            processStartTime: processStartTime,
+            bundleID: bundleID
+        )
+
+        lock.lock()
+        defer { lock.unlock() }
+        entries = entries.filter { _, entry in
+            if case let .retryAfter(deadline) = entry {
+                return deadline > now
+            }
+            return true
+        }
+        guard entries[key] == nil else { return nil }
+        nextToken &+= 1
+        let lease = Lease(key: key, token: nextToken)
+        entries[key] = .inFlight(lease.token)
+        return lease
+    }
+
+    func finish(
+        _ lease: Lease,
+        shouldBackOff: Bool,
+        now: Date = Date()
+    ) {
+        lock.lock()
+        guard case let .inFlight(currentToken) = entries[lease.key],
+              currentToken == lease.token
+        else {
+            lock.unlock()
+            return
+        }
+        if shouldBackOff {
+            entries[lease.key] = .retryAfter(now.addingTimeInterval(retryInterval))
+        } else {
+            entries.removeValue(forKey: lease.key)
+        }
+        lock.unlock()
+    }
+}
+
 @_silgen_name("GetProcessForPID")
 @discardableResult
 func LegacyGetProcessForPID(_ pid: pid_t, _ psn: UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus

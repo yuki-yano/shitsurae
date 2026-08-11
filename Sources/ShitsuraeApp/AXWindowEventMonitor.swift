@@ -230,6 +230,7 @@ final class AXWindowEventMonitor {
         // main window while DevTools automation changes the focused window.
         // Returning it would consume the activation retry with a stale sibling
         // (the engine rejects it later, but the real focus event is then lost).
+        AXReadPolicy.apply(to: element)
         var focusedRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             element,
@@ -242,6 +243,7 @@ final class AXWindowEventMonitor {
     }
 
     private static func windowID(of element: AXUIElement) -> UInt32? {
+        AXReadPolicy.apply(to: element)
         var windowID: CGWindowID = 0
         guard AppAXUIElementGetWindowID(element, &windowID) == .success else {
             return nil
