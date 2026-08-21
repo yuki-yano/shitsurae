@@ -3,8 +3,9 @@ import Foundation
 public extension VirtualSpaceEngine {
     /// Applies layouts hosted by distinct displays as one logical request.
     /// Structural validation completes before the first window mutation.
-    /// Physical mutations are serialized in caller order; only the
-    /// primary-hosted layout may apply its initial focus.
+    /// Layouts whose declared host display is unavailable are reported as
+    /// skipped; available layouts continue in caller order. Physical mutations
+    /// are serialized; only the primary-hosted layout may apply initial focus.
     func arrange(
         layoutNames: [String],
         config: LoadedConfig
@@ -23,6 +24,7 @@ public extension VirtualSpaceEngine {
         let displays = control.displays()
         var hostDisplayIDByLayout: [String: String] = [:]
         var hostLayoutByDisplayID: [String: String] = [:]
+        var unavailableLayouts: Set<String> = []
         for layoutName in layoutNames {
             guard let layout = config.config.layouts[layoutName] else {
                 throw VirtualSpaceEngineError.layoutNotFound(layoutName)
@@ -32,7 +34,8 @@ public extension VirtualSpaceEngine {
                 config: config.config,
                 displays: displays
             ) else {
-                throw VirtualSpaceEngineError.hostDisplayUnavailable
+                unavailableLayouts.insert(layoutName)
+                continue
             }
             if let existing = hostLayoutByDisplayID[hostDisplay.id] {
                 throw VirtualSpaceEngineError.invalidArrangeBatch(
@@ -45,7 +48,27 @@ public extension VirtualSpaceEngine {
 
         let primaryDisplayID = DisplayResolver.primaryDisplay(displays)?.id
         let results = try layoutNames.map { layoutName in
-            try arrange(
+            if unavailableLayouts.contains(layoutName) {
+                return ArrangeExecutionJSON(
+                    layout: layoutName,
+                    result: "skipped",
+                    subcode: "hostDisplayUnavailable",
+                    unresolvedSlots: [],
+                    hardErrors: [],
+                    softErrors: [],
+                    skipped: [
+                        SkippedItem(
+                            spaceID: nil,
+                            slot: nil,
+                            reason: "hostDisplayUnavailable",
+                            detail: "host display is unavailable; layout was skipped"
+                        ),
+                    ],
+                    warnings: [],
+                    exitCode: ErrorCode.success.rawValue
+                )
+            }
+            return try arrange(
                 layoutName: layoutName,
                 spaceID: nil,
                 config: config,

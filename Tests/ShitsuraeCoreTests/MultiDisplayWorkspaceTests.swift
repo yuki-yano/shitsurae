@@ -150,6 +150,59 @@ struct MultiDisplayWorkspaceTests {
         #expect(control.focusedWindow()?.bundleID != Self.calendarBundleID)
     }
 
+    @Test func batchArrangeSkipsUnavailableDisplayAndAppliesConnectedLayouts() async throws {
+        let (engine, _, url) = makeEngine(
+            windows: primaryWindows(),
+            displays: [TestFixtures.display]
+        )
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let result = try await engine.arrange(
+            layoutNames: ["work", "calendar"],
+            config: dualConfig
+        )
+
+        #expect(result.result == "success")
+        #expect(result.exitCode == ErrorCode.success.rawValue)
+        #expect(result.layouts.map(\.layout) == ["work", "calendar"])
+        #expect(result.layouts[0].result == "success")
+        #expect(result.layouts[1].result == "skipped")
+        #expect(result.layouts[1].subcode == "hostDisplayUnavailable")
+        #expect(result.layouts[1].skipped.map(\.reason) == ["hostDisplayUnavailable"])
+
+        let state = await engine.currentState
+        #expect(state.activeWorkspace(displayID: "uuid-main")?.layoutName == "work")
+        #expect(state.activeWorkspace(layoutName: "calendar") == nil)
+    }
+
+    @Test func batchArrangeSucceedsAsNoOpWhenEveryDisplayIsUnavailable() async throws {
+        let config = TestFixtures.loadedConfig(layouts: [
+            "left": LayoutDefinition(
+                display: DisplayDefinition(id: "missing-left"),
+                spaces: [SpaceDefinition(spaceID: 1, windows: [])]
+            ),
+            "right": LayoutDefinition(
+                display: DisplayDefinition(id: "missing-right"),
+                spaces: [SpaceDefinition(spaceID: 1, windows: [])]
+            ),
+        ])
+        let (engine, _, url) = makeEngine(
+            windows: primaryWindows(),
+            displays: [TestFixtures.display]
+        )
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let result = try await engine.arrange(
+            layoutNames: ["left", "right"],
+            config: config
+        )
+
+        #expect(result.result == "success")
+        #expect(result.exitCode == ErrorCode.success.rawValue)
+        #expect(result.layouts.map(\.result) == ["skipped", "skipped"])
+        #expect((await engine.currentState).activeWorkspaces.isEmpty)
+    }
+
     @Test func batchArrangeRejectsSameDisplayLayoutsBeforeMutation() async throws {
         let config = TestFixtures.loadedConfig(layouts: [
             "work": TestFixtures.twoSpaceLayout(),
@@ -176,7 +229,7 @@ struct MultiDisplayWorkspaceTests {
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
         await #expect(throws: VirtualSpaceEngineError.hostDisplayUnavailable) {
-            try await engine.bootstrapState(layoutName: "calendar", activeSpaceID: 1, config: dualConfig)
+            try await engine.arrange(layoutName: "calendar", spaceID: nil, config: dualConfig)
         }
         let state = await engine.currentState
         #expect(state.activeWorkspace(displayID: "uuid-main") == nil)

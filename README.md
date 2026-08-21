@@ -319,6 +319,11 @@ Layouts assigned to different displays can be applied together:
 shitsurae arrange work reference
 ```
 
+When a batch includes a layout whose host display is unavailable, Shitsurae
+skips that layout and continues applying layouts for connected displays. A
+single-layout arrange still reports `hostDisplayUnavailable` when its host is
+absent.
+
 When an external display disconnects, its workspace becomes dormant.
 After reconnection, Shitsurae resolves the declared display again and restores the window arrangement.
 

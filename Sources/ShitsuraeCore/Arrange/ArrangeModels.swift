@@ -134,12 +134,14 @@ public struct ArrangeBatchExecutionJSON: Codable, Equatable, Sendable {
         self.requestID = requestID
         self.layouts = layouts
 
-        let successfulCount = layouts.filter { $0.result == "success" }.count
+        let completedCount = layouts.filter {
+            $0.result == "success" || $0.result == "skipped"
+        }.count
         let failedCount = layouts.filter { $0.result == "failed" }.count
         if failedCount == layouts.count {
             self.result = "failed"
             self.exitCode = layouts.first?.exitCode ?? ErrorCode.validationError.rawValue
-        } else if successfulCount == layouts.count {
+        } else if completedCount == layouts.count {
             self.result = "success"
             self.exitCode = ErrorCode.success.rawValue
         } else {
