@@ -29,6 +29,16 @@ enum EngineActionUrgency: Sendable {
     }
 }
 
+enum AppStartupStatus: Equatable {
+    case preparing
+    case monitoringApplications(completed: Int, total: Int)
+    case ready
+
+    var isReady: Bool {
+        self == .ready
+    }
+}
+
 @MainActor
 final class FocusEventCoordinator {
     private let gate: FocusEventGate
@@ -166,6 +176,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var workspaceState: WorkspaceStateSnapshot?
     @Published var lastActionMessage: String?
     @Published var actionStatus: ActionStatus = .idle
+    @Published private(set) var startupStatus: AppStartupStatus = .preparing
 
     enum ActionStatus: Equatable {
         case idle
@@ -305,6 +316,7 @@ final class AppModel: ObservableObject {
     }
 
     func start() {
+        startupStatus = .preparing
         accessibilityGranted = SystemProbe.accessibilityGranted()
         screenRecordingGranted = SystemProbe.screenRecordingGranted()
         frontmostApplicationTracker.reset(
@@ -331,11 +343,32 @@ final class AppModel: ObservableObject {
         self.hotkeyManager = hotkeyManager
 
         installNotificationObservers()
-        windowEventMonitor.start { [weak self] event in
-            Task { @MainActor [weak self] in
-                self?.handleWindowEvent(event)
+        windowEventMonitor.start(
+            handler: { [weak self] event in
+                Task { @MainActor [weak self] in
+                    self?.handleWindowEvent(event)
+                }
+            },
+            progress: { [weak self] completed, total in
+                Task { @MainActor [weak self] in
+                    guard let self,
+                          !self.shutdownInProgress,
+                          !self.startupStatus.isReady
+                    else { return }
+                    self.startupStatus = .monitoringApplications(
+                        completed: completed,
+                        total: total
+                    )
+                }
+            },
+            completion: { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self, !self.shutdownInProgress else { return }
+                    self.startupStatus = .ready
+                    self.logger.log(event: "app.startupReady")
+                }
             }
-        }
+        )
         handleConfigChange()
         refreshStatus()
     }

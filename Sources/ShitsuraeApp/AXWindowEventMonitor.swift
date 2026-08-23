@@ -7,7 +7,7 @@ import ShitsuraeCore
 @_silgen_name("_AXUIElementGetWindow")
 private func AppAXUIElementGetWindowID(_ element: AXUIElement, _ idOut: UnsafeMutablePointer<CGWindowID>) -> AXError
 
-final class AXWindowEventMonitor {
+final class AXWindowEventMonitor: @unchecked Sendable {
     enum Event: Sendable, Equatable {
         case focusedWindowChanged(
             sequence: UInt64,
@@ -46,10 +46,27 @@ final class AXWindowEventMonitor {
         let context: CallbackContext
     }
 
+    private let applicationProvider: () -> [NSRunningApplication]
+    private let registrationHook: (@Sendable (NSRunningApplication) -> Void)?
+    private let lifecycleLock = NSLock()
     private var observers: [pid_t: ObserverRecord] = [:]
     private var handler: (@Sendable (Event) -> Void)?
+    private var monitorThread: Thread?
+    private var monitorRunLoop: CFRunLoop?
+    private var pendingOperations: [() -> Void] = []
+    private var stopping = false
     private static let sequenceLock = NSLock()
     private nonisolated(unsafe) static var sourceSequence: UInt64 = 0
+
+    init(
+        applicationProvider: @escaping () -> [NSRunningApplication] = {
+            NSWorkspace.shared.runningApplications
+        },
+        registrationHook: (@Sendable (NSRunningApplication) -> Void)? = nil
+    ) {
+        self.applicationProvider = applicationProvider
+        self.registrationHook = registrationHook
+    }
 
     static func nextSequence() -> UInt64 {
         Self.sequenceLock.lock()
@@ -58,30 +75,172 @@ final class AXWindowEventMonitor {
         return Self.sourceSequence
     }
 
-    func start(handler: @escaping @Sendable (Event) -> Void) {
+    /// Starts AX registration on a dedicated run loop. AX notification
+    /// registration performs synchronous cross-process IPC and a single
+    /// unresponsive application can stall for more than a second, so none of
+    /// this work may run on the main thread during application launch.
+    func start(
+        handler: @escaping @Sendable (Event) -> Void,
+        progress: @escaping @Sendable (_ completed: Int, _ total: Int) -> Void = { _, _ in },
+        completion: @escaping @Sendable () -> Void = {}
+    ) {
+        let applications = applicationProvider()
+
+        lifecycleLock.lock()
+        guard monitorThread == nil else {
+            lifecycleLock.unlock()
+            return
+        }
         self.handler = handler
-        refreshRunningApplications()
+        stopping = false
+
+        let thread = Thread { [weak self] in
+            self?.run(
+                initialApplications: applications,
+                progress: progress,
+                completion: completion
+            )
+        }
+        thread.name = "Shitsurae AX Window Monitor"
+        thread.qualityOfService = .userInitiated
+        monitorThread = thread
+        lifecycleLock.unlock()
+
+        progress(0, applications.count)
+        thread.start()
     }
 
     func stop() {
-        for record in observers.values {
-            CFRunLoopRemoveSource(
-                CFRunLoopGetMain(),
-                AXObserverGetRunLoopSource(record.observer),
-                .commonModes
-            )
-        }
-        observers.removeAll()
+        lifecycleLock.lock()
+        stopping = true
         handler = nil
+        pendingOperations.removeAll()
+        let runLoop = monitorRunLoop
+        lifecycleLock.unlock()
+
+        if let runLoop {
+            CFRunLoopStop(runLoop)
+            CFRunLoopWakeUp(runLoop)
+        }
     }
 
     func refreshRunningApplications() {
-        for app in NSWorkspace.shared.runningApplications {
+        for app in applicationProvider() {
             register(application: app)
         }
     }
 
     func register(application: NSRunningApplication) {
+        performOnMonitorThread { [weak self] in
+            self?.registerOnMonitorThread(application: application)
+        }
+    }
+
+    func focusedWindowID(application: NSRunningApplication) -> UInt32? {
+        guard AXIsProcessTrusted() else {
+            return nil
+        }
+        return Self.windowID(from: AXUIElementCreateApplication(application.processIdentifier))
+    }
+
+    func unregister(application: NSRunningApplication) {
+        performOnMonitorThread { [weak self] in
+            self?.unregisterOnMonitorThread(application: application)
+        }
+    }
+
+    private func run(
+        initialApplications: [NSRunningApplication],
+        progress: @escaping @Sendable (_ completed: Int, _ total: Int) -> Void,
+        completion: @escaping @Sendable () -> Void
+    ) {
+        let runLoop = CFRunLoopGetCurrent()
+        var sourceContext = CFRunLoopSourceContext()
+        guard let keepAliveSource = CFRunLoopSourceCreate(nil, 0, &sourceContext) else {
+            completion()
+            return
+        }
+        CFRunLoopAddSource(runLoop, keepAliveSource, .defaultMode)
+
+        lifecycleLock.lock()
+        monitorRunLoop = runLoop
+        let pending = pendingOperations
+        pendingOperations.removeAll()
+        let shouldStop = stopping
+        lifecycleLock.unlock()
+
+        defer {
+            for record in observers.values {
+                CFRunLoopRemoveSource(
+                    runLoop,
+                    AXObserverGetRunLoopSource(record.observer),
+                    .defaultMode
+                )
+            }
+            observers.removeAll()
+            CFRunLoopRemoveSource(runLoop, keepAliveSource, .defaultMode)
+
+            lifecycleLock.lock()
+            monitorRunLoop = nil
+            monitorThread = nil
+            pendingOperations.removeAll()
+            handler = nil
+            lifecycleLock.unlock()
+        }
+
+        guard !shouldStop else { return }
+
+        pending.forEach { $0() }
+
+        let total = initialApplications.count
+        for (index, application) in initialApplications.enumerated() {
+            guard !isStopping else { return }
+            registerOnMonitorThread(application: application)
+
+            let completed = index + 1
+            if completed == total || completed.isMultiple(of: 10) {
+                progress(completed, total)
+            }
+        }
+
+        guard !isStopping else { return }
+        completion()
+
+        while !isStopping {
+            CFRunLoopRunInMode(.defaultMode, 60, false)
+        }
+    }
+
+    private var isStopping: Bool {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        return stopping
+    }
+
+    private func performOnMonitorThread(_ operation: @escaping () -> Void) {
+        lifecycleLock.lock()
+        guard monitorThread != nil, !stopping else {
+            lifecycleLock.unlock()
+            return
+        }
+
+        guard let runLoop = monitorRunLoop else {
+            pendingOperations.append(operation)
+            lifecycleLock.unlock()
+            return
+        }
+        lifecycleLock.unlock()
+
+        CFRunLoopPerformBlock(runLoop, CFRunLoopMode.defaultMode.rawValue, operation)
+        CFRunLoopWakeUp(runLoop)
+    }
+
+    private func registerOnMonitorThread(application: NSRunningApplication) {
+        if let registrationHook {
+            registrationHook(application)
+            return
+        }
+
         let pid = application.processIdentifier
         guard AXIsProcessTrusted(),
               !application.isTerminated,
@@ -108,9 +267,9 @@ final class AXWindowEventMonitor {
                 return
             }
             CFRunLoopRemoveSource(
-                CFRunLoopGetMain(),
+                CFRunLoopGetCurrent(),
                 AXObserverGetRunLoopSource(existing.observer),
-                .commonModes
+                .defaultMode
             )
             observers.removeValue(forKey: pid)
         }
@@ -147,18 +306,11 @@ final class AXWindowEventMonitor {
         // launch or automation startup.
         guard registeredNotification else { return }
 
-        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(observer), .defaultMode)
         observers[pid] = ObserverRecord(observer: observer, appElement: appElement, context: context)
     }
 
-    func focusedWindowID(application: NSRunningApplication) -> UInt32? {
-        guard AXIsProcessTrusted() else {
-            return nil
-        }
-        return Self.windowID(from: AXUIElementCreateApplication(application.processIdentifier))
-    }
-
-    func unregister(application: NSRunningApplication) {
+    private func unregisterOnMonitorThread(application: NSRunningApplication) {
         let pid = application.processIdentifier
         guard let record = observers[pid] else { return }
         if let terminatedLaunchDate = application.launchDate,
@@ -175,9 +327,9 @@ final class AXWindowEventMonitor {
         }
         observers.removeValue(forKey: pid)
         CFRunLoopRemoveSource(
-            CFRunLoopGetMain(),
+            CFRunLoopGetCurrent(),
             AXObserverGetRunLoopSource(record.observer),
-            .commonModes
+            .defaultMode
         )
     }
 
@@ -191,6 +343,10 @@ final class AXWindowEventMonitor {
         // A queued callback from a terminated process can arrive after macOS
         // has reused its PID. Reject it before sequence allocation so it
         // cannot supersede a valid focus event from the new process instance.
+        lifecycleLock.lock()
+        let handler = handler
+        lifecycleLock.unlock()
+
         guard ProcessGenerationResolver.startTime(pid: Int(pid)) == processStartTime,
               let handler
         else { return }

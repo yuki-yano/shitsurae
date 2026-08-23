@@ -121,7 +121,67 @@ struct MainWindowView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(minWidth: 820, minHeight: 560)
+        .disabled(!model.startupStatus.isReady)
+        .overlay {
+            if !model.startupStatus.isReady {
+                StartupLoadingView(status: model.startupStatus)
+            }
+        }
         .onAppear { model.refreshStatus() }
+    }
+}
+
+private struct StartupLoadingView: View {
+    let status: AppStartupStatus
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "rectangle.3.group")
+                .font(.system(size: 32, weight: .medium))
+                .foregroundStyle(.tint)
+
+            VStack(spacing: 5) {
+                Text("Getting Shitsurae ready…")
+                    .font(.headline)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .contentTransition(.numericText())
+            }
+
+            progressView
+                .frame(width: 240)
+        }
+        .padding(.horizontal, 34)
+        .padding(.vertical, 28)
+        .background(.regularMaterial, in: .rect(cornerRadius: 18))
+        .shadow(color: .black.opacity(0.12), radius: 18, y: 8)
+        .accessibilityElement(children: .combine)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.ultraThinMaterial)
+    }
+
+    private var detail: String {
+        switch status {
+        case .preparing:
+            "Preparing services"
+        case let .monitoringApplications(completed, total):
+            "Monitoring running applications \(completed) of \(total)"
+        case .ready:
+            "Ready"
+        }
+    }
+
+    @ViewBuilder
+    private var progressView: some View {
+        switch status {
+        case .preparing:
+            ProgressView()
+        case let .monitoringApplications(completed, total) where total > 0:
+            ProgressView(value: Double(completed), total: Double(total))
+        case .monitoringApplications, .ready:
+            ProgressView()
+        }
     }
 }
 

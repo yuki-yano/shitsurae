@@ -101,9 +101,11 @@ struct ShitsuraeApp: App {
                 Button("Apply All") {
                     model.applyLayout(layout, spaceID: nil)
                 }
+                .disabled(!model.startupStatus.isReady)
                 Button("Apply Current Space") {
                     model.applyLayout(layout, spaceID: model.activeSpaceID ?? model.selectedSpaceID)
                 }
+                .disabled(!model.startupStatus.isReady)
             }
         }
 
