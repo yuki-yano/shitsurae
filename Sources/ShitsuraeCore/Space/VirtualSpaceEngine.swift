@@ -687,6 +687,9 @@ public actor VirtualSpaceEngine {
             !unresolvedVisibilityIdentities.contains($0.window.identity)
         }
         let targetIdentities = Set(focusCandidates.map(\.window.identity))
+        let previouslyTrackedIdentitiesBeingHidden = Set(plan.hides.compactMap { hide in
+            entryByID[hide.entryID] == nil ? nil : hide.window.identity
+        })
 
         // Geometry retries can make AppKit activate a sibling application. Do
         // not focus before those mutations settle: an early focus followed by
@@ -702,11 +705,16 @@ public actor VirtualSpaceEngine {
         {
             let intendedTopIdentity = focusCandidates[0].window.identity
             // CG can conservatively report a non-focused layer-0 surface as
-            // frontmost. A false positive only preserves the user's apparent
-            // newer choice; exact target success is still verified through AX.
+            // frontmost. Parking the old workspace can also transiently move
+            // focus to another previously tracked window that is being
+            // hidden. Neither is a newer user choice. A newly discovered
+            // window is different: the user may have opened or selected it
+            // while the switch was settling, so preserve that choice.
             let liveFrontmost = control.frontmostWindowIdentity()
             let focusMovedOutsideTarget = liveFrontmost.map { identity in
-                identity != focusBeforeVisibilityMutation && !targetIdentities.contains(identity)
+                identity != focusBeforeVisibilityMutation
+                    && !targetIdentities.contains(identity)
+                    && !previouslyTrackedIdentitiesBeingHidden.contains(identity)
             } ?? false
 
             if liveFrontmost == intendedTopIdentity,

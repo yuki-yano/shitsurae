@@ -354,6 +354,25 @@ struct VirtualSpaceEngineTests {
         #expect(control.focusedWindowIDs.count(where: { $0 == 1 }) == 1)
     }
 
+    @Test func switchSpaceReplacesTransientFocusOnWindowBeingHidden() async throws {
+        let (engine, control, url) = makeEngine(windows: standardWindows())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
+        control.setFocusedWindowID(1)
+
+        // AppKit can move focus from the previously focused window to one of
+        // its siblings while both are being parked. That sibling is part of
+        // the old workspace and must not be mistaken for a newer user choice.
+        control.stealFocusOnPositionAttempt = 2
+
+        let outcome = try await engine.switchSpace(to: 2, config: config)
+
+        #expect(outcome.focusedWindowID == 3)
+        #expect(control.focusedWindowIDs.last == 3)
+        #expect(control.focusedWindowIdentity() == control.window(3)?.identity)
+    }
+
     @Test func switchSpaceDoesNotTreatCGFrontmostWindowAsAXFocused() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
