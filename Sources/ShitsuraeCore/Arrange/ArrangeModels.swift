@@ -81,6 +81,11 @@ public struct ArrangeDryRunJSON: Codable, Equatable, Sendable {
 }
 
 public struct ArrangeExecutionJSON: Codable, Equatable, Sendable {
+    public var outcomeDetail: String? {
+        let detail = ((hardErrors + softErrors).map(\.message) + unresolvedSlots.map(\.reason)).joined(separator: "; ")
+        return detail.isEmpty ? nil : detail
+    }
+
     public let schemaVersion: Int
     public let layout: String
     public let result: String
@@ -120,6 +125,13 @@ public struct ArrangeExecutionJSON: Codable, Equatable, Sendable {
 /// Window mutations are serialized by the engine actor; this contract reports
 /// every per-layout result without claiming physical atomicity.
 public struct ArrangeBatchExecutionJSON: Codable, Equatable, Sendable {
+    public var outcomeDetail: String? {
+        let detail = layouts.compactMap { result in
+            result.outcomeDetail.map { "\(result.layout): \($0)" }
+        }.joined(separator: "; ")
+        return detail.isEmpty ? nil : detail
+    }
+
     public let schemaVersion: Int
     public let requestID: String
     public let result: String

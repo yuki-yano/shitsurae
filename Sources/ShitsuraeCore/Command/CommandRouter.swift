@@ -4,6 +4,8 @@ import Foundation
 /// router. The `command` strings are the public IPC contract.
 public struct CommandRequest: Codable, Sendable {
     public var command: String
+    public var requestID: String?
+    public var setName: String?
     public var layout: String?
     public var monitor: String?
     public var layouts: [String]?
@@ -27,6 +29,7 @@ public struct CommandRequest: Codable, Sendable {
 
     public init(command: String) {
         self.command = command
+        self.requestID = UUID().uuidString.lowercased()
     }
 
     public var selector: WindowTargetSelector {
@@ -46,15 +49,34 @@ public struct CommandResponseProbe: Codable, Sendable {
     public let error: CommonErrorJSON?
 }
 
+private final class CommandDispatchAdmission: @unchecked Sendable {
+    private let lock = NSLock()
+    private var admitted: ArrangeOperationToken?
+    var token: ArrangeOperationToken? { lock.lock(); defer { lock.unlock() }; return admitted }
+    func record(_ token: ArrangeOperationToken) { lock.lock(); admitted = token; lock.unlock() }
+}
+
 /// Thin dispatch from wire requests to the engine; owns nothing but
 /// references. All payloads are encoded into a uniform envelope:
 /// `{"ok": Bool, "exitCode": Int, "payload": ..., "error": ...}`
-public final class CommandRouter: Sendable {
+public final class CommandRouter: @unchecked Sendable {
+    @TaskLocal private static var dispatchAdmission: CommandDispatchAdmission?
+
+    private func admitOperation(requestID: String, operation: ArrangeOperationKind, permitsRecovery: Bool = false) async throws -> ArrangeOperationToken {
+        let token = try engine.operationCoordinator.tryAdmit(requestID: requestID, operation: operation,
+            permitsRecovery: permitsRecovery, requiresAuthoritativeJournalCheck: true)
+        Self.dispatchAdmission?.record(token)
+        try await engine.validateMutationAdmission(token: token, permitsRecovery: permitsRecovery, allowsTransition: false)
+        return token
+    }
     public static let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
 
     private let engine: VirtualSpaceEngine
     private let configManager: ConfigManager
     private let logger: ShitsuraeLogger
+    private let replayLock = NSLock()
+    private var activeRequestSignatures: [String: Data] = [:]
+    private var lastCompletedRequest: (requestID: String, signature: Data, response: Data)?
 
     public init(engine: VirtualSpaceEngine, configManager: ConfigManager, logger: ShitsuraeLogger) {
         self.engine = engine
@@ -63,7 +85,7 @@ public final class CommandRouter: Sendable {
     }
 
     public func handle(requestData: Data) async -> Data {
-        let request: CommandRequest
+        var request: CommandRequest
         do {
             request = try JSONDecoder().decode(CommandRequest.self, from: requestData)
         } catch {
@@ -72,27 +94,102 @@ public final class CommandRouter: Sendable {
             )
         }
 
-        do {
-            if Self.invalidatesPendingFocus(request) {
-                engine.invalidatePendingFocusEvents()
+        if request.requestID == nil { request.requestID = UUID().uuidString.lowercased() }
+        let signature = Self.requestSignature(request)
+        let tracksReplay = Self.isReplayProtectedMutation(request)
+        if tracksReplay, let requestID = request.requestID {
+            switch beginRequest(requestID: requestID, signature: signature) {
+            case let .replay(response):
+                return response
+            case .inProgress:
+                return Self.encodeBusyStatus(engine.operationCoordinator.status())
+            case .conflict:
+                return Self.encodeError(
+                    ShitsuraeError(
+                        .validationError,
+                        "requestID was already used with a different request",
+                        subcode: "requestIDConflict"
+                    )
+                )
+            case .proceed:
+                break
             }
-            return try await dispatch(request)
-        } catch let error as ShitsuraeError {
-            return Self.encodeError(error)
-        } catch let error as VirtualSpaceEngineError {
-            return Self.encodeError(Self.mapEngineError(error))
-        } catch let error as ConfigLoadError {
-            return Self.encodeError(
-                ShitsuraeError(error.code, error.localizedDescription)
-            )
+        }
+
+        let response: Data
+        let admission = CommandDispatchAdmission()
+        do {
+            response = try await Self.$dispatchAdmission.withValue(admission) { try await dispatch(request) }
         } catch {
-            return Self.encodeError(ShitsuraeError(.validationError, String(describing: error)))
+            if let interruption = admission.token.flatMap({ engine.operationCoordinator.interruptionError(token: $0) }) {
+                response = Self.encodeError(interruption)
+            } else if let error = error as? ShitsuraeError {
+                response = Self.encodeError(error)
+            } else if let error = error as? VirtualSpaceEngineError {
+                response = Self.encodeError(Self.mapEngineError(error))
+            } else if let error = error as? ConfigLoadError {
+                response = Self.encodeError(ShitsuraeError(error.code, error.localizedDescription))
+            } else {
+                response = Self.encodeError(ShitsuraeError(.validationError, String(describing: error)))
+            }
+        }
+        if let token = admission.token,
+           let probe = try? JSONDecoder().decode(CommandResponseProbe.self, from: response), !probe.ok {
+            engine.operationCoordinator.finish(token: token, result: "failed", exitCode: probe.exitCode, detail: probe.error?.message)
+        }
+        if tracksReplay, let requestID = request.requestID {
+            finishRequest(requestID: requestID, signature: signature, response: response)
+        }
+        return response
+    }
+
+    private enum ReplayDecision {
+        case proceed
+        case replay(Data)
+        case inProgress
+        case conflict
+    }
+
+    private func beginRequest(requestID: String, signature: Data) -> ReplayDecision {
+        replayLock.lock()
+        defer { replayLock.unlock() }
+        if let completed = lastCompletedRequest, completed.requestID == requestID {
+            return completed.signature == signature ? .replay(completed.response) : .conflict
+        }
+        if let activeSignature = activeRequestSignatures[requestID] {
+            return activeSignature == signature ? .inProgress : .conflict
+        }
+        activeRequestSignatures[requestID] = signature
+        return .proceed
+    }
+
+    private func finishRequest(requestID: String, signature: Data, response: Data) {
+        replayLock.lock()
+        defer { replayLock.unlock() }
+        guard activeRequestSignatures[requestID] == signature else { return }
+        activeRequestSignatures.removeValue(forKey: requestID)
+        lastCompletedRequest = (requestID, signature, response)
+    }
+
+    private static func requestSignature(_ request: CommandRequest) -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return (try? encoder.encode(request)) ?? Data()
+    }
+
+    private static func isReplayProtectedMutation(_ request: CommandRequest) -> Bool {
+        switch request.command {
+        case "arrange", "arrangeSet", "arrangeRecover", "spaceSwitch", "spaceRecover",
+             "windowWorkspace", "windowMove", "windowResize", "windowSet", "focus":
+            return true
+        default:
+            return false
         }
     }
 
     static func invalidatesPendingFocus(_ request: CommandRequest) -> Bool {
         switch request.command {
-        case "arrange":
+        case "arrange", "arrangeSet", "arrangeRecover":
             // state-only still replaces active layout/workspace state. A
             // queued follow-focus continuation captured before that write
             // must not run afterward against the new state.
@@ -108,6 +205,14 @@ public final class CommandRouter: Sendable {
     private func dispatch(_ request: CommandRequest) async throws -> Data {
         switch request.command {
         case "arrange":
+            let requestID = request.requestID ?? UUID().uuidString.lowercased()
+            let token = try await admitOperation(
+                requestID: requestID,
+                operation: .arrange
+            )
+            if request.dryRun != true {
+                engine.invalidatePendingFocusEvents()
+            }
             let layoutNames = try requireNonEmpty(request.layouts, "layouts")
             let config = try configManager.config()
             if layoutNames.count > 1 {
@@ -118,7 +223,12 @@ public final class CommandRouter: Sendable {
                         subcode: "invalidArrangeBatchOptions"
                     )
                 }
-                let result = try await engine.arrange(layoutNames: layoutNames, config: config)
+                let result = try await engine.arrange(
+                    layoutNames: layoutNames,
+                    config: config,
+                    token: token
+                )
+                engine.operationCoordinator.finish(token: token, result: result.result, exitCode: result.exitCode, detail: result.outcomeDetail)
                 return Self.encodeSuccess(result, exitCode: result.exitCode)
             }
 
@@ -127,24 +237,118 @@ public final class CommandRouter: Sendable {
                 let result = try await engine.arrangeDryRun(
                     layoutName: layoutName,
                     spaceID: request.spaceID,
-                    config: config
+                    config: config,
+                    token: token
                 )
+                engine.operationCoordinator.finish(token: token, result: "dryRun", exitCode: 0)
                 return Self.encodeSuccess(result)
             }
             if request.stateOnly == true {
                 let result = try await engine.arrangeStateOnly(
                     layoutName: layoutName,
                     spaceID: request.spaceID,
-                    config: config
+                    config: config,
+                    token: token
                 )
+                engine.operationCoordinator.finish(token: token, result: result.result, exitCode: result.exitCode)
                 return Self.encodeSuccess(result, exitCode: result.exitCode)
             }
             let result = try await engine.arrange(
                 layoutName: layoutName,
                 spaceID: request.spaceID,
-                config: config
+                config: config,
+                token: token
             )
+            engine.operationCoordinator.finish(token: token, result: result.result, exitCode: result.exitCode, detail: result.outcomeDetail)
             return Self.encodeSuccess(result, exitCode: result.exitCode)
+
+        case "arrangeSet":
+            let setName = try require(request.setName, "setName")
+            guard request.layouts == nil,
+                  request.spaceID == nil,
+                  request.stateOnly != true
+            else {
+                throw ShitsuraeError(
+                    .validationError,
+                    "arrangeSet does not accept layouts, --space, or --state-only",
+                    subcode: "invalidArrangeSetOptions"
+                )
+            }
+            let requestID = request.requestID ?? UUID().uuidString.lowercased()
+            let token = try await admitOperation(
+                requestID: requestID,
+                operation: .arrangeSet
+            )
+            if request.dryRun != true {
+                engine.invalidatePendingFocusEvents()
+            }
+            let config = try configManager.config()
+            if request.dryRun == true {
+                let result = try await engine.arrangeSetDryRun(
+                    setName: setName,
+                    requestID: requestID,
+                    config: config,
+                    token: token
+                )
+                engine.operationCoordinator.finish(token: token, result: "dryRun", exitCode: result.exitCode)
+                return Self.encodeSuccess(result)
+            }
+            let result = try await engine.arrangeSet(
+                setName: setName,
+                requestID: requestID,
+                config: config,
+                token: token
+            )
+            engine.operationCoordinator.finish(token: token, result: result.result, exitCode: result.exitCode, detail: result.outcomeDetail)
+            return Self.encodeSuccess(result, exitCode: result.exitCode)
+
+        case "arrangeStatus":
+            guard request.dryRun != true,
+                  request.layouts == nil,
+                  request.setName == nil,
+                  request.spaceID == nil,
+                  request.stateOnly != true
+            else {
+                throw ShitsuraeError(.validationError, "arrangeStatus does not accept arrange options")
+            }
+            return Self.encodeSuccess(engine.operationCoordinator.status())
+
+        case "arrangeRecover":
+            guard request.dryRun != true,
+                  request.layouts == nil,
+                  request.setName == nil,
+                  request.spaceID == nil,
+                  request.stateOnly != true
+            else {
+                throw ShitsuraeError(.validationError, "arrangeRecover does not accept arrange options")
+            }
+            let requestID = request.requestID ?? UUID().uuidString.lowercased()
+            let token = try await admitOperation(
+                requestID: requestID,
+                operation: .recover,
+                permitsRecovery: true
+            )
+            engine.invalidatePendingFocusEvents()
+            engine.operationCoordinator.update(token: token, phase: .recovering)
+            let result = try await engine.recoverLayoutTransition(requestID: requestID, token: token)
+            engine.operationCoordinator.finish(token: token, result: result.result, exitCode: result.exitCode, detail: result.outcomeDetail)
+            return Self.encodeSuccess(result, exitCode: result.exitCode)
+
+        case "layoutSetsList":
+            let config = try configManager.config()
+            let state = await engine.currentState
+            let items = config.config.layoutSets.map { name, definition in
+                LayoutSetsListJSON.Item(
+                    name: name,
+                    layouts: definition.layouts,
+                    selected: state.selectedLayoutSet?.name == name,
+                    needsReapply: state.selectedLayoutSet?.name == name
+                        && state.anySelectedSetScopeNeedsReapply(config: config.config)
+                )
+            }.sorted { $0.name < $1.name }
+            return Self.encodeSuccess(
+                LayoutSetsListJSON(selectedSet: state.selectedLayoutSet?.name, sets: items)
+            )
 
         case "layoutsList":
             let config = try configManager.config()
@@ -198,6 +402,12 @@ public final class CommandRouter: Sendable {
             return Self.encodeSuccess(await engine.spaceCurrent(config: config))
 
         case "spaceSwitch":
+            let operationRequestID = request.requestID ?? UUID().uuidString.lowercased()
+            let operationToken = try await admitOperation(
+                requestID: operationRequestID,
+                operation: .switchSpace
+            )
+            engine.invalidatePendingFocusEvents()
             let spaceID = try require(request.spaceID, "spaceID")
             if request.layout != nil, request.monitor != nil {
                 throw ShitsuraeError(
@@ -213,7 +423,8 @@ public final class CommandRouter: Sendable {
                     to: spaceID,
                     config: config,
                     reconcile: request.reconcile ?? false,
-                    focusPolicy: request.focus ?? .target
+                    focusPolicy: request.focus ?? .target,
+                    token: operationToken
                 )
             } else if let monitor = request.monitor {
                 outcome = try await engine.switchSpace(
@@ -221,36 +432,50 @@ public final class CommandRouter: Sendable {
                     to: spaceID,
                     config: config,
                     reconcile: request.reconcile ?? false,
-                    focusPolicy: request.focus ?? .target
+                    focusPolicy: request.focus ?? .target,
+                    token: operationToken
                 )
             } else {
                 outcome = try await engine.switchSpace(
                     to: spaceID,
                     config: config,
                     reconcile: request.reconcile ?? false,
-                    focusPolicy: request.focus ?? .target
+                    focusPolicy: request.focus ?? .target,
+                    token: operationToken
                 )
             }
-            let result = SpaceSwitchJSON(requestID: UUID().uuidString.lowercased(), outcome: outcome)
+            let result = SpaceSwitchJSON(requestID: operationRequestID, outcome: outcome)
             // Visibility that did not converge (or unresolved slots) is a
             // partial success — scripts must be able to detect it.
             let converged = outcome.converged && outcome.unresolvedSlots.isEmpty
+            engine.operationCoordinator.finish(
+                token: operationToken,
+                result: converged ? "success" : "partial",
+                exitCode: converged ? 0 : ErrorCode.partialSuccess.rawValue
+            )
             return Self.encodeSuccess(result, exitCode: converged ? 0 : ErrorCode.partialSuccess.rawValue)
 
         case "spaceRecover":
+            let operationRequestID = request.requestID ?? UUID().uuidString.lowercased()
+            let operationToken = try await admitOperation(
+                requestID: operationRequestID,
+                operation: .recover
+            )
+            engine.invalidatePendingFocusEvents()
             guard request.forceClearPending == true else {
                 throw ShitsuraeError(.validationError, "space recover requires --force-clear-pending")
             }
             let previousLayoutName = await engine.activeLayoutName()
             let previousSpaceID = await engine.activeSpaceID()
-            try await engine.clearPending()
+            try await engine.clearPending(token: operationToken)
             let result = SpaceRecoveryJSON(
-                requestID: UUID().uuidString.lowercased(),
+                requestID: operationRequestID,
                 clearedPending: true,
                 previousActiveLayoutName: previousLayoutName,
                 previousActiveSpaceID: previousSpaceID,
                 warning: "pending state cleared; run 'shitsurae space switch <id> --reconcile' to reconcile visibility"
             )
+            engine.operationCoordinator.finish(token: operationToken, result: "success", exitCode: 0)
             return Self.encodeSuccess(result)
 
         case "windowCurrent":
@@ -260,16 +485,27 @@ public final class CommandRouter: Sendable {
             return Self.encodeSuccess(result)
 
         case "windowWorkspace":
+            let operationRequestID = request.requestID ?? UUID().uuidString.lowercased()
+            let operationToken = try await admitOperation(
+                requestID: operationRequestID,
+                operation: .window
+            )
+            engine.invalidatePendingFocusEvents()
             let spaceID = try require(request.spaceID, "spaceID")
             let config = try configManager.config()
             let result = try await engine.windowWorkspace(
                 selector: try validatedSelector(request),
                 toSpaceID: spaceID,
-                config: config
+                config: config,
+                token: operationToken
             )
+            engine.operationCoordinator.finish(token: operationToken, result: "success", exitCode: 0)
             return Self.encodeSuccess(result)
 
         case "windowMove":
+            let operationRequestID = request.requestID ?? UUID().uuidString.lowercased()
+            let operationToken = try await admitOperation(requestID: operationRequestID, operation: .window)
+            engine.invalidatePendingFocusEvents()
             let config = try configManager.config()
             let result = try await engine.setWindowFrame(
                 selector: try validatedSelector(request),
@@ -277,11 +513,16 @@ public final class CommandRouter: Sendable {
                 y: try lengthValue(request.y, "y"),
                 width: nil,
                 height: nil,
-                config: config
+                config: config,
+                token: operationToken
             )
+            engine.operationCoordinator.finish(token: operationToken, result: "success", exitCode: 0)
             return Self.encodeSuccess(result)
 
         case "windowResize":
+            let operationRequestID = request.requestID ?? UUID().uuidString.lowercased()
+            let operationToken = try await admitOperation(requestID: operationRequestID, operation: .window)
+            engine.invalidatePendingFocusEvents()
             let config = try configManager.config()
             let result = try await engine.setWindowFrame(
                 selector: try validatedSelector(request),
@@ -289,11 +530,16 @@ public final class CommandRouter: Sendable {
                 y: nil,
                 width: try lengthValue(request.width, "width"),
                 height: try lengthValue(request.height, "height"),
-                config: config
+                config: config,
+                token: operationToken
             )
+            engine.operationCoordinator.finish(token: operationToken, result: "success", exitCode: 0)
             return Self.encodeSuccess(result)
 
         case "windowSet":
+            let operationRequestID = request.requestID ?? UUID().uuidString.lowercased()
+            let operationToken = try await admitOperation(requestID: operationRequestID, operation: .window)
+            engine.invalidatePendingFocusEvents()
             let config = try configManager.config()
             let result = try await engine.setWindowFrame(
                 selector: try validatedSelector(request),
@@ -301,20 +547,32 @@ public final class CommandRouter: Sendable {
                 y: try lengthValue(request.y, "y"),
                 width: try lengthValue(request.width, "width"),
                 height: try lengthValue(request.height, "height"),
-                config: config
+                config: config,
+                token: operationToken
             )
+            engine.operationCoordinator.finish(token: operationToken, result: "success", exitCode: 0)
             return Self.encodeSuccess(result)
 
         case "focus":
+            let operationRequestID = request.requestID ?? UUID().uuidString.lowercased()
+            let operationToken = try await admitOperation(requestID: operationRequestID, operation: .focus)
+            engine.invalidatePendingFocusEvents()
             let config = try configManager.config()
             if let slot = request.slot {
-                let result = try await engine.focusSlot(slot, config: config)
+                let result = try await engine.focusSlot(
+                    slot,
+                    config: config,
+                    token: operationToken
+                )
+                engine.operationCoordinator.finish(token: operationToken, result: "success", exitCode: 0)
                 return Self.encodeSuccess(result)
             }
             let result = try await engine.focusWindow(
                 selector: try validatedSelector(request),
-                config: config
+                config: config,
+                token: operationToken
             )
+            engine.operationCoordinator.finish(token: operationToken, result: "success", exitCode: 0)
             return Self.encodeSuccess(result)
 
         case "switcherList":
@@ -392,6 +650,11 @@ public final class CommandRouter: Sendable {
                 slotCount: state.slots.count,
                 hiddenCount: state.slots.filter(\.visibilityState.isManagedHidden).count,
                 recoveryRequired: state.recoveryRequired,
+                selectedLayoutSet: state.selectedLayoutSet,
+                pendingLayoutTransition: state.pendingLayoutTransition,
+                needsReapply: config.map {
+                    state.anyActiveScopeNeedsReapply(config: $0.config)
+                } ?? false,
                 pendingUnresolvedSlots: state.pendingVisibilityConvergences.flatMap(\.unresolvedSlots),
                 configGeneration: state.configGeneration,
                 revision: state.revision
@@ -422,6 +685,22 @@ public final class CommandRouter: Sendable {
             error: CommonErrorJSON(code: error.code, message: error.message, subcode: error.subcode)
         )
         return (try? JSONEncoder.pretty.encode(envelope)) ?? Data("{\"ok\":false,\"exitCode\":11}".utf8)
+    }
+
+    static func encodeBusyStatus(_ status: ArrangeStatusJSON) -> Data {
+        let error = ShitsuraeError(
+            .operationBusy,
+            "request is already in progress",
+            subcode: "inProgress"
+        )
+        let envelope = Envelope(
+            ok: false,
+            exitCode: error.code.rawValue,
+            payload: status,
+            error: CommonErrorJSON(code: error.code, message: error.message, subcode: error.subcode)
+        )
+        return (try? JSONEncoder.pretty.encode(envelope))
+            ?? Data("{\"ok\":false,\"exitCode\":53}".utf8)
     }
 
     public static func mapEngineError(_ error: VirtualSpaceEngineError) -> ShitsuraeError {
@@ -468,6 +747,8 @@ public final class CommandRouter: Sendable {
                 "window matches multiple tracked entries; add a discriminator",
                 subcode: "ambiguousWindow"
             )
+        case let .persistenceFailed(message):
+            return ShitsuraeError(.spaceSwitchFailed, message, subcode: "statePersistenceFailed")
         case let .stateError(message):
             return ShitsuraeError(.spaceSwitchFailed, message)
         }

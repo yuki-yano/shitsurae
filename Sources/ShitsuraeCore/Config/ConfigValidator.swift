@@ -73,6 +73,18 @@ public enum ConfigValidator {
                 )
             }
 
+            if let initialFocus = layout.initialFocus {
+                for space in layout.spaces where !space.windows.contains(where: { $0.slot == initialFocus.slot }) {
+                    errors.append(
+                        ValidateErrorItem(
+                            code: .validationError,
+                            path: sourcePath,
+                            message: "initialFocus.slot \(initialFocus.slot) must exist in every space of layout \(layoutName); missing in spaceID=\(space.spaceID)"
+                        )
+                    )
+                }
+            }
+
             let spaceIDs = layout.spaces.map(\.spaceID)
             if spaceIDs.count != Set(spaceIDs).count {
                 errors.append(
@@ -202,7 +214,7 @@ public enum ConfigValidator {
             }
         }
 
-        validateCrossLayoutMatcherUniqueness(config: config, sourcePath: sourcePath, errors: &errors)
+        validateLayoutSets(config: config, sourcePath: sourcePath, errors: &errors)
         validateIgnore(config.ignore, sourcePath: sourcePath, errors: &errors)
         validateShortcuts(
             config.resolvedShortcuts,
@@ -377,40 +389,102 @@ public enum ConfigValidator {
         }
     }
 
-    /// Layouts that can be active simultaneously (their host declarations
-    /// differ) must not share a completely identical window matcher: both
-    /// would claim the same window and the cross-layout ownership rules could
-    /// not break the tie deterministically. Layouts sharing one host replace
-    /// each other on arrange, so identical matchers between them stay legal.
-    private static func validateCrossLayoutMatcherUniqueness(
+    /// Only layouts in the same named set are declared to be simultaneously
+    /// active. Identical matchers in different, exclusive sets are valid.
+    private static func validateLayoutSets(
         config: ShitsuraeConfig,
         sourcePath: String,
         errors: inout [ValidateErrorItem]
     ) {
-        let layouts = config.layouts.sorted { $0.key < $1.key }
-        guard layouts.count > 1 else { return }
-
-        let hostKeys = layouts.map { hostComparisonKey(layout: $0.value, config: config) }
-        let matcherKeys: [[String: (spaceID: Int, slot: Int)]] = layouts.map { _, layout in
-            var keys: [String: (spaceID: Int, slot: Int)] = [:]
-            for space in layout.spaces {
-                for window in space.windows {
-                    keys[normalizedWindowKey(window)] = (space.spaceID, window.slot)
-                }
+        for (setName, set) in config.layoutSets.sorted(by: { $0.key < $1.key }) {
+            if !matches(layoutNamePattern, text: setName) {
+                errors.append(
+                    ValidateErrorItem(
+                        code: .validationError,
+                        path: sourcePath,
+                        message: "layout set name is invalid: \(setName)"
+                    )
+                )
             }
-            return keys
-        }
+            if set.layouts.isEmpty {
+                errors.append(
+                    ValidateErrorItem(
+                        code: .validationError,
+                        path: sourcePath,
+                        message: "layout set \(setName) must contain at least one layout"
+                    )
+                )
+                continue
+            }
+            if Set(set.layouts).count != set.layouts.count {
+                errors.append(
+                    ValidateErrorItem(
+                        code: .validationError,
+                        path: sourcePath,
+                        message: "layout set \(setName) contains duplicate members"
+                    )
+                )
+            }
+            let unknown = set.layouts.filter { config.layouts[$0] == nil }
+            for layoutName in unknown {
+                errors.append(
+                    ValidateErrorItem(
+                        code: .validationError,
+                        path: sourcePath,
+                        message: "layout set \(setName) references undefined layout \(layoutName)"
+                    )
+                )
+            }
 
-        for lhs in layouts.indices {
-            for rhs in layouts.indices where rhs > lhs {
-                guard hostKeys[lhs] != hostKeys[rhs] else { continue }
-                for (key, lhsPosition) in matcherKeys[lhs] {
-                    guard let rhsPosition = matcherKeys[rhs][key] else { continue }
+            let members = set.layouts.compactMap { name in
+                config.layouts[name].map { (name, $0) }
+            }
+            let hostKeys = members.map { hostComparisonKey(layout: $0.1, config: config) }
+            for lhs in members.indices {
+                for rhs in members.indices where rhs > lhs && hostKeys[lhs] == hostKeys[rhs] {
                     errors.append(
                         ValidateErrorItem(
                             code: .validationError,
                             path: sourcePath,
-                            message: "identical window matcher in layouts \(layouts[lhs].key) (spaceID=\(lhsPosition.spaceID) slot=\(lhsPosition.slot)) and \(layouts[rhs].key) (spaceID=\(rhsPosition.spaceID) slot=\(rhsPosition.slot)) which can be active simultaneously; add a discriminator to one of them"
+                            message: "layouts \(members[lhs].0) and \(members[rhs].0) in layout set \(setName) declare the same host"
+                        )
+                    )
+                }
+            }
+
+            var matchers: [String: (layout: String, spaceID: Int, slot: Int)] = [:]
+            for (layoutName, layout) in members {
+                for space in layout.spaces {
+                    for window in space.windows {
+                        let key = normalizedWindowKey(window)
+                        guard let previous = matchers[key] else {
+                            matchers[key] = (layoutName, space.spaceID, window.slot)
+                            continue
+                        }
+                        guard previous.layout != layoutName else { continue }
+                        errors.append(
+                            ValidateErrorItem(
+                                code: .validationError,
+                                path: sourcePath,
+                                message: "identical window matcher in layout set \(setName): \(previous.layout) (spaceID=\(previous.spaceID) slot=\(previous.slot)) conflicts with \(layoutName) (spaceID=\(space.spaceID) slot=\(window.slot))"
+                            )
+                        )
+                    }
+                }
+            }
+
+            let ignoredBundles = Set(config.ignore?.apply?.apps ?? [])
+            for (layoutName, layout) in members {
+                guard let focusSlot = layout.initialFocus?.slot else { continue }
+                let focusedBundles = Set(layout.spaces.flatMap { space in
+                    space.windows.filter { $0.slot == focusSlot }.map { $0.match.bundleID }
+                })
+                for bundleID in focusedBundles where ignoredBundles.contains(bundleID) {
+                    errors.append(
+                        ValidateErrorItem(
+                            code: .validationError,
+                            path: sourcePath,
+                            message: "initialFocus slot \(focusSlot) in layout \(layoutName) is excluded by ignore.apply.apps (\(bundleID))"
                         )
                     )
                 }

@@ -183,6 +183,7 @@ public final class ConfigLoader: @unchecked Sendable {
         var shortcuts: ShortcutsDefinition?
         var mode: ModeDefinition?
         var layouts: [String: LayoutDefinition] = [:]
+        var layoutSets: [String: LayoutSetDefinition] = [:]
         var errors: [ValidateErrorItem] = []
 
         var singletonDefinedBy: [String: String] = [:]
@@ -229,6 +230,22 @@ public final class ConfigLoader: @unchecked Sendable {
                     }
                 }
             }
+
+            if let fileLayoutSets = item.layoutSets {
+                for (name, definition) in fileLayoutSets {
+                    if layoutSets[name] != nil {
+                        errors.append(
+                            ValidateErrorItem(
+                                code: .configMergeConflict,
+                                path: path,
+                                message: "layout set '\(name)' is defined in multiple files"
+                            )
+                        )
+                    } else {
+                        layoutSets[name] = definition
+                    }
+                }
+            }
         }
 
         guard errors.isEmpty else {
@@ -241,6 +258,7 @@ public final class ConfigLoader: @unchecked Sendable {
             overlay: overlay,
             monitors: monitors,
             layouts: layouts,
+            layoutSets: layoutSets,
             shortcuts: shortcuts,
             mode: mode
         )

@@ -14,31 +14,38 @@ import Foundation
 ///   AX focus cannot raise one window above its siblings
 public struct LiveWindowControl: WindowControl {
     private static let initialVisibilitySettlingDelayMS = 40
+    private let budget: WindowInteractionBudget?
 
-    public init() {}
+    public init() { budget = nil }
+
+    private init(budget: WindowInteractionBudget?) { self.budget = budget }
+
+    public func applyingBudget(_ budget: WindowInteractionBudget?) -> any WindowControl {
+        LiveWindowControl(budget: budget)
+    }
 
     public func listWindows() -> [WindowSnapshot] {
-        WindowEnumerator.listWindows()
+        withInteractionBudget { WindowEnumerator.listWindows() }
     }
 
     public func listAllWindows() -> [WindowSnapshot] {
-        WindowEnumerator.listAllWindows()
+        withInteractionBudget { WindowEnumerator.listAllWindows() }
     }
 
     public func windowInventory() -> WindowInventory {
-        WindowEnumerator.allWindowInventory()
+        withInteractionBudget { WindowEnumerator.allWindowInventory() }
     }
 
     public func windowInventory(identities: Set<WindowIdentity>) -> WindowInventory {
-        WindowEnumerator.windowInventory(identities: identities)
+        withInteractionBudget { WindowEnumerator.windowInventory(identities: identities) }
     }
 
     public func focusedWindowObservation() -> WindowObservation {
-        WindowEnumerator.focusedWindowObservation()
+        withInteractionBudget { WindowEnumerator.focusedWindowObservation() }
     }
 
     public func focusedWindowIdentity() -> WindowIdentity? {
-        WindowEnumerator.focusedWindowIdentity()
+        withInteractionBudget { WindowEnumerator.focusedWindowIdentity() }
     }
 
     public func frontmostWindowIdentity() -> WindowIdentity? {
@@ -50,7 +57,7 @@ public struct LiveWindowControl: WindowControl {
     }
 
     public func focusedWindow() -> WindowSnapshot? {
-        WindowEnumerator.focusedWindow()
+        withInteractionBudget { WindowEnumerator.focusedWindow() }
     }
 
     public func displays() -> [DisplayInfo] {
@@ -62,7 +69,12 @@ public struct LiveWindowControl: WindowControl {
     }
 
     public func visibilityVerificationSettlingDelayMS() -> Int {
-        Self.initialVisibilitySettlingDelayMS
+        min(Self.initialVisibilitySettlingDelayMS, budget?.remainingBudgetMS() ?? Self.initialVisibilitySettlingDelayMS)
+    }
+
+    public func sleep(milliseconds: Int) {
+        guard budget?.permitsCall != false else { return }
+        Thread.sleep(forTimeInterval: Double(min(milliseconds, budget?.remainingBudgetMS() ?? milliseconds)) / 1_000)
     }
 
     // MARK: - Frame
@@ -75,7 +87,7 @@ public struct LiveWindowControl: WindowControl {
         bundleID: String,
         frame: ResolvedFrame
     ) -> WindowGeometryMutationResult {
-        Self.performWindowInteractionOnRequiredThread(pid: pid, bundleID: bundleID) {
+        withBudgetOnRequiredThread(pid: pid, bundleID: bundleID) {
             setWindowFrameOnCurrentThread(
                 windowID: windowID,
                 pid: pid,
@@ -119,13 +131,13 @@ public struct LiveWindowControl: WindowControl {
 
             var sizeSettable = DarwinBoolean(false)
             var positionSettable = DarwinBoolean(false)
-            guard AXUIElementIsAttributeSettable(
+            guard AXReadPolicy.isAttributeSettable(
                 windowElement,
                 kAXSizeAttribute as CFString,
                 &sizeSettable
             ) == .success,
                 sizeSettable.boolValue,
-                AXUIElementIsAttributeSettable(
+                AXReadPolicy.isAttributeSettable(
                     windowElement,
                     kAXPositionAttribute as CFString,
                     &positionSettable
@@ -141,7 +153,7 @@ public struct LiveWindowControl: WindowControl {
                 guard let sizeValue = AXValueCreate(.cgSize, &size) else {
                     return false
                 }
-                return AXUIElementSetAttributeValue(
+                return AXWritePolicy.setAttributeValue(
                     windowElement,
                     kAXSizeAttribute as CFString,
                     sizeValue
@@ -153,7 +165,7 @@ public struct LiveWindowControl: WindowControl {
                 guard let pointValue = AXValueCreate(.cgPoint, &point) else {
                     return false
                 }
-                return AXUIElementSetAttributeValue(
+                return AXWritePolicy.setAttributeValue(
                     windowElement,
                     kAXPositionAttribute as CFString,
                     pointValue
@@ -179,7 +191,7 @@ public struct LiveWindowControl: WindowControl {
         bundleID: String,
         position: CGPoint
     ) -> WindowGeometryMutationResult {
-        Self.performWindowInteractionOnRequiredThread(pid: pid, bundleID: bundleID) {
+        withBudgetOnRequiredThread(pid: pid, bundleID: bundleID) {
             setWindowPositionOnCurrentThread(
                 windowID: windowID,
                 pid: pid,
@@ -223,13 +235,13 @@ public struct LiveWindowControl: WindowControl {
 
             var positionSettable = DarwinBoolean(false)
             var sizeSettable = DarwinBoolean(false)
-            guard AXUIElementIsAttributeSettable(
+            guard AXReadPolicy.isAttributeSettable(
                 windowElement,
                 kAXPositionAttribute as CFString,
                 &positionSettable
             ) == .success,
                 positionSettable.boolValue,
-                AXUIElementIsAttributeSettable(
+                AXReadPolicy.isAttributeSettable(
                     windowElement,
                     kAXSizeAttribute as CFString,
                     &sizeSettable
@@ -245,7 +257,7 @@ public struct LiveWindowControl: WindowControl {
                 guard let pointValue = AXValueCreate(.cgPoint, &point) else {
                     return false
                 }
-                return AXUIElementSetAttributeValue(
+                return AXWritePolicy.setAttributeValue(
                     windowElement,
                     kAXPositionAttribute as CFString,
                     pointValue
@@ -257,7 +269,7 @@ public struct LiveWindowControl: WindowControl {
                 guard let sizeValue = AXValueCreate(.cgSize, &size) else {
                     return false
                 }
-                return AXUIElementSetAttributeValue(
+                return AXWritePolicy.setAttributeValue(
                     windowElement,
                     kAXSizeAttribute as CFString,
                     sizeValue
@@ -284,7 +296,7 @@ public struct LiveWindowControl: WindowControl {
         bundleID: String,
         minimized: Bool
     ) -> WindowInteractionResult {
-        Self.performWindowInteractionOnRequiredThread(pid: pid, bundleID: bundleID) {
+        withBudgetOnRequiredThread(pid: pid, bundleID: bundleID) {
             setWindowMinimizedOnCurrentThread(
                 windowID: windowID,
                 pid: pid,
@@ -321,7 +333,7 @@ public struct LiveWindowControl: WindowControl {
         }
 
         return Self.interactionResult(
-            for: AXUIElementSetAttributeValue(
+            for: AXWritePolicy.setAttributeValue(
                 windowElement,
                 kAXMinimizedAttribute as CFString,
                 minimized ? kCFBooleanTrue : kCFBooleanFalse
@@ -337,7 +349,7 @@ public struct LiveWindowControl: WindowControl {
         processStartTime: UInt64,
         bundleID: String
     ) -> WindowInteractionResult {
-        Self.performWindowInteractionOnRequiredThread(pid: pid, bundleID: bundleID) {
+        withBudgetOnRequiredThread(pid: pid, bundleID: bundleID) {
             focusWindowOnCurrentThread(
                 windowID: windowID,
                 pid: pid,
@@ -376,13 +388,13 @@ public struct LiveWindowControl: WindowControl {
         }
 
         let focusedResult = Self.interactionResult(
-            for: AXUIElementSetAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, windowElement)
+            for: AXWritePolicy.setAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, windowElement)
         )
         let mainResult = Self.interactionResult(
-            for: AXUIElementSetAttributeValue(appElement, kAXMainWindowAttribute as CFString, windowElement)
+            for: AXWritePolicy.setAttributeValue(appElement, kAXMainWindowAttribute as CFString, windowElement)
         )
         let windowFocusedResult = Self.interactionResult(
-            for: AXUIElementSetAttributeValue(windowElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            for: AXWritePolicy.setAttributeValue(windowElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)
         )
         let focusResult = Self.merge([focusedResult, mainResult, windowFocusedResult])
         guard focusResult.isSuccess else {
@@ -390,13 +402,13 @@ public struct LiveWindowControl: WindowControl {
         }
 
         return Self.interactionResult(
-            for: AXUIElementPerformAction(windowElement, kAXRaiseAction as CFString)
+            for: AXWritePolicy.performAction(windowElement, kAXRaiseAction as CFString)
         )
     }
 
     @discardableResult
     public func activateApplication(pid: Int, processStartTime: UInt64, bundleID: String) -> Bool {
-        Self.performWindowInteractionOnRequiredThread(pid: pid, bundleID: bundleID) {
+        withBudgetOnRequiredThread(pid: pid, bundleID: bundleID) {
             activateApplicationOnCurrentThread(
                 pid: pid,
                 processStartTime: processStartTime,
@@ -418,16 +430,42 @@ public struct LiveWindowControl: WindowControl {
             return false
         }
 
+        guard AXReadPolicy.operationBudget?.permitsCall != false else { return false }
         _ = running.unhide()
+        guard AXReadPolicy.operationBudget?.permitsCall != false else { return false }
         return running.activate(options: [])
     }
 
     @discardableResult
     public func launchApplication(request: ApplicationLaunchRequest) -> Bool {
-        SystemProbe.launchApplication(request: request)
+        guard budget?.permitsCall != false else { return false }
+        return withInteractionBudget {
+            SystemProbe.launchApplication(
+                request: request,
+                timeoutSeconds: min(3, Double(budget?.remainingBudgetMS() ?? 3_000) / 1_000),
+                permitsNewSideEffect: { budget?.permitsCall != false }
+            )
+        }
     }
 
     // MARK: - Internals
+
+    private func withInteractionBudget<Result>(_ operation: () -> Result) -> Result {
+        if let budget { return budget.perform { AXReadPolicy.$operationBudget.withValue(budget, operation: operation) } }
+        return AXReadPolicy.$operationBudget.withValue(nil, operation: operation)
+    }
+
+    private func withBudgetOnRequiredThread<Result>(
+        pid: Int,
+        bundleID: String,
+        operation: () -> Result
+    ) -> Result {
+        withInteractionBudget {
+            Self.performWindowInteractionOnRequiredThread(pid: pid, bundleID: bundleID) {
+                AXReadPolicy.$operationBudget.withValue(budget, operation: operation)
+            }
+        }
+    }
 
     /// AX writes targeting this process synchronously enter AppKit. AppKit
     /// traps when those window mutations originate from a background thread,
@@ -466,7 +504,7 @@ public struct LiveWindowControl: WindowControl {
     private static func prepareForTargetedWindowInteraction(_ running: NSRunningApplication) {
         // Avoid app-wide activation here — the targeted focus path decides
         // the z-order. Unhiding is required for AX writes to land.
-        if running.isHidden {
+        if running.isHidden, AXReadPolicy.operationBudget?.permitsCall != false {
             _ = running.unhide()
         }
     }
@@ -477,13 +515,13 @@ public struct LiveWindowControl: WindowControl {
     static func geometryBlockedAtMutationTime(windowID: UInt32, appElement: AXUIElement) -> Bool {
         func resolvedWindowID(attribute: CFString) -> UInt32? {
             var ref: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(appElement, attribute, &ref) == .success,
+            guard AXReadPolicy.copyAttributeValue(appElement, attribute, &ref) == .success,
                   let ref
             else {
                 return nil
             }
             var resolved: CGWindowID = 0
-            guard AXUIElementGetWindowID(ref as! AXUIElement, &resolved) == .success else {
+            guard AXReadPolicy.windowID(ref as! AXUIElement, &resolved) == .success else {
                 return nil
             }
             return UInt32(resolved)
@@ -511,7 +549,7 @@ public struct LiveWindowControl: WindowControl {
         var candidates: [AXUIElement] = []
 
         var windowsRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+        if AXReadPolicy.copyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
            let windows = windowsRef as? [AXUIElement]
         {
             candidates.append(contentsOf: windows)
@@ -519,7 +557,7 @@ public struct LiveWindowControl: WindowControl {
 
         for attribute in [kAXFocusedWindowAttribute, kAXMainWindowAttribute] {
             var ref: CFTypeRef?
-            if AXUIElementCopyAttributeValue(appElement, attribute as CFString, &ref) == .success,
+            if AXReadPolicy.copyAttributeValue(appElement, attribute as CFString, &ref) == .success,
                let ref
             {
                 let element = ref as! AXUIElement
@@ -532,7 +570,7 @@ public struct LiveWindowControl: WindowControl {
 
         return candidates.first { element in
             var resolvedWindowID: CGWindowID = 0
-            guard AXUIElementGetWindowID(element, &resolvedWindowID) == .success else {
+            guard AXReadPolicy.windowID(element, &resolvedWindowID) == .success else {
                 return false
             }
             return resolvedWindowID == windowID
@@ -545,18 +583,18 @@ public struct LiveWindowControl: WindowControl {
     ) -> Result {
         let enhancedUserInterfaceAttribute = "AXEnhancedUserInterface" as CFString
         var currentValue: CFTypeRef?
-        let readStatus = AXUIElementCopyAttributeValue(
+        let readStatus = AXReadPolicy.copyAttributeValue(
             appElement,
             enhancedUserInterfaceAttribute,
             &currentValue
         )
         let wasEnabled = readStatus == .success && (currentValue as? Bool) == true
         if wasEnabled {
-            _ = AXUIElementSetAttributeValue(appElement, enhancedUserInterfaceAttribute, kCFBooleanFalse)
+            _ = AXWritePolicy.setAttributeValue(appElement, enhancedUserInterfaceAttribute, kCFBooleanFalse)
         }
         defer {
             if wasEnabled {
-                _ = AXUIElementSetAttributeValue(appElement, enhancedUserInterfaceAttribute, kCFBooleanTrue)
+                _ = AXWritePolicy.setAttributeValue(appElement, enhancedUserInterfaceAttribute, kCFBooleanTrue)
             }
         }
         return body()
@@ -576,8 +614,8 @@ public struct LiveWindowControl: WindowControl {
     static func frame(of element: AXUIElement) -> CGRect? {
         var positionRef: CFTypeRef?
         var sizeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionRef) == .success,
-              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success,
+        guard AXReadPolicy.copyAttributeValue(element, kAXPositionAttribute as CFString, &positionRef) == .success,
+              AXReadPolicy.copyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success,
               let positionRef,
               let sizeRef
         else {
@@ -617,7 +655,9 @@ public struct LiveWindowControl: WindowControl {
         }
 
         var psn = ProcessSerialNumber()
-        guard getProcessForPID(pid, &psn) == noErr,
+        guard AXReadPolicy.operationBudget?.permitsCall != false,
+              getProcessForPID(pid, &psn) == noErr,
+              AXReadPolicy.operationBudget?.permitsCall != false,
               setFrontProcessWithOptions(&psn, CGWindowID(windowID), SLPSMode.userGenerated.rawValue) == .success
         else {
             return false
@@ -632,6 +672,7 @@ public struct LiveWindowControl: WindowControl {
         postEventRecordTo: PostEventRecordToCall
     ) -> Bool {
         for eventType in [UInt8(0x01), UInt8(0x02)] {
+            guard AXReadPolicy.operationBudget?.permitsCall != false else { return false }
             var bytes = makeKeyWindowEventBytes(windowID: windowID, eventType: eventType)
             let status = bytes.withUnsafeMutableBufferPointer { buffer in
                 postEventRecordTo(&psn, buffer.baseAddress!)

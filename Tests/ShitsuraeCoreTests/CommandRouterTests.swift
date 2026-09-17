@@ -4,6 +4,37 @@ import Testing
 
 @Suite("CommandRouter")
 struct CommandRouterTests {
+    @Test func rejectedRequestCannotReleaseAnotherOperationWithSameRequestID() async throws {
+        let (router, engine, _, cleanup) = try makeRouter(windows: standardWindows())
+        defer { cleanup() }
+        let token = try engine.operationCoordinator.tryAdmit(requestID: "owner", operation: .arrangeSet)
+        defer { engine.operationCoordinator.abandon(token: token) }
+        engine.operationCoordinator.update(token: token, phase: .placing, inFlight: true)
+        for command in ["unknown", "focus"] {
+            var request = CommandRequest(command: command)
+            request.requestID = "owner"
+            _ = try await send(router, request)
+            #expect(engine.operationCoordinator.status().active?.requestID == "owner")
+            #expect(engine.operationCoordinator.status().active?.inFlight == true)
+            #expect(engine.operationCoordinator.status().lastOutcome == nil)
+        }
+    }
+
+    @Test func admittedCLIFailurePublishesOutcomeForGUIPoll() async throws {
+        let (router, engine, _, cleanup) = try makeRouter(windows: standardWindows())
+        defer { cleanup() }
+        var request = CommandRequest(command: "arrangeSet")
+        request.setName = "missing"
+        request.requestID = "failure"
+        let response = try await send(router, request)
+        #expect(response["ok"] as? Bool == false)
+        let status = engine.operationCoordinator.status()
+        #expect(status.active == nil)
+        #expect(status.lastOutcome?.requestID == "failure")
+        #expect(status.lastOutcome?.result == "failed")
+        #expect(status.lastOutcome?.operation == .arrangeSet)
+        #expect(status.lastOutcome?.detail?.isEmpty == false)
+    }
     @Test func mutatingStateOnlyArrangeInvalidatesPendingFocus() {
         var stateOnly = CommandRequest(command: "arrange")
         stateOnly.stateOnly = true
@@ -73,6 +104,9 @@ struct CommandRouterTests {
                     match:
                       bundleID: com.apple.Notes
                     frame: { x: "0%", y: "0%", width: "100%", height: "100%" }
+        layoutSets:
+          mobile:
+            layouts: [work]
         """.write(to: configDir.appendingPathComponent("01-test.yaml"), atomically: true, encoding: .utf8)
 
         let configManager = ConfigManager(directoryURL: configDir, logger: logger)
@@ -111,6 +145,145 @@ struct CommandRouterTests {
         let layouts = try #require(payload["layouts"] as? [[String: Any]])
         #expect(layouts.first?["name"] as? String == "work")
         #expect(layouts.first?["spaceIDs"] as? [Int] == [1, 2])
+    }
+
+    @Test func layoutSetListAndApplyUseDedicatedContracts() async throws {
+        let (router, engine, _, cleanup) = try makeRouter(windows: standardWindows())
+        defer { cleanup() }
+
+        let listResponse = try await send(router, CommandRequest(command: "layoutSetsList"))
+        #expect(listResponse["ok"] as? Bool == true)
+        let listPayload = try #require(listResponse["payload"] as? [String: Any])
+        let sets = try #require(listPayload["sets"] as? [[String: Any]])
+        #expect(sets.first?["name"] as? String == "mobile")
+        #expect(sets.first?["layouts"] as? [String] == ["work"])
+
+        var applyRequest = CommandRequest(command: "arrangeSet")
+        applyRequest.setName = "mobile"
+        let applyResponse = try await send(router, applyRequest)
+        #expect(applyResponse["ok"] as? Bool == true)
+        let applyPayload = try #require(applyResponse["payload"] as? [String: Any])
+        #expect(applyPayload["setName"] as? String == "mobile")
+        #expect(applyPayload["ownershipCommitted"] as? Bool == true)
+        #expect((await engine.currentState).selectedLayoutSet?.name == "mobile")
+    }
+
+    @Test func completedRequestIDReplaysTheSavedResponseWithoutExecutingAgain() async throws {
+        let (router, engine, control, cleanup) = try makeRouter(windows: standardWindows())
+        defer { cleanup() }
+        var request = CommandRequest(command: "arrangeSet")
+        request.requestID = "stable-request-id"
+        request.setName = "mobile"
+
+        let first = try await send(router, request)
+        let revision = (await engine.currentState).revision
+        let frameAttempts = control.frameMutationAttemptWindowIDs.count
+        let second = try await send(router, request)
+
+        #expect(first["ok"] as? Bool == true)
+        #expect(second["ok"] as? Bool == true)
+        #expect((second["payload"] as? [String: Any])?["requestID"] as? String == "stable-request-id")
+        #expect((await engine.currentState).revision == revision)
+        #expect(control.frameMutationAttemptWindowIDs.count == frameAttempts)
+
+        var conflict = request
+        conflict.setName = "different"
+        let conflictResponse = try await send(router, conflict)
+        #expect(conflictResponse["exitCode"] as? Int == ErrorCode.validationError.rawValue)
+        #expect((conflictResponse["error"] as? [String: Any])?["subcode"] as? String == "requestIDConflict")
+    }
+
+    @Test func duplicateActiveRequestReturnsInProgressSnapshotWithoutASecondExecution() async throws {
+        let (router, engine, control, cleanup) = try makeRouter(windows: standardWindows())
+        defer { cleanup() }
+        let release = DispatchSemaphore(value: 0)
+        control.onFrameMutationAttempt = {
+            control.onFrameMutationAttempt = nil
+            _ = release.wait(timeout: .now() + 1)
+        }
+        var request = CommandRequest(command: "arrangeSet")
+        request.requestID = "active-duplicate"
+        request.setName = "mobile"
+        let requestData = try JSONEncoder().encode(request)
+        let first = Task { await router.handle(requestData: requestData) }
+        var observedInFlight = false
+        for _ in 0 ..< 100 {
+            if engine.operationCoordinator.status().active?.inFlight == true {
+                observedInFlight = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(observedInFlight)
+
+        let duplicateData = await router.handle(requestData: requestData)
+        let duplicate = try #require(
+            JSONSerialization.jsonObject(with: duplicateData) as? [String: Any]
+        )
+        #expect(duplicate["exitCode"] as? Int == ErrorCode.operationBusy.rawValue)
+        #expect((duplicate["error"] as? [String: Any])?["subcode"] as? String == "inProgress")
+        #expect((duplicate["payload"] as? [String: Any])?["active"] as? [String: Any] != nil)
+
+        release.signal()
+        _ = await first.value
+    }
+
+    @Test func arrangeStatusIsActorIndependentAndBusyIsImmediate() async throws {
+        let (router, engine, _, cleanup) = try makeRouter(windows: standardWindows())
+        defer { cleanup() }
+        let token = try engine.operationCoordinator.tryAdmit(
+            requestID: "active-request",
+            operation: .arrangeSet
+        )
+        defer { engine.operationCoordinator.abandon(token: token) }
+        engine.operationCoordinator.update(token: token, phase: .placing, layout: "work", inFlight: true)
+
+        let statusResponse = try await send(router, CommandRequest(command: "arrangeStatus"))
+        #expect(statusResponse["ok"] as? Bool == true)
+        let payload = try #require(statusResponse["payload"] as? [String: Any])
+        let active = try #require(payload["active"] as? [String: Any])
+        #expect(active["requestID"] as? String == "active-request")
+        #expect(active["inFlight"] as? Bool == true)
+
+        var focus = CommandRequest(command: "focus")
+        focus.slot = 1
+        let busy = try await send(router, focus)
+        #expect(busy["ok"] as? Bool == false)
+        #expect(busy["exitCode"] as? Int == ErrorCode.operationBusy.rawValue)
+        #expect((busy["error"] as? [String: Any])?["subcode"] as? String == "operationBusy")
+    }
+
+    @Test func statusAndRecoveryDoNotRequireValidConfig() async throws {
+        let control = MockWindowControl(windows: standardWindows(), displays: [TestFixtures.display])
+        let (store, stateURL) = TestFixtures.tempStateStore()
+        let logger = TestFixtures.nullLogger()
+        let engine = try VirtualSpaceEngine(store: store, control: control, logger: logger, retryDelaysMS: [1])
+        let configDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("shitsurae-invalid-config-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        try "unknownTopLevel: true\n".write(
+            to: configDir.appendingPathComponent("01-invalid.yaml"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let configManager = ConfigManager(directoryURL: configDir, logger: logger)
+        configManager.start()
+        defer {
+            configManager.stop()
+            try? FileManager.default.removeItem(at: configDir)
+            try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent())
+        }
+        #expect(configManager.configIfLoaded() == nil)
+        #expect(!configManager.configErrors().isEmpty)
+        let router = CommandRouter(engine: engine, configManager: configManager, logger: logger)
+
+        let status = try await send(router, CommandRequest(command: "arrangeStatus"))
+        #expect(status["ok"] as? Bool == true)
+
+        let recover = try await send(router, CommandRequest(command: "arrangeRecover"))
+        #expect(recover["ok"] as? Bool == true)
+        let payload = try #require(recover["payload"] as? [String: Any])
+        #expect(payload["recoveryRequired"] as? Bool == false)
     }
 
     @Test func arrangeStateOnlyThenSpaceSwitchRoundTrip() async throws {
@@ -245,11 +418,13 @@ struct CommandRouterTests {
         #expect(rejected["exitCode"] as? Int == ErrorCode.validationError.rawValue)
 
         var exact = incomplete
+        exact.requestID = UUID().uuidString.lowercased()
         exact.pid = target.pid
         exact.processStartTime = target.processStartTime
         exact.bundleID = target.bundleID
 
         var reusedProcess = exact
+        reusedProcess.requestID = UUID().uuidString.lowercased()
         reusedProcess.processStartTime = target.processStartTime + 1
         let staleRejected = try await send(router, reusedProcess)
         #expect(staleRejected["ok"] as? Bool == false)

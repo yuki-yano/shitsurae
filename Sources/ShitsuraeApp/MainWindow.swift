@@ -191,6 +191,15 @@ struct ArrangeView: View {
     @EnvironmentObject var model: AppModel
     @State private var selectionByDisplayID: [String: String] = [:]
     @State private var spaceByDisplayID: [String: Int] = [:]
+    @State private var selectedLayoutSetName: String?
+
+    private var operationRunning: Bool {
+        model.actionStatus.isRunning || model.arrangeStatus.active != nil
+    }
+
+    private var selectedLayoutSet: LayoutSetPresentation? {
+        model.layoutSetPresentations.first { $0.name == selectedLayoutSetName }
+    }
 
     private var spaceIDsByLayout: [String: [Int]] {
         guard let config = model.configManager.configIfLoaded()?.config else { return [:] }
@@ -249,6 +258,12 @@ struct ArrangeView: View {
                 Text("Arrange")
                     .font(.title2).bold()
 
+                statusCard
+
+                if model.shouldOfferWindowRecovery {
+                    recoverySection
+                }
+
                 if !model.configErrors.isEmpty {
                     ConfigErrorBox(errors: model.configErrors)
                     Button("Open Config Directory") { model.openConfigDirectory() }
@@ -257,11 +272,11 @@ struct ArrangeView: View {
                         .foregroundStyle(.secondary)
                     Button("Open Config Directory") { model.openConfigDirectory() }
                 } else {
-                    statusCard
+                    layoutSetSection
                     DisplayArrangeSection(
                         choices: displayLayoutChoices,
                         spaceIDsByLayout: spaceIDsByLayout,
-                        isRunning: model.actionStatus.isRunning,
+                        isRunning: operationRunning,
                         selectionByDisplayID: $selectionByDisplayID,
                         spaceByDisplayID: $spaceByDisplayID,
                         onApplyLayout: { layoutName, spaceID in
@@ -277,12 +292,23 @@ struct ArrangeView: View {
                             .textSelection(.enabled)
                     }
 
+                    if case let .partial(label, message) = model.actionStatus {
+                        Label("\(label): \(message)", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .textSelection(.enabled)
+                    }
+
                     if !previewSelections.isEmpty {
                         displaySetPreview(previewSelections)
                     }
                 }
             }
             .padding(20)
+        }
+        .onAppear(perform: synchronizeLayoutSetSelection)
+        .onChange(of: model.layoutSetPresentations) {
+            synchronizeLayoutSetSelection()
         }
     }
 
@@ -293,14 +319,48 @@ struct ArrangeView: View {
                     .font(.headline)
 
                 HStack(spacing: 10) {
-                    badge(label: "Active Layout", value: model.activeLayoutName ?? "—")
+                    badge(
+                        label: "Layout Set",
+                        value: model.runtimeState.selectedLayoutSet?.name ?? "Manual"
+                    )
                     badge(
                         label: "Active Space",
                         value: model.activeSpaceID.map { "Space \($0)" } ?? "—"
                     )
-                    if model.diagnostics?.state.recoveryRequired == true {
+                    if model.arrangeStatus.pendingTransition != nil || model.diagnostics?.state.needsReapply == true {
                         badge(label: "Recovery", value: "required", tint: .orange)
                     }
+                }
+
+                if let active = model.arrangeStatus.active {
+                    Label(
+                        "\(active.operation.displayLabel): \(active.phase.displayLabel) · \(active.elapsedMS) ms",
+                        systemImage: "hourglass"
+                    )
+                    .font(.caption)
+                    if let reason = active.waitingReason {
+                        Text(reason).font(.caption).foregroundStyle(.secondary)
+                    }
+                    if active.deadlineExceeded {
+                        Text("The deadline was exceeded; the current system call may still be in flight.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
+
+                if let outcome = model.arrangeStatus.lastOutcome {
+                    Text("Last: \(outcome.operation.displayLabel) · \(outcome.result) · exit \(outcome.exitCode)")
+                        .font(.caption)
+                        .foregroundStyle(outcome.exitCode == 0 ? Color.secondary : Color.orange)
+                    if let detail = outcome.detail {
+                        Text(detail).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if model.arrangeStatus.pendingTransition != nil {
+                    Text("Some windows may still be hidden or misplaced. Restore them before applying again.")
+                        .font(.caption).foregroundStyle(.orange)
+                    Button("Restore Managed Windows") { model.recoverLayoutsFromMainWindow() }
+                        .disabled(operationRunning)
                 }
 
                 if model.activeLayoutName == nil {
@@ -321,7 +381,7 @@ struct ArrangeView: View {
                         ),
                         spaceIDs: model.configManager.configIfLoaded()?.config.layouts[workspace.layoutName]?
                             .spaces.map(\.spaceID).sorted() ?? [],
-                        isRunning: model.actionStatus.isRunning,
+                        isRunning: operationRunning,
                         onSwitch: { spaceID in
                             model.switchSpace(
                                 layoutName: workspace.layoutName,
@@ -339,6 +399,119 @@ struct ArrangeView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
+        }
+    }
+
+    private var recoverySection: some View {
+        GroupBox("Restore") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Restore managed windows to the current primary display and stop managing the affected scope.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Restore Windows and Stop Managing", systemImage: "arrow.uturn.backward.circle") {
+                    model.recoverLayoutsFromMainWindow()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(operationRunning)
+                .accessibilityHint("Restores reachable windows and removes their workspace management state")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(4)
+        }
+    }
+
+    private var layoutSetSection: some View {
+        GroupBox("Layout Sets") {
+            VStack(alignment: .leading, spacing: 10) {
+                if model.layoutSetPresentations.isEmpty {
+                    Text("No layout sets are defined. Add layoutSets to the YAML config; individual display layouts remain available below.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Open Config Directory") { model.openConfigDirectory() }
+                } else {
+                    Picker("Layout Set", selection: $selectedLayoutSetName) {
+                        ForEach(model.layoutSetPresentations) { item in
+                            Text(item.name).tag(item.name as String?)
+                        }
+                    }
+                    .accessibilityLabel("Layout Set")
+                    .accessibilityHint("Selects a layout set without applying it")
+
+                    if let item = selectedLayoutSet {
+                        ForEach(item.members) { member in
+                            HStack {
+                                Text(member.layoutName).font(.subheadline.bold())
+                                Text(member.managementState).font(.caption)
+                                Text(member.resolvedDisplayID.map(shortDisplayID) ?? "display unavailable")
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(member.issue == nil ? Color.secondary : Color.orange)
+                                Spacer()
+                                Text("\(member.spaceCount) spaces · target \(member.targetSpaceID)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .accessibilityElement(children: .combine)
+                            if let displayID = member.resolvedDisplayID,
+                               let layout = model.configManager.configIfLoaded()?.config.layouts[member.layoutName]
+                            {
+                                layoutPreview(
+                                    selection: DisplayLayoutSelection(
+                                        displayID: displayID,
+                                        displayTitle: shortDisplayID(displayID),
+                                        layoutName: member.layoutName,
+                                        spaceID: member.targetSpaceID
+                                    ),
+                                    layout: layout
+                                )
+                            }
+                        }
+                        Text("\(item.releasedCount) currently managed windows may be shown on the primary display and released from management. Windows claimed by the new set are transferred instead.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if let reason = item.blockingReason {
+                            Label(reason, systemImage: "exclamationmark.triangle")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                        if item.needsReapply {
+                            Label("Needs Reapply", systemImage: "arrow.clockwise")
+                                .font(.caption.bold())
+                                .foregroundStyle(.orange)
+                        }
+                        HStack {
+                            Spacer()
+                            Button("Apply Layout Set", systemImage: "rectangle.3.group") {
+                                model.applyLayoutSetFromMainWindow(item.name)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!item.canApply || operationRunning)
+                            .accessibilityHint("Replaces the complete managed layout scope with this set")
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(4)
+        }
+    }
+
+    private func synchronizeLayoutSetSelection() {
+        let presentations = model.layoutSetPresentations
+        guard !presentations.isEmpty else {
+            selectedLayoutSetName = nil
+            return
+        }
+        if let selectedLayoutSetName,
+           presentations.contains(where: { $0.name == selectedLayoutSetName })
+        {
+            return
+        }
+        if let applied = model.runtimeState.selectedLayoutSet?.name,
+           presentations.contains(where: { $0.name == applied })
+        {
+            selectedLayoutSetName = applied
+        } else {
+            selectedLayoutSetName = presentations[0].name
         }
     }
 
@@ -474,7 +647,7 @@ private struct DisplayArrangeSection: View {
     }
 
     var body: some View {
-        GroupBox("Displays") {
+        GroupBox("Individual Displays") {
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(choices) { choice in
                     DisplayArrangeRow(
@@ -490,16 +663,16 @@ private struct DisplayArrangeSection: View {
                 }
 
                 HStack {
-                    Text("Display Set applies all workspaces. Use a row’s Apply button for one space.")
+                    Text("Applies only the selected displays. Use a Layout Set above to replace the complete managed configuration.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Button("Apply Display Set", systemImage: "rectangle.2.swap") {
+                    Button("Apply Selected Displays", systemImage: "rectangle.2.swap") {
                         onApplyDisplaySet(selectedLayouts)
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(selectedLayouts.count < 2 || isRunning)
-                    .accessibilityHint("Applies the selected display layouts as one logical batch")
+                    .accessibilityHint("Applies selected display layouts as a local batch without choosing a layout set")
                 }
             }
             .padding(4)

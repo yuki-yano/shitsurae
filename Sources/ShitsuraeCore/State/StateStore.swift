@@ -39,6 +39,8 @@ public struct RuntimeStateWriteExpectation: Equatable, Sendable {
 public final class RuntimeStateStore: @unchecked Sendable {
     private let fileURL: URL
     private let fileManager: FileManager
+    /// Test-only fault injection point. Production never assigns this.
+    var saveFailureInjector: (@Sendable (RuntimeState) -> RuntimeStateStoreError?)?
 
     public init(
         fileManager: FileManager = .default,
@@ -106,6 +108,10 @@ public final class RuntimeStateStore: @unchecked Sendable {
         var normalized = state.canonicalized()
         normalized.schemaVersion = RuntimeState.currentSchemaVersion
         normalized.updatedAt = Date.rfc3339UTC()
+
+        if let injected = saveFailureInjector?(normalized) {
+            throw injected
+        }
 
         let data: Data
         do {

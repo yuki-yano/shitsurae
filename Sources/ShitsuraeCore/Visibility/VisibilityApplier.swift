@@ -85,10 +85,16 @@ public enum VisibilityApplier {
     public static func apply(
         plans: [VisibilityPlan],
         control: WindowControl,
-        logger: ShitsuraeLogger
+        logger: ShitsuraeLogger,
+        permitsNewSideEffect: () -> Bool = { true }
     ) -> [AppliedVisibilityChange] {
         plans.map { plan in
-            let application = apply(plan: plan, control: control, logger: logger)
+            let application = apply(
+                plan: plan,
+                control: control,
+                logger: logger,
+                permitsNewSideEffect: permitsNewSideEffect
+            )
             return AppliedVisibilityChange(
                 window: plan.window,
                 originalEntry: plan.originalEntry,
@@ -105,10 +111,19 @@ public enum VisibilityApplier {
     private static func apply(
         plan: VisibilityPlan,
         control: WindowControl,
-        logger: ShitsuraeLogger
+        logger: ShitsuraeLogger,
+        permitsNewSideEffect: () -> Bool
     ) -> PlanApplication {
         // v2: unminimize before showing — without this a minimized window can
         // never come back through a space switch (v1 bug).
+        if plan.restoreFromMinimized {
+            guard permitsNewSideEffect() else {
+                return PlanApplication(
+                    desiredEntry: plan.desiredEntry,
+                    mutationResult: .notAttempted
+                )
+            }
+        }
         if plan.restoreFromMinimized,
            !control.setWindowMinimized(
                windowID: plan.window.windowID,
@@ -143,6 +158,12 @@ public enum VisibilityApplier {
             {
                 return PlanApplication(desiredEntry: plan.desiredEntry, mutationResult: .applied)
             }
+            guard permitsNewSideEffect() else {
+                return PlanApplication(
+                    desiredEntry: plan.desiredEntry,
+                    mutationResult: .notAttempted
+                )
+            }
             let result = control.setWindowFrame(
                 windowID: plan.window.windowID,
                 pid: plan.window.pid,
@@ -170,6 +191,12 @@ public enum VisibilityApplier {
             {
                 return PlanApplication(desiredEntry: plan.desiredEntry, mutationResult: .applied)
             }
+            guard permitsNewSideEffect() else {
+                return PlanApplication(
+                    desiredEntry: plan.desiredEntry,
+                    mutationResult: .notAttempted
+                )
+            }
             let result = control.setWindowPosition(
                 windowID: plan.window.windowID,
                 pid: plan.window.pid,
@@ -194,6 +221,12 @@ public enum VisibilityApplier {
                 return PlanApplication(desiredEntry: plan.desiredEntry, mutationResult: result)
             }
 
+            guard permitsNewSideEffect() else {
+                return PlanApplication(
+                    desiredEntry: plan.desiredEntry,
+                    mutationResult: .notAttempted
+                )
+            }
             let minimizeResult = control.setWindowMinimized(
                 windowID: plan.window.windowID,
                 pid: plan.window.pid,
@@ -236,7 +269,9 @@ public enum VisibilityApplier {
         changes: [AppliedVisibilityChange],
         control: WindowControl,
         logger: ShitsuraeLogger,
-        retryDelaysMS: [Int] = defaultRetryDelaysMS
+        retryDelaysMS: [Int] = defaultRetryDelaysMS,
+        permitsNewSideEffect: () -> Bool = { true },
+        remainingBudgetMS: () -> Int? = { nil }
     ) -> ConvergenceOutcome {
         guard !changes.isEmpty else {
             return ConvergenceOutcome(changes: [], hasPending: false, retryCount: 0, verifyCount: 0)
@@ -245,7 +280,11 @@ public enum VisibilityApplier {
         var workingChanges = changes
         let settlingDelayMS = control.visibilityVerificationSettlingDelayMS()
         if settlingDelayMS > 0 {
-            control.sleep(milliseconds: settlingDelayMS)
+            let permittedDelay = remainingBudgetMS().map { min(settlingDelayMS, $0) }
+                ?? settlingDelayMS
+            if permittedDelay > 0 {
+                control.sleep(milliseconds: permittedDelay)
+            }
         }
         var verifyCount = 1
         var retryCount = 0
@@ -278,6 +317,9 @@ public enum VisibilityApplier {
         )
 
         for delayMS in retryDelaysMS where verification.values.contains(where: { $0 != .desired }) {
+            if remainingBudgetMS() == 0 {
+                break
+            }
             let unresolvedIdentities = Set(verification.compactMap { identity, result in
                 result == .desired ? nil : identity
             })
@@ -290,15 +332,21 @@ public enum VisibilityApplier {
                 break
             }
             if !retryableIndices.isEmpty {
-                retryCount += 1
-                retry(
+                guard permitsNewSideEffect() else { break }
+                let didRetry = retry(
                     changes: &workingChanges,
                     indices: retryableIndices,
                     control: control,
-                    logger: logger
+                    logger: logger,
+                    permitsNewSideEffect: permitsNewSideEffect
                 )
+                if didRetry {
+                    retryCount += 1
+                }
             }
-            control.sleep(milliseconds: delayMS)
+            let permittedDelay = remainingBudgetMS().map { min(delayMS, $0) } ?? delayMS
+            guard permittedDelay > 0 else { break }
+            control.sleep(milliseconds: permittedDelay)
             verifyCount += 1
             verification.merge(observe(identities: unresolvedIdentities)) {
                 _, latest in latest
@@ -497,9 +545,12 @@ public enum VisibilityApplier {
         changes: inout [AppliedVisibilityChange],
         indices: [Int],
         control: WindowControl,
-        logger: ShitsuraeLogger
-    ) {
+        logger: ShitsuraeLogger,
+        permitsNewSideEffect: () -> Bool
+    ) -> Bool {
+        var didRetry = false
         for index in indices {
+            guard permitsNewSideEffect() else { break }
             let change = changes[index]
             let result: WindowGeometryMutationResult
             switch change.desiredEntry.visibilityState {
@@ -515,7 +566,9 @@ public enum VisibilityApplier {
                         bundleID: change.window.bundleID,
                         minimized: false
                     )
+                    didRetry = true
                 }
+                guard permitsNewSideEffect() else { return didRetry }
                 result = control.setWindowFrame(
                     windowID: change.window.windowID,
                     pid: change.window.pid,
@@ -523,6 +576,7 @@ public enum VisibilityApplier {
                     bundleID: change.window.bundleID,
                     frame: frame
                 )
+                didRetry = true
             case .hiddenOffscreen:
                 guard let frame = change.desiredEntry.lastHiddenFrame else {
                     continue
@@ -534,6 +588,7 @@ public enum VisibilityApplier {
                     bundleID: change.window.bundleID,
                     position: CGPoint(x: frame.x, y: frame.y)
                 )
+                didRetry = true
             case .hiddenMinimized:
                 result = control.setWindowMinimized(
                     windowID: change.window.windowID,
@@ -542,6 +597,7 @@ public enum VisibilityApplier {
                     bundleID: change.window.bundleID,
                     minimized: true
                 ).isSuccess ? .applied : .notAttempted
+                didRetry = true
             }
 
             changes[index].geometryMutationResult = result
@@ -564,6 +620,7 @@ public enum VisibilityApplier {
                 )
             }
         }
+        return didRetry
     }
 
     static func frameMatches(

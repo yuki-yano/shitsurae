@@ -18,7 +18,11 @@ struct SampleConfigTests {
         try #require(FileManager.default.fileExists(atPath: dir.path))
 
         let loaded = try ConfigLoader().load(from: dir)
-        #expect(loaded.config.layouts.keys.sorted() == ["browser", "work"])
+        #expect(loaded.config.layouts.keys.sorted() == [
+            "browser", "calendar", "default", "macbook-pro", "research", "work",
+        ])
+        #expect(loaded.config.layoutSets["home"]?.layouts == ["default", "calendar", "research"])
+        #expect(loaded.config.layoutSets["mobile"]?.layouts == ["macbook-pro"])
     }
 
     @Test func loadsVirtualSample() throws {

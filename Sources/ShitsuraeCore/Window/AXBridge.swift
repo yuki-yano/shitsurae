@@ -6,15 +6,61 @@ import Foundation
 @_silgen_name("_AXUIElementGetWindow")
 func AXUIElementGetWindowID(_ element: AXUIElement, _ idOut: UnsafeMutablePointer<CGWindowID>) -> AXError
 
-/// Bounds read-only AX IPC without changing the timeout used by window
-/// mutations. A single application that stops servicing Accessibility must
+/// Bounds read-only AX IPC by both the read cap and the remaining mutation
+/// budget. A single application that stops servicing Accessibility must
 /// not serialize every Shitsurae command behind the system default timeout.
 public enum AXReadPolicy {
     public static let messagingTimeoutSeconds: Float = 0.25
+    @TaskLocal static var operationBudget: WindowInteractionBudget?
 
     @discardableResult
     public static func apply(to element: AXUIElement) -> AXError {
-        AXUIElementSetMessagingTimeout(element, messagingTimeoutSeconds)
+        guard let timeout = timeoutSeconds(budget: operationBudget) else { return .cannotComplete }
+        return AXUIElementSetMessagingTimeout(element, timeout)
+    }
+
+    static func timeoutSeconds(budget: WindowInteractionBudget?) -> Float? {
+        guard budget?.permitsCall != false else { return nil }
+        let remaining = budget.map { Float($0.remainingBudgetMS()) / 1_000 } ?? messagingTimeoutSeconds
+        return remaining > 0 ? min(messagingTimeoutSeconds, remaining) : nil
+    }
+
+    static func copyAttributeValue(_ element: AXUIElement, _ attribute: CFString, _ value: UnsafeMutablePointer<CFTypeRef?>) -> AXError {
+        guard apply(to: element) == .success else { return .cannotComplete }
+        return AXUIElementCopyAttributeValue(element, attribute, value)
+    }
+
+    static func windowID(_ element: AXUIElement, _ idOut: UnsafeMutablePointer<CGWindowID>) -> AXError {
+        guard apply(to: element) == .success else { return .cannotComplete }
+        return AXUIElementGetWindowID(element, idOut)
+    }
+
+    static func isAttributeSettable(_ element: AXUIElement, _ attribute: CFString, _ settable: UnsafeMutablePointer<DarwinBoolean>) -> AXError {
+        guard apply(to: element) == .success else { return .cannotComplete }
+        return AXUIElementIsAttributeSettable(element, attribute, settable)
+    }
+}
+
+enum AXWritePolicy {
+    static func timeoutSeconds(budget: WindowInteractionBudget?) -> Float? {
+        guard budget?.permitsCall != false else { return nil }
+        let remaining = budget.map { Float($0.remainingBudgetMS()) / 1_000 } ?? 60
+        return remaining > 0 ? remaining : nil
+    }
+
+    static func prepare(_ element: AXUIElement) -> Bool {
+        guard let timeout = timeoutSeconds(budget: AXReadPolicy.operationBudget) else { return false }
+        return AXUIElementSetMessagingTimeout(element, timeout) == .success
+    }
+
+    static func setAttributeValue(_ element: AXUIElement, _ attribute: CFString, _ value: CFTypeRef) -> AXError {
+        guard prepare(element) else { return .cannotComplete }
+        return AXUIElementSetAttributeValue(element, attribute, value)
+    }
+
+    static func performAction(_ element: AXUIElement, _ action: CFString) -> AXError {
+        guard prepare(element) else { return .cannotComplete }
+        return AXUIElementPerformAction(element, action)
     }
 }
 

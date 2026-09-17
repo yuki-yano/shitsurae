@@ -11,6 +11,7 @@ public struct SpaceSwitchOutcome: Equatable, Sendable {
     public let focusedWindowBelongsToTargetWorkspace: Bool
     public let unresolvedSlots: [PendingUnresolvedSlot]
     public let converged: Bool
+    public let physicalStateUnverified: Bool
 }
 
 public struct WorkspaceMoveOutcome: Equatable, Sendable {
@@ -31,6 +32,7 @@ public enum VirtualSpaceEngineError: Error, Equatable, Sendable {
     case monitorNotFound(String)
     case windowNotTracked
     case ambiguousWindow
+    case persistenceFailed(String)
     case stateError(String)
 }
 
@@ -65,11 +67,15 @@ private struct SpaceSwitchPreflightSnapshot {
 /// one actor.
 public actor VirtualSpaceEngine {
     private let store: RuntimeStateStore
-    let control: WindowControl
+    private let unbudgetedControl: any WindowControl
+    var control: any WindowControl {
+        unbudgetedControl.applyingBudget(operationCoordinator.currentInteractionBudget())
+    }
     let logger: ShitsuraeLogger
     let retryDelaysMS: [Int]
     let arrangeWaitTimeoutMS: Int
     nonisolated let focusEventGate: FocusEventGate
+    public nonisolated let operationCoordinator: ArrangeOperationCoordinator
     private var state: RuntimeState
     private var observedDisplaysByID: [String: DisplayInfo]
     var latestFocusEventSequence: UInt64 = 0
@@ -92,24 +98,31 @@ public actor VirtualSpaceEngine {
     /// workspace without follow-focus undoing the user's explicit switch.
     var suspendedCompanionMainSpaces: [WindowIdentity: Int] = [:]
 
+    let transitionCheckpoint: @Sendable (LayoutTransitionCheckpoint) throws -> Void
+
     public init(
         store: RuntimeStateStore,
         control: WindowControl,
         logger: ShitsuraeLogger,
         retryDelaysMS: [Int] = VisibilityApplier.defaultRetryDelaysMS,
         arrangeWaitTimeoutMS: Int = 5000,
-        focusEventGate: FocusEventGate = FocusEventGate()
+        focusEventGate: FocusEventGate = FocusEventGate(),
+        operationCoordinator: ArrangeOperationCoordinator = ArrangeOperationCoordinator(),
+        transitionCheckpoint: @escaping @Sendable (LayoutTransitionCheckpoint) throws -> Void = { _ in }
     ) throws {
         self.store = store
-        self.control = control
+        self.unbudgetedControl = control
         self.logger = logger
         self.retryDelaysMS = retryDelaysMS
         self.arrangeWaitTimeoutMS = arrangeWaitTimeoutMS
         self.focusEventGate = focusEventGate
+        self.operationCoordinator = operationCoordinator
+        self.transitionCheckpoint = transitionCheckpoint
         self.state = try store.loadStrict()
         self.observedDisplaysByID = Dictionary(
             uniqueKeysWithValues: control.displays().map { ($0.id, $0) }
         )
+        operationCoordinator.updateJournalMirror(state: self.state)
     }
 
     // MARK: - Queries
@@ -158,9 +171,8 @@ public actor VirtualSpaceEngine {
         let otherWorkspaces = state.activeWorkspaces.filter {
             $0.layoutName != layoutName && $0.displayID != hostDisplayID
         }
-        guard !otherWorkspaces.isEmpty else { return [] }
-
-        var excluded = Set<WindowIdentity>()
+        var excluded = state.releasedWindowIdentities
+        guard !otherWorkspaces.isEmpty else { return excluded }
         for workspace in otherWorkspaces {
             for entry in state.slots(layoutName: workspace.layoutName) where entry.origin == .layout {
                 if let identity = entry.boundIdentity {
@@ -348,13 +360,15 @@ public actor VirtualSpaceEngine {
 
     /// Explicit-input entry point: targets the primary display's workspace.
     @discardableResult
-    public func switchSpace(
+    package func switchSpace(
         to targetSpaceID: Int,
         config: LoadedConfig,
         reconcile: Bool = false,
         adoptionIgnoreRules: IgnoreRuleSet? = nil,
-        focusPolicy: SpaceSwitchFocusPolicy = .target
+        focusPolicy: SpaceSwitchFocusPolicy = .target,
+        token: ArrangeOperationToken
     ) throws -> SpaceSwitchOutcome {
+        try validateMutationAdmission(token: token)
         guard let workspace = primaryWorkspace() else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
@@ -364,18 +378,21 @@ public actor VirtualSpaceEngine {
             config: config,
             reconcile: reconcile,
             adoptionIgnoreRules: adoptionIgnoreRules,
-            focusPolicy: focusPolicy
+            focusPolicy: focusPolicy,
+            token: token
         )
     }
 
     @discardableResult
-    public func switchSpace(
+    package func switchSpace(
         monitor: String,
         to targetSpaceID: Int,
         config: LoadedConfig,
         reconcile: Bool = false,
-        focusPolicy: SpaceSwitchFocusPolicy = .target
+        focusPolicy: SpaceSwitchFocusPolicy = .target,
+        token: ArrangeOperationToken
     ) throws -> SpaceSwitchOutcome {
+        try validateMutationAdmission(token: token)
         guard config.config.monitors?[monitor] != nil else {
             throw VirtualSpaceEngineError.monitorNotFound(monitor)
         }
@@ -397,16 +414,19 @@ public actor VirtualSpaceEngine {
             to: targetSpaceID,
             config: config,
             reconcile: reconcile,
-            focusPolicy: focusPolicy
+            focusPolicy: focusPolicy,
+            token: token
         )
     }
 
     @discardableResult
-    public func routeAndSwitchSpace(
+    package func routeAndSwitchSpace(
         candidates: [ResolvedSpaceSwitchShortcut],
         cursorLocation: CGPoint,
-        config: LoadedConfig
+        config: LoadedConfig,
+        token: ArrangeOperationToken
     ) throws -> RoutedSpaceSwitchOutcome {
+        try validateMutationAdmission(token: token)
         let displays = control.displays()
         switch SpaceShortcutRouter.route(
             candidates: candidates,
@@ -420,7 +440,8 @@ public actor VirtualSpaceEngine {
                 layoutName: target.layoutName,
                 to: target.spaceID,
                 config: config,
-                focusPolicy: target.focus
+                focusPolicy: target.focus,
+                token: token
             )
             return RoutedSpaceSwitchOutcome(target: target, outcome: outcome)
         case let .failure(message):
@@ -432,16 +453,36 @@ public actor VirtualSpaceEngine {
     /// slots and its host display are touched — non-interference with other
     /// displays' workspaces is a hard invariant.
     @discardableResult
-    public func switchSpace(
+    package func switchSpace(
         layoutName: String,
         to targetSpaceID: Int,
         config: LoadedConfig,
         reconcile: Bool = false,
         adoptionIgnoreRules: IgnoreRuleSet? = nil,
         shouldFocusTarget: Bool = true,
-        focusPolicy: SpaceSwitchFocusPolicy = .target
+        focusPolicy: SpaceSwitchFocusPolicy = .target,
+        allowLayoutTransition: Bool = false,
+        token: ArrangeOperationToken
     ) throws -> SpaceSwitchOutcome {
+        try validateMutationAdmission(token: token, allowsTransition: allowLayoutTransition)
         try ensureAccessibility()
+        if state.pendingLayoutTransition != nil, !allowLayoutTransition {
+            throw ShitsuraeError(
+                .operationBlocked,
+                "window recovery is required before switching spaces",
+                subcode: "recoveryRequired"
+            )
+        }
+        if (state.selectedSetNeedsReapply(config: config.config)
+            || state.needsReapply(layoutName: layoutName, config: config.config)),
+            !allowLayoutTransition
+        {
+            throw ShitsuraeError(
+                .operationBlocked,
+                "layout definition changed; reapply or restore before switching spaces",
+                subcode: "needsReapply"
+            )
+        }
         guard let layout = config.config.layouts[layoutName] else {
             throw VirtualSpaceEngineError.layoutNotFound(layoutName)
         }
@@ -477,7 +518,8 @@ public actor VirtualSpaceEngine {
                 focusedWindowID: nil,
                 focusedWindowBelongsToTargetWorkspace: false,
                 unresolvedSlots: [],
-                converged: true
+                converged: true,
+                physicalStateUnverified: false
             )
         }
 
@@ -505,7 +547,12 @@ public actor VirtualSpaceEngine {
         )
         var preflightAttempts = 1
         for delayMS in retryDelaysMS where preflight.shouldReject {
-            control.sleep(milliseconds: delayMS)
+            if !operationCoordinator.permitsNewSideEffect(token: token) {
+                break
+            }
+            let permittedDelay = min(delayMS, operationCoordinator.remainingBudgetMS(token: token))
+            guard permittedDelay > 0 else { break }
+            control.sleep(milliseconds: permittedDelay)
             preflightAttempts += 1
             let retryObservation = control.focusedWindowObservation()
             guard retryObservation.inventory.isAuthoritative else { continue }
@@ -584,7 +631,8 @@ public actor VirtualSpaceEngine {
             persistChanges: false,
             inventory: inventory,
             excludedWindowIdentities: blockedIdentities,
-            additionalIgnoreRules: adoptionIgnoreRules
+            additionalIgnoreRules: adoptionIgnoreRules,
+            token: token
         )
 
         pruneIneligibleAdoptedEntriesInMemory(layoutName: layoutName, windows: allWindows)
@@ -607,6 +655,13 @@ public actor VirtualSpaceEngine {
         let allVisibilityPlans = plan.shows + plan.hides
         let hasPhysicalMutation = allVisibilityPlans.contains { $0.mutation != .none }
         if hasPhysicalMutation {
+            if !operationCoordinator.permitsNewSideEffect(token: token) {
+                throw operationCoordinator.interruptionError(token: token) ?? ShitsuraeError(
+                    .operationTimedOut,
+                    "arrange deadline exceeded before visibility write-ahead",
+                    subcode: "deadlineExceeded"
+                )
+            }
             // Persist the desired visibility and exact bindings before the
             // first AX mutation. If the process exits or the final save fails,
             // shutdown/startup recovery can still find every parked window.
@@ -657,20 +712,41 @@ public actor VirtualSpaceEngine {
                 )
             )
             try persist(intentState)
+            if state.pendingLayoutTransition != nil,
+               allVisibilityPlans.contains(where: { $0.desiredEntry.visibilityState.isManagedHidden && $0.mutation != .none }) {
+                try reachTransitionCheckpoint(.hideWALPersisted)
+            }
+        }
+
+        if !operationCoordinator.permitsNewSideEffect(token: token) {
+            throw operationCoordinator.interruptionError(token: token) ?? ShitsuraeError(
+                .operationTimedOut,
+                "arrange deadline exceeded before visibility mutation",
+                subcode: "deadlineExceeded"
+            )
         }
 
         let mutationFreePlans = allVisibilityPlans.filter { $0.mutation == .none }
         let applied = VisibilityApplier.apply(
             plans: allVisibilityPlans.filter { $0.mutation != .none },
             control: control,
-            logger: logger
+            logger: logger,
+            permitsNewSideEffect: {
+                operationCoordinator.permitsNewSideEffect(token: token)
+            }
         )
 
         let convergence = VisibilityApplier.converge(
             changes: applied,
             control: control,
             logger: logger,
-            retryDelaysMS: retryDelaysMS
+            retryDelaysMS: retryDelaysMS,
+            permitsNewSideEffect: {
+                operationCoordinator.permitsNewSideEffect(token: token)
+            },
+            remainingBudgetMS: {
+                operationCoordinator.remainingBudgetMS(token: token)
+            }
         )
         updateQuarantine(plannedChanges: applied, convergence: convergence)
 
@@ -724,7 +800,8 @@ public actor VirtualSpaceEngine {
             } else if !focusMovedOutsideTarget {
                 focusedIdentity = focusTarget(
                     from: focusCandidates,
-                    retryPreferredTransientFailure: true
+                    retryPreferredTransientFailure: true,
+                    token: token
                 )
             }
         } else if shouldFocusTarget,
@@ -737,7 +814,8 @@ public actor VirtualSpaceEngine {
             if initialWillHide, !focusedMainIsBlocked, !focusCandidates.isEmpty {
                 focusedIdentity = focusTarget(
                     from: focusCandidates,
-                    retryPreferredTransientFailure: true
+                    retryPreferredTransientFailure: true,
+                    token: token
                 )
             } else if let originalWindow = allWindows.first(where: {
                 $0.identity == focusBeforeVisibilityMutation
@@ -750,7 +828,7 @@ public actor VirtualSpaceEngine {
                         liveFocused.map(mutatedIdentities.contains) == true
                             || liveFocused.map { mutatedBundleIDs.contains($0.bundleID) } == true
                     )
-                if focusLooksStolen, restoreFocus(to: originalWindow) {
+                if focusLooksStolen, restoreFocus(to: originalWindow, token: token) {
                     focusedIdentity = originalWindow.identity
                 }
             }
@@ -830,6 +908,9 @@ public actor VirtualSpaceEngine {
                 : nil
         )
 
+        if let interruption = operationCoordinator.interruptionError(token: token) {
+            throw interruption
+        }
         try persist(newState)
 
         // A previously suspended main that is manageable again participated
@@ -877,7 +958,8 @@ public actor VirtualSpaceEngine {
             focusedWindowID: focusedIdentity?.windowID,
             focusedWindowBelongsToTargetWorkspace: focusedIdentity.map(targetIdentities.contains) ?? false,
             unresolvedSlots: plan.unresolvedSlots,
-            converged: converged
+            converged: converged,
+            physicalStateUnverified: convergence.hasPending
         )
     }
 
@@ -889,14 +971,28 @@ public actor VirtualSpaceEngine {
         }
     }
 
+    func ensureDefinitionCurrent(layoutName: String, config: LoadedConfig) throws {
+        if state.selectedSetNeedsReapply(config: config.config)
+            || state.needsReapply(layoutName: layoutName, config: config.config)
+        {
+            throw ShitsuraeError(
+                .operationBlocked,
+                "layout definition changed; reapply or restore before changing windows",
+                subcode: "needsReapply"
+            )
+        }
+    }
+
     func focusTarget(
         from candidates: [BoundWindow],
-        retryPreferredTransientFailure: Bool = false
+        retryPreferredTransientFailure: Bool = false,
+        token: ArrangeOperationToken
     ) -> WindowIdentity? {
         for (index, target) in candidates.enumerated() {
             if focusOneTarget(
                 target,
-                retryTransientFailure: retryPreferredTransientFailure && index == 0
+                retryTransientFailure: retryPreferredTransientFailure && index == 0,
+                token: token
             ) {
                 return target.window.identity
             }
@@ -904,30 +1000,41 @@ public actor VirtualSpaceEngine {
         return nil
     }
 
-    private func focusOneTarget(_ target: BoundWindow, retryTransientFailure: Bool) -> Bool {
+    private func focusOneTarget(
+        _ target: BoundWindow,
+        retryTransientFailure: Bool,
+        token: ArrangeOperationToken
+    ) -> Bool {
+        if !operationCoordinator.permitsNewSideEffect(token: token) {
+            return false
+        }
         let firstResult = control.focusWindow(
             windowID: target.window.windowID,
             pid: target.window.pid,
             processStartTime: target.window.processStartTime,
             bundleID: target.window.bundleID
         )
-        if firstResult.isSuccess, waitForFocusedWindow(identity: target.window.identity) {
+        if firstResult.isSuccess, waitForFocusedWindow(identity: target.window.identity, token: token) {
             return true
         }
 
-        let activated = control.activateApplication(
+        let mayActivate = operationCoordinator.permitsNewSideEffect(token: token)
+        let activated = mayActivate && control.activateApplication(
             pid: target.window.pid,
             processStartTime: target.window.processStartTime,
             bundleID: target.window.bundleID
         )
         if activated {
+            if !operationCoordinator.permitsNewSideEffect(token: token) {
+                return false
+            }
             let retryResult = control.focusWindow(
                 windowID: target.window.windowID,
                 pid: target.window.pid,
                 processStartTime: target.window.processStartTime,
                 bundleID: target.window.bundleID
             )
-            if retryResult.isSuccess, waitForFocusedWindow(identity: target.window.identity) {
+            if retryResult.isSuccess, waitForFocusedWindow(identity: target.window.identity, token: token) {
                 return true
             }
 
@@ -936,7 +1043,12 @@ public actor VirtualSpaceEngine {
             // third targeted attempt in the same final focus phase, so a
             // transient AX rejection does not create an app-to-app flash.
             if retryTransientFailure {
-                control.sleep(milliseconds: Self.focusVerificationDelaysMS[0])
+                let delay = min(Self.focusVerificationDelaysMS[0], operationCoordinator.remainingBudgetMS(token: token))
+                guard delay > 0 else { return false }
+                control.sleep(milliseconds: delay)
+                if !operationCoordinator.permitsNewSideEffect(token: token) {
+                    return false
+                }
                 let settledRetryResult = control.focusWindow(
                     windowID: target.window.windowID,
                     pid: target.window.pid,
@@ -944,7 +1056,7 @@ public actor VirtualSpaceEngine {
                     bundleID: target.window.bundleID
                 )
                 if settledRetryResult.isSuccess,
-                   waitForFocusedWindow(identity: target.window.identity)
+                   waitForFocusedWindow(identity: target.window.identity, token: token)
                 {
                     return true
                 }
@@ -968,15 +1080,24 @@ public actor VirtualSpaceEngine {
         return false
     }
 
-    private func restoreFocus(to window: WindowSnapshot) -> Bool {
+    private func restoreFocus(
+        to window: WindowSnapshot,
+        token: ArrangeOperationToken
+    ) -> Bool {
+        if !operationCoordinator.permitsNewSideEffect(token: token) {
+            return false
+        }
         let first = control.focusWindow(
             windowID: window.windowID,
             pid: window.pid,
             processStartTime: window.processStartTime,
             bundleID: window.bundleID
         )
-        if first.isSuccess, waitForFocusedWindow(identity: window.identity) {
+        if first.isSuccess, waitForFocusedWindow(identity: window.identity, token: token) {
             return true
+        }
+        if !operationCoordinator.permitsNewSideEffect(token: token) {
+            return false
         }
         guard control.activateApplication(
             pid: window.pid,
@@ -985,22 +1106,33 @@ public actor VirtualSpaceEngine {
         ) else {
             return false
         }
+        if !operationCoordinator.permitsNewSideEffect(token: token) {
+            return false
+        }
         let retry = control.focusWindow(
             windowID: window.windowID,
             pid: window.pid,
             processStartTime: window.processStartTime,
             bundleID: window.bundleID
         )
-        return retry.isSuccess && waitForFocusedWindow(identity: window.identity)
+        return retry.isSuccess && waitForFocusedWindow(identity: window.identity, token: token)
     }
 
-    func waitForFocusedWindow(identity: WindowIdentity) -> Bool {
+    func waitForFocusedWindow(
+        identity: WindowIdentity,
+        token: ArrangeOperationToken
+    ) -> Bool {
         if control.focusedWindowIdentity() == identity {
             return true
         }
 
         for delayMS in Self.focusVerificationDelaysMS {
-            control.sleep(milliseconds: delayMS)
+            if !operationCoordinator.permitsNewSideEffect(token: token) {
+                return false
+            }
+            let permittedDelay = min(delayMS, operationCoordinator.remainingBudgetMS(token: token))
+            guard permittedDelay > 0 else { return false }
+            control.sleep(milliseconds: permittedDelay)
             if control.focusedWindowIdentity() == identity {
                 return true
             }
@@ -1016,15 +1148,18 @@ public actor VirtualSpaceEngine {
     /// is exactly the one the next switch would bind, never a guess
     /// (v1 corrupted state here by falling back to the first entry).
     @discardableResult
-    public func moveWindowToWorkspace(
+    package func moveWindowToWorkspace(
         window: WindowSnapshot,
         toSpaceID: Int,
-        config: LoadedConfig
+        config: LoadedConfig,
+        token: ArrangeOperationToken
     ) throws -> WorkspaceMoveOutcome {
+        try validateMutationAdmission(token: token)
         guard let workspace = primaryWorkspace() else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
         let layoutName = workspace.layoutName
+        try ensureDefinitionCurrent(layoutName: layoutName, config: config)
         let observation = control.focusedWindowObservation()
         let inventory = observation.inventory
         guard inventory.isAuthoritative else {
@@ -1056,7 +1191,8 @@ public actor VirtualSpaceEngine {
             window: freshWindow,
             trackedEntry: entry,
             toSpaceID: toSpaceID,
-            config: config
+            config: config,
+            token: token
         )
     }
 
@@ -1067,7 +1203,8 @@ public actor VirtualSpaceEngine {
         window: WindowSnapshot,
         trackedEntry: SlotEntry,
         toSpaceID: Int,
-        config: LoadedConfig
+        config: LoadedConfig,
+        token: ArrangeOperationToken
     ) throws -> WorkspaceMoveOutcome {
         try ensureAccessibility()
         let observation = control.focusedWindowObservation()
@@ -1081,6 +1218,7 @@ public actor VirtualSpaceEngine {
         // The move stays within the layout that owns the tracked entry; its
         // workspace must be active (on any display) for visibility planning.
         let layoutName = trackedEntry.layoutName
+        try ensureDefinitionCurrent(layoutName: layoutName, config: config)
         guard state.activeWorkspace(layoutName: layoutName) != nil else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
@@ -1130,14 +1268,17 @@ public actor VirtualSpaceEngine {
         }
 
         let previousPending = state.pendingVisibilityConvergence(displayID: hostDisplay.id)
-        let requestID = UUID().uuidString.lowercased()
+        let requestID = token.requestID
 
-        func replacingEntry(in source: RuntimeState, with replacement: SlotEntry) -> RuntimeState {
+        func replacingEntry(in source: RuntimeState, with replacement: SlotEntry, claimSucceeded: Bool = false) -> RuntimeState {
             var result = source
             if result.slots.contains(where: { $0.id == replacement.id }) {
                 result.slots = result.slots.map { $0.id == replacement.id ? replacement : $0 }
             } else {
                 result.slots.append(replacement)
+            }
+            if claimSucceeded, let identity = replacement.boundIdentity {
+                result.releasedWindowIdentities.remove(identity)
             }
             return result
         }
@@ -1145,7 +1286,14 @@ public actor VirtualSpaceEngine {
         // A mutation-free plan has no crash window: persist the logical move
         // directly. Every real geometry mutation uses write-ahead state below.
         if plan.mutation == .none {
-            var finalState = replacingEntry(in: state, with: plan.desiredEntry)
+            if !operationCoordinator.permitsNewSideEffect(token: token) {
+                throw operationCoordinator.interruptionError(token: token) ?? ShitsuraeError(
+                    .operationTimedOut,
+                    "arrange deadline exceeded before recording workspace move",
+                    subcode: "deadlineExceeded"
+                )
+            }
+            var finalState = replacingEntry(in: state, with: plan.desiredEntry, claimSucceeded: true)
             finalState.setPendingVisibilityConvergence(displayID: hostDisplay.id, previousPending)
             try persist(finalState)
             return WorkspaceMoveOutcome(
@@ -1161,6 +1309,13 @@ public actor VirtualSpaceEngine {
         // membership and desired visibility before moving the real window.
         // A crash or later write failure therefore leaves enough state for
         // startup/shutdown recovery instead of an untracked offscreen window.
+        if !operationCoordinator.permitsNewSideEffect(token: token) {
+            throw operationCoordinator.interruptionError(token: token) ?? ShitsuraeError(
+                .operationTimedOut,
+                "arrange deadline exceeded before workspace move write-ahead",
+                subcode: "deadlineExceeded"
+            )
+        }
         let writeAheadEntry = Self.writeAheadEntry(for: plan)
         var intentState = replacingEntry(in: state, with: writeAheadEntry)
         let movePending = PendingVisibilityConvergence(
@@ -1183,15 +1338,35 @@ public actor VirtualSpaceEngine {
         quarantinedWindowIdentities.remove(window.identity)
         convergenceFailureCounts[window.identity] = 0
 
-        let applied = VisibilityApplier.apply(plans: [plan], control: control, logger: logger)
+        let applied = VisibilityApplier.apply(
+            plans: [plan],
+            control: control,
+            logger: logger,
+            permitsNewSideEffect: {
+                operationCoordinator.permitsNewSideEffect(token: token)
+            }
+        )
         let convergence = VisibilityApplier.converge(
             changes: applied,
             control: control,
             logger: logger,
-            retryDelaysMS: retryDelaysMS
+            retryDelaysMS: retryDelaysMS,
+            permitsNewSideEffect: {
+                operationCoordinator.permitsNewSideEffect(token: token)
+            },
+            remainingBudgetMS: {
+                operationCoordinator.remainingBudgetMS(token: token)
+            }
         )
         guard let change = convergence.changes.first else {
             throw VirtualSpaceEngineError.stateError("workspace move produced no visibility result")
+        }
+        if !operationCoordinator.permitsNewSideEffect(token: token) {
+            throw operationCoordinator.interruptionError(token: token) ?? ShitsuraeError(
+                .operationTimedOut,
+                "arrange deadline exceeded after workspace move",
+                subcode: "deadlineExceeded"
+            )
         }
 
         let verificationUncertain = convergence.unverifiedWindowIdentities.contains(window.identity)
@@ -1204,7 +1379,7 @@ public actor VirtualSpaceEngine {
             try persist(pendingState)
             throw VirtualSpaceEngineError.stateError("workspace move did not converge")
         } else if change.effectiveEntry == change.desiredEntry {
-            var finalState = replacingEntry(in: state, with: change.desiredEntry)
+            var finalState = replacingEntry(in: state, with: change.desiredEntry, claimSucceeded: true)
             finalState.setPendingVisibilityConvergence(displayID: hostDisplay.id, previousPending)
             try persist(finalState)
         } else {
@@ -1244,7 +1419,8 @@ public actor VirtualSpaceEngine {
     /// global assignment gives this exact window — never a guessed one
     /// (v1's fuzzy first-entry fallback here polluted windowID +
     /// lastActivatedAt).
-    public func markActivated(window: WindowSnapshot) {
+    package func markActivated(window: WindowSnapshot, token: ArrangeOperationToken) throws {
+        try validateMutationAdmission(token: token)
         guard let matched = assignedEntry(for: window) else {
             return
         }
@@ -1257,18 +1433,20 @@ public actor VirtualSpaceEngine {
             return updated
         }
 
-        try? persist(newState)
+        try persist(newState)
     }
 
     // MARK: - State bootstrap / management
 
     /// arrange --state-only: rebuild slot entries for a layout from its
     /// definitions, preserving runtime bindings of unchanged definitions.
-    public func bootstrapState(
+    package func bootstrapState(
         layoutName: String,
         activeSpaceID: Int,
-        config: LoadedConfig
+        config: LoadedConfig,
+        token: ArrangeOperationToken
     ) throws {
+        try validateMutationAdmission(token: token)
         guard let layout = config.config.layouts[layoutName] else {
             throw VirtualSpaceEngineError.layoutNotFound(layoutName)
         }
@@ -1285,6 +1463,8 @@ public actor VirtualSpaceEngine {
             throw VirtualSpaceEngineError.hostDisplayUnavailable
         }
 
+        _ = try LayoutRuntimeValidator.validate(layoutName: layoutName, layout: layout, host: hostDisplay,
+            config: config.config, state: state, displays: displays, observation: nil)
         let incomingFingerprints: Set<String> = Set(layout.spaces.flatMap { space in
             space.windows.compactMap { definition in
                 guard !PolicyEngine.matchesIgnoreAppRule(
@@ -1364,8 +1544,14 @@ public actor VirtualSpaceEngine {
         newState.upsertActiveWorkspace(
             displayID: hostDisplay.id,
             layoutName: layoutName,
-            spaceID: activeSpaceID
+            spaceID: activeSpaceID,
+            appliedDefinitionDigest: ConfigDigest.workspace(layoutName: layoutName, config: config.config)
         )
+        if let selected = newState.selectedLayoutSet,
+           Set(newState.activeWorkspaces.map(\.layoutName)) != Set(selected.memberNames)
+        {
+            newState.selectedLayoutSet = nil
+        }
         newState.setPendingVisibilityConvergence(displayID: hostDisplay.id, nil)
 
         try persist(newState)
@@ -1381,16 +1567,27 @@ public actor VirtualSpaceEngine {
     }
 
     /// space recover --force-clear-pending
-    public func clearPending() throws {
+    package func clearPending(token: ArrangeOperationToken) throws {
+        try validateMutationAdmission(token: token)
+        guard state.pendingLayoutTransition == nil else {
+            throw VirtualSpaceEngineError.stateError(
+                "layout transition recovery must be completed with arrange --recover"
+            )
+        }
         var newState = state
         newState.pendingVisibilityConvergences = []
         newState.liveArrangeRecoveryRequired = false
         try persist(newState)
     }
 
-    public func clearRuntimeState() {
-        store.clear()
-        state = RuntimeState()
+    package func clearRuntimeState(token: ArrangeOperationToken) throws {
+        try validateMutationAdmission(token: token)
+        var preserved = RuntimeState(
+            configGeneration: state.configGeneration,
+            releasedWindowIdentities: state.releasedWindowIdentities
+        )
+        preserved.revision = state.revision
+        try persist(preserved)
     }
 
     /// Shutdown path: restore every offscreen-hidden window of every active
@@ -1404,146 +1601,12 @@ public actor VirtualSpaceEngine {
     /// into it: a window on the wrong display is recoverable by hand, a
     /// stranded offscreen window is not.
     @discardableResult
-    public func restoreAllForShutdown(config: LoadedConfig) -> Bool {
-        guard !state.activeWorkspaces.isEmpty else {
-            return true // nothing tracked, nothing to restore
-        }
-
-        let displays = control.displays()
-        var allRestored = true
-        for workspace in state.activeWorkspaces {
-            let restored = restoreWorkspaceForShutdown(
-                workspace,
-                config: config,
-                displays: displays
-            )
-            allRestored = allRestored && restored
-        }
-        return allRestored
-    }
-
-    private func restoreWorkspaceForShutdown(
-        _ workspace: ActiveWorkspace,
-        config: LoadedConfig,
-        displays: [DisplayInfo]
-    ) -> Bool {
-        let layoutName = workspace.layoutName
-        guard let layout = config.config.layouts[layoutName] else {
-            return state.slots(layoutName: layoutName)
-                .allSatisfy { !$0.visibilityState.isManagedHidden }
-        }
-
-        let hiddenEntries = state.slots(layoutName: layoutName)
-            .filter { $0.visibilityState.isManagedHidden }
-        guard !hiddenEntries.isEmpty else {
-            return state.pendingVisibilityConvergence(displayID: workspace.displayID) == nil
-                && !state.liveArrangeRecoveryRequired
-        }
-
-        let resolvedHost = DisplayResolver.hostDisplay(
-            layout: layout,
-            config: config.config,
-            displays: displays
-        )
-        let clampToFallbackDisplay = resolvedHost == nil
-        guard let hostDisplay = resolvedHost ?? DisplayResolver.primaryDisplay(displays) else {
-            return false
-        }
-
-        let inventory = control.windowInventory()
-        guard inventory.isAuthoritative else {
-            return false
-        }
-        let allWindows = inventory.windows
-        let windows = allWindows.filter(WindowEligibility.isManageableForVirtualWorkspace)
-        let resolution = WindowRegistry.resolve(
-            entries: hiddenEntries.map(\.registryEntry),
-            manageableWindows: windows,
-            fullInventory: inventory
-        )
-
-        var plans: [VisibilityPlan] = []
-        var unresolvedCount = 0
-        for entry in hiddenEntries {
-            guard let window = resolution.assignments[entry.id] else {
-                // Unresolved against the manageable pool. When the exact
-                // window is still alive in CG (merely not AX-visible this
-                // pass), restoring is incomplete: discarding the runtime
-                // state now would strand the window offscreen forever.
-                if let identity = entry.boundIdentity,
-                   inventory.mayContain(identity)
-                {
-                    unresolvedCount += 1
-                }
-                // Otherwise the window is gone (app quit); nothing to restore.
-                continue
-            }
-            guard var plan = VisibilityPlanner.plan(
-                entry: entry,
-                window: window,
-                transition: .show,
-                layout: layout,
-                hostDisplay: hostDisplay,
-                displays: displays
-            ) else {
-                unresolvedCount += 1
-                continue
-            }
-            if clampToFallbackDisplay {
-                plan = Self.clampingPlanFrame(plan, into: hostDisplay.visibleFrame)
-            }
-            plans.append(plan)
-        }
-
-        let applied = VisibilityApplier.apply(plans: plans, control: control, logger: logger)
-        let convergence = VisibilityApplier.converge(
-            changes: applied,
-            control: control,
-            logger: logger,
-            retryDelaysMS: retryDelaysMS
-        )
-
-        var newState = state
-        var slotsByID = Dictionary(uniqueKeysWithValues: newState.slots.map { ($0.id, $0) })
-        let unsafeToMerge = Set(
-            convergence.unverifiedWindowIdentities + convergence.unconvergedWindowIdentities
-        )
-        for change in convergence.changes where !unsafeToMerge.contains(change.window.identity) {
-            slotsByID[change.effectiveEntry.id] = change.effectiveEntry
-        }
-        // Keep the original slot order (dictionary value order is unspecified).
-        newState.slots = newState.slots.compactMap { slotsByID[$0.id] }
-        try? persist(newState)
-
-        return !convergence.hasPending && unresolvedCount == 0
-    }
-
-    /// Shutdown-only frame clamping for dormant-workspace restores: shrink to
-    /// fit the substitute display, then move the origin inside its visible
-    /// frame so the restored window is guaranteed reachable.
-    private static func clampingPlanFrame(
-        _ plan: VisibilityPlan,
-        into visibleFrame: CGRect
-    ) -> VisibilityPlan {
-        guard case let .frame(frame) = plan.mutation else { return plan }
-        let width = min(frame.width, visibleFrame.width)
-        let height = min(frame.height, visibleFrame.height)
-        let x = min(max(frame.x, visibleFrame.minX), visibleFrame.minX + visibleFrame.width - width)
-        let y = min(max(frame.y, visibleFrame.minY), visibleFrame.minY + visibleFrame.height - height)
-        let clamped = ResolvedFrame(x: x, y: y, width: width, height: height)
-        guard clamped != frame else { return plan }
-
-        var desiredEntry = plan.desiredEntry
-        desiredEntry.lastVisibleFrame = clamped
-        return VisibilityPlan(
-            entryID: plan.entryID,
-            window: plan.window,
-            originalEntry: plan.originalEntry,
-            desiredEntry: desiredEntry,
-            mutation: .frame(clamped),
-            restoreFromMinimized: plan.restoreFromMinimized,
-            action: plan.action
-        )
+    package func restoreAllForShutdown(config: LoadedConfig, token: ArrangeOperationToken) throws -> Bool {
+        try validateMutationAdmission(token: token, permitsRecovery: true)
+        let progress = try restoreEntriesForTransition(state.slots, token: token)
+        return progress.unresolvedEntryIDs.isEmpty
+            && !(progress.restored.isEmpty && !state.pendingVisibilityConvergences.isEmpty)
+            && operationCoordinator.permitsNewSideEffect(token: token)
     }
 
     // MARK: - Display configuration changes
@@ -1559,7 +1622,13 @@ public actor VirtualSpaceEngine {
     /// Restore priority when several dormant entries resolve to the same
     /// reconnected display: id declaration > monitor role > resolution
     /// condition; ties break by registration order in activeWorkspaces.
-    public func handleDisplayConfigurationChange(config: LoadedConfig) {
+    package func handleDisplayConfigurationChange(config: LoadedConfig, token: ArrangeOperationToken) throws {
+        try validateMutationAdmission(token: token)
+        guard state.pendingLayoutTransition == nil,
+              !state.selectedSetNeedsReapply(config: config.config)
+        else {
+            return
+        }
         let displays = control.displays()
         let connectedIDs = Set(displays.map(\.id))
 
@@ -1579,12 +1648,15 @@ public actor VirtualSpaceEngine {
 
         var claimedDisplayIDs = Set<String>()
         for workspace in prioritized {
+            guard !state.needsReapply(
+                layoutName: workspace.layoutName,
+                config: config.config
+            ) else {
+                continue
+            }
             guard let layout = config.config.layouts[workspace.layoutName] else {
-                // The layout left the config while dormant; drop the record.
-                var newState = state
-                newState.activeWorkspaces.removeAll { $0.layoutName == workspace.layoutName }
-                newState.pendingVisibilityConvergences.removeAll { $0.layoutName == workspace.layoutName }
-                try? persist(newState)
+                // Preserve the exact recovery record. A removed definition is
+                // recoverable through arrange --recover without config.
                 continue
             }
             guard let host = DisplayResolver.hostDisplay(
@@ -1602,7 +1674,8 @@ public actor VirtualSpaceEngine {
                 workspace,
                 layout: layout,
                 hostDisplay: host,
-                config: config
+                config: config,
+                token: token
             )
         }
 
@@ -1613,6 +1686,12 @@ public actor VirtualSpaceEngine {
         let liveDisplays = control.displays()
         let liveConnectedIDs = Set(liveDisplays.map(\.id))
         for workspace in state.activeWorkspaces where liveConnectedIDs.contains(workspace.displayID) {
+            guard !state.needsReapply(
+                layoutName: workspace.layoutName,
+                config: config.config
+            ) else {
+                continue
+            }
             do {
                 if let layout = config.config.layouts[workspace.layoutName],
                    let hostDisplay = DisplayResolver.hostDisplay(
@@ -1637,7 +1716,8 @@ public actor VirtualSpaceEngine {
                     layoutName: workspace.layoutName,
                     to: workspace.spaceID,
                     config: config,
-                    reconcile: true
+                    reconcile: true,
+                    token: token
                 )
             } catch {
                 logger.log(
@@ -1654,6 +1734,7 @@ public actor VirtualSpaceEngine {
         observedDisplaysByID = Dictionary(
             uniqueKeysWithValues: liveDisplays.map { ($0.id, $0) }
         )
+        if let interruption = operationCoordinator.interruptionError(token: token) { throw interruption }
     }
 
     private static func rebasingLayoutFrames(
@@ -1715,7 +1796,8 @@ public actor VirtualSpaceEngine {
         _ workspace: ActiveWorkspace,
         layout: LayoutDefinition,
         hostDisplay: DisplayInfo,
-        config: LoadedConfig
+        config: LoadedConfig,
+        token: ArrangeOperationToken
     ) {
         var newState = state
         newState.upsertActiveWorkspace(
@@ -1752,7 +1834,8 @@ public actor VirtualSpaceEngine {
                 layoutName: workspace.layoutName,
                 to: workspace.spaceID,
                 config: config,
-                reconcile: true
+                reconcile: true,
+                token: token
             )
             logger.log(
                 event: "display.change.workspaceRestored",
@@ -1777,8 +1860,13 @@ public actor VirtualSpaceEngine {
 
     // MARK: - Persistence
 
-    func replaceState(_ newState: RuntimeState) throws {
-        try persist(newState)
+    func reachTransitionCheckpoint(_ point: LayoutTransitionCheckpoint) throws {
+        do { try transitionCheckpoint(point) }
+        catch { throw LayoutTransitionCheckpointFailure(point: point) }
+    }
+
+    func replaceState(_ newState: RuntimeState, allowsInvalidatedJournalCleanup: Bool = false) throws {
+        try persist(newState, allowsInvalidatedJournalCleanup: allowsInvalidatedJournalCleanup)
     }
 
     func replaceStateInMemory(_ newState: RuntimeState) {
@@ -1874,14 +1962,22 @@ public actor VirtualSpaceEngine {
         return entry
     }
 
-    private func persist(_ newState: RuntimeState) throws {
+    private func persist(_ newState: RuntimeState, allowsInvalidatedJournalCleanup: Bool = false) throws {
+        if let interruption = operationCoordinator.currentInterruptionError() {
+            var journalOnly = state
+            journalOnly.pendingLayoutTransition = nil
+            let safeCleanup = allowsInvalidatedJournalCleanup && interruption.code == .operationBlocked
+                && state.pendingLayoutTransition?.phase == .precommit && journalOnly == newState
+            if !safeCleanup { throw interruption }
+        }
         var toSave = newState
         toSave.revision = state.revision + 1
         do {
             toSave = try store.saveStrict(state: toSave)
         } catch {
-            throw VirtualSpaceEngineError.stateError(String(describing: error))
+            throw VirtualSpaceEngineError.persistenceFailed(String(describing: error))
         }
         state = toSave
+        operationCoordinator.updateJournalMirror(state: toSave)
     }
 }

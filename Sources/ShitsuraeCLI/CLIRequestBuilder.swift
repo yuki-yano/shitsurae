@@ -25,10 +25,31 @@ enum CLIRequestBuilder {
         spaceID: Int?
     ) -> CommandRequest {
         var request = CommandRequest(command: "arrange")
+        request.requestID = UUID().uuidString.lowercased()
         request.layouts = layouts
         request.dryRun = dryRun ? true : nil
         request.stateOnly = stateOnly ? true : nil
         request.spaceID = spaceID
+        return request
+    }
+
+    static func arrangeSet(name: String, dryRun: Bool) -> CommandRequest {
+        var request = CommandRequest(command: "arrangeSet")
+        request.requestID = UUID().uuidString.lowercased()
+        request.setName = name
+        request.dryRun = dryRun ? true : nil
+        return request
+    }
+
+    static func arrangeStatus() -> CommandRequest {
+        var request = CommandRequest(command: "arrangeStatus")
+        request.requestID = UUID().uuidString.lowercased()
+        return request
+    }
+
+    static func arrangeRecover() -> CommandRequest {
+        var request = CommandRequest(command: "arrangeRecover")
+        request.requestID = UUID().uuidString.lowercased()
         return request
     }
 

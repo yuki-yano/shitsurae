@@ -47,7 +47,7 @@ public struct WindowTargetSelector: Codable, Equatable, Sendable {
     }
 }
 
-public struct ApplicationLaunchRequest: Equatable, Sendable {
+public struct ApplicationLaunchRequest: Equatable, Hashable, Sendable {
     public let bundleID: String
     public let profileDirectory: String?
 

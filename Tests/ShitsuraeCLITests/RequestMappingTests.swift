@@ -54,6 +54,45 @@ struct RequestMappingTests {
         }
     }
 
+    @Test func layoutSetStatusAndRecoveryRequestsUseDistinctCommands() {
+        let set = CLIRequestBuilder.arrangeSet(name: "mobile", dryRun: true)
+        let status = CLIRequestBuilder.arrangeStatus()
+        let recover = CLIRequestBuilder.arrangeRecover()
+
+        #expect(set.command == "arrangeSet")
+        #expect(set.setName == "mobile")
+        #expect(set.dryRun == true)
+        #expect(set.requestID?.isEmpty == false)
+        #expect(status.command == "arrangeStatus")
+        #expect(recover.command == "arrangeRecover")
+    }
+
+    @Test func arrangeSetParsesOneMemberSetAndRejectsLocalOptions() throws {
+        let command = try Arrange.parse(["--set", "mobile", "--dry-run", "--json"])
+        #expect(command.layoutSet == "mobile")
+        #expect(command.layouts.isEmpty)
+        #expect(command.dryRun)
+        #expect(command.jsonFlag.json)
+
+        #expect(throws: Error.self) {
+            _ = try Arrange.parse(["work", "--set", "mobile"])
+        }
+        #expect(throws: Error.self) {
+            _ = try Arrange.parse(["--set", "mobile", "--space", "2"])
+        }
+    }
+
+    @Test func arrangeStatusAndRecoverAreMutuallyExclusiveAndRejectDryRun() throws {
+        #expect(try Arrange.parse(["--status"]).status)
+        #expect(try Arrange.parse(["--recover"]).recover)
+        #expect(throws: Error.self) {
+            _ = try Arrange.parse(["--status", "--recover"])
+        }
+        #expect(throws: Error.self) {
+            _ = try Arrange.parse(["--recover", "--dry-run"])
+        }
+    }
+
     @Test func spaceCommandsMapEveryOption() {
         let listRequest = CLIRequestBuilder.spaceQuery(command: "spaceList", layout: "calendar")
         let currentRequest = CLIRequestBuilder.spaceQuery(command: "spaceCurrent", layout: nil)

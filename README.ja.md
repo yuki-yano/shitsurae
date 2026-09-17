@@ -330,6 +330,44 @@ shitsurae arrange work reference
 > 非プライマリディスプレイのレイアウトには、専用の`bundleID`、`title`、`profile`などを使った狭いマッチ条件を指定してください。
 > ブラウザ本体の`bundleID`だけのような広い条件は、別のディスプレイにある同じアプリのウィンドウまで対象にする可能性があります。
 
+### レイアウトセット
+
+レイアウトセットは、同時に管理するレイアウトをまとめた排他的な名前付き集合です。セット適用は管理対象全体を置き換えるため、局所操作である`arrange <layout...>`とは異なります。
+
+```yaml
+layoutSets:
+  home:
+    layouts: [default, calendar, research]
+  mobile:
+    layouts: [macbook-pro]
+```
+
+`home`は3台のディスプレイをまとめて管理し、`mobile`は独立した`macbook-pro`レイアウトだけを管理します。同じセット内の各memberは、接続中の異なるディスプレイへ解決される必要があります。排他的な別セット間では同一のウィンドウ条件を再利用できますが、同じセットのmember間では再利用できません。
+
+dry runと適用は次のコマンドで行います。
+
+```bash
+shitsurae arrange --set home --dry-run --json
+shitsurae arrange --set home
+shitsurae layout-sets list --json
+```
+
+dry runと実適用は同じplannerを使います。名前付きセットはstrictで、必要なディスプレイの不足や衝突があればウィンドウ変更前に全体を拒否します。必要なアプリのウィンドウが期限内に現れない場合でも、安全に旧scopeを復帰できれば新しい所有状態へ切り替え、`partial`（exit 51）を返します。ウィンドウが現れた後に同じセットを再適用してください。
+
+新しいセットの対象外になったウィンドウは閉じません。Shitsuraeが隠していた窓や到達不能な窓は現在のprimaryへ戻して管理を解除し、到達可能な表示中の窓は不要に移動しません。解除した生存ウィンドウは、明示的なarrangeまたはwindow workspace操作で取得するまで自動管理しません。
+
+個別レイアウトの適用も引き続き利用できます。局所適用によって管理member集合が変わった場合、GUIはセット名を推測せず**Manual**と表示します。
+
+同じセットを再適用すると、残るmemberのadopted窓と仮想ワークスペース所属を保持します。
+1つのmemberだけを編集した場合は、そのscopeを再適用してください。
+選択中セットのmember集合を変更した場合は、セット全体の再適用が必要です。
+
+通常終了では管理対象のhidden窓や到達不能な窓を復帰し、接続中のsecondaryで表示されている窓は動かしません。
+既存のreleased identityを保持して実行時scopeを終了しますが、全生存窓を新たにreleasedへ追加しません。
+明示的な回復は救出した生存窓を管理解除し、configが不正な場合も利用できます。
+物理変更を確認できない場合は回復情報を保持します。
+窓未出現だけ、またはfocusだけのpartialで物理状態を確認できている場合は、通常の再適用で修復できます。
+
 ## 仮想ワークスペースの仕組み
 
 ShitsuraeはmacOSのネイティブSpaceを操作しません。
@@ -350,6 +388,11 @@ shitsurae diagnostics --json
 
 shitsurae arrange work --dry-run --json
 shitsurae arrange work
+shitsurae arrange --set home --dry-run --json
+shitsurae arrange --set home
+shitsurae arrange --status --json
+shitsurae arrange --recover --json
+shitsurae layout-sets list --json
 
 shitsurae space list --json
 shitsurae space current --json
@@ -364,7 +407,9 @@ shitsurae switcher list --json
 ```
 
 CLIはUnixドメインソケットでShitsuraeアプリへ接続します。
-アプリが起動していない場合は自動的に起動します。
+アプリが起動していない場合は自動的に起動します。ただし`arrange --status`は自動起動せず、現在のendpointへ到達できるかだけを報告します。
+
+変更要求には60秒のdispatch予算と有限の応答待ちがあります。request送信後に接続が切れた場合、CLIは変更要求を再送せず、request ID付きの`outcomeUnknown`（exit 31）を返します。`arrange --status`で処理中か完了済みかを確認してください。
 
 各サブコマンドのオプションは`shitsurae <subcommand> --help`で確認できます。
 
@@ -396,7 +441,15 @@ macOSや前面アプリが同じキーを使っている場合は、Shitsurae側
 ### Recovery requiredと表示される
 
 これは、ウィンドウの表示状態を安全に確定できなかった操作が残っていることを示します。
-まずShitsuraeを通常終了して、退避中のウィンドウが画面内へ戻るか確認してください。
+設定を必要としない回復コマンドで、到達可能なexact window identityを現在のprimaryへ戻し、対象scopeの管理を解除します。
+
+```bash
+shitsurae arrange --recover --json
+```
+
+回復の進捗はウィンドウごとに保存します。`partial`の場合は未解決entryと切替journalを保持するため、同じコマンドを再実行できます。レイアウトセット切替journalを強制消去する操作はありません。
+
+従来の`space recover --force-clear-pending`は、すべての管理窓が表示中だと別途確認した後に、通常のSpace表示収束だけを解除するコマンドです。レイアウト切替journalは解除しません。
 
 状態を手動で解除するのは、すべての管理対象ウィンドウが画面内にあり、保留中の復元情報が不要だと確認できた場合だけにします。
 

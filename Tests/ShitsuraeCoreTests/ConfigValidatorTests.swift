@@ -24,13 +24,17 @@ struct ConfigValidatorTests {
         )
     }
 
-    private func makeConfig(layouts: [String: LayoutDefinition]) -> ShitsuraeConfig {
+    private func makeConfig(
+        layouts: [String: LayoutDefinition],
+        layoutSets: [String: LayoutSetDefinition] = [:]
+    ) -> ShitsuraeConfig {
         ShitsuraeConfig(
             monitors: MonitorsDefinition([
                 "main": MonitorTargetDefinition(primary: true),
                 "calendar": MonitorTargetDefinition(id: "uuid-sub"),
             ]),
-            layouts: layouts
+            layouts: layouts,
+            layoutSets: layoutSets
         )
     }
 
@@ -180,7 +184,7 @@ struct ConfigValidatorTests {
     }
 
     @Test func rejectsIdenticalMatcherAcrossSimultaneouslyActiveLayouts() {
-        let config = makeConfig(layouts: [
+        let layouts = [
             "work": LayoutDefinition(spaces: [
                 SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
             ]),
@@ -190,19 +194,18 @@ struct ConfigValidatorTests {
                     SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
                 ]
             ),
-        ])
+        ]
+        let config = makeConfig(
+            layouts: layouts,
+            layoutSets: ["desktop": LayoutSetDefinition(layouts: ["work", "calendar"])]
+        )
 
         let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
         #expect(errors.contains { $0.message.contains("identical window matcher") })
     }
 
-    @Test func allowsIdenticalMatcherBetweenSameHostLayouts() {
-        // Layouts sharing one host replace each other on arrange and are
-        // never active simultaneously — sharing a matcher is the standard
-        // v2.0 multi-layout workflow and must stay legal. An undeclared
-        // display and monitor: primary are the same host while
-        // monitors.primary.id is unset.
-        let config = makeConfig(layouts: [
+    @Test func allowsIdenticalMatcherBetweenExclusiveSets() {
+        let layouts = [
             "work": LayoutDefinition(spaces: [
                 SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
             ]),
@@ -212,7 +215,14 @@ struct ConfigValidatorTests {
                     SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
                 ]
             ),
-        ])
+        ]
+        let config = makeConfig(
+            layouts: layouts,
+            layoutSets: [
+                "home": LayoutSetDefinition(layouts: ["work"]),
+                "mobile": LayoutSetDefinition(layouts: ["focus"]),
+            ]
+        )
 
         let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
         #expect(!errors.contains { $0.message.contains("identical window matcher") })
@@ -234,11 +244,77 @@ struct ConfigValidatorTests {
                         SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
                     ]
                 ),
-            ]
+            ],
+            layoutSets: ["desktop": LayoutSetDefinition(layouts: ["work", "focus"])]
         )
 
         let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
         #expect(errors.contains { $0.message.contains("identical window matcher") })
+    }
+
+    @Test func rejectsEmptyDuplicateAndUnknownLayoutSetMembers() {
+        let config = makeConfig(
+            layouts: [
+                "work": LayoutDefinition(spaces: [SpaceDefinition(spaceID: 1, windows: [])]),
+            ],
+            layoutSets: [
+                "empty": LayoutSetDefinition(layouts: []),
+                "invalid": LayoutSetDefinition(layouts: ["work", "work", "missing"]),
+            ]
+        )
+
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.contains { $0.message.contains("must contain at least one layout") })
+        #expect(errors.contains { $0.message.contains("contains duplicate members") })
+        #expect(errors.contains { $0.message.contains("references undefined layout missing") })
+    }
+
+    @Test func rejectsSameHostWithinLayoutSet() {
+        let config = makeConfig(
+            layouts: [
+                "work": LayoutDefinition(spaces: [SpaceDefinition(spaceID: 1, windows: [])]),
+                "focus": LayoutDefinition(
+                    display: DisplayDefinition(monitor: "main"),
+                    spaces: [SpaceDefinition(spaceID: 1, windows: [])]
+                ),
+            ],
+            layoutSets: ["desktop": LayoutSetDefinition(layouts: ["work", "focus"])]
+        )
+
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.contains { $0.message.contains("declare the same host") })
+    }
+
+    @Test func rejectsInitialFocusMissingFromAnySpace() {
+        let config = makeConfig(layouts: [
+            "work": LayoutDefinition(
+                initialFocus: InitialFocusDefinition(slot: 1),
+                spaces: [
+                    SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)]),
+                    SpaceDefinition(spaceID: 2, windows: [makeWindow(bundleID: "d.e.f", slot: 2)]),
+                ]
+            ),
+        ])
+
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.contains { $0.message.contains("must exist in every space") })
+    }
+
+    @Test func rejectsInitialFocusBundleIgnoredByApplyWithinSet() {
+        let config = ShitsuraeConfig(
+            ignore: IgnoreDefinition(apply: IgnoreRuleSet(apps: ["a.b.c"])),
+            monitors: MonitorsDefinition(["main": MonitorTargetDefinition(primary: true)]),
+            layouts: [
+                "work": LayoutDefinition(
+                    initialFocus: InitialFocusDefinition(slot: 1),
+                    spaces: [SpaceDefinition(spaceID: 1, windows: [makeWindow(bundleID: "a.b.c", slot: 1)])]
+                ),
+            ],
+            layoutSets: ["desktop": LayoutSetDefinition(layouts: ["work"])]
+        )
+
+        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
+        #expect(errors.contains { $0.message.contains("excluded by ignore.apply.apps") })
     }
 
     @Test func rejectsInvalidShortcutKey() {

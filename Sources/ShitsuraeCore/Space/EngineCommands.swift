@@ -18,6 +18,15 @@ public struct FocusEventOutcome: Equatable, Sendable {
 /// Query and single-window command surface of the engine, used by the CLI
 /// router and the GUI alike.
 public extension VirtualSpaceEngine {
+    private func automaticRegistryEntries(_ entries: [SlotEntry], config: LoadedConfig) -> [WindowRegistry.Entry] {
+        entries.map { entry in
+            let raw = entry.registryEntry
+            guard currentState.selectedSetNeedsReapply(config: config.config)
+                || currentState.needsReapply(layoutName: entry.layoutName, config: config.config) else { return raw }
+            return WindowRegistry.Entry(id: raw.id, rule: raw.rule, pid: raw.pid, processStartTime: raw.processStartTime,
+                windowID: raw.windowID, bindingPolicy: .exactOnly)
+        }
+    }
     // MARK: - Window resolution
 
     /// Resolves a CLI selector to a live window. Empty selector = focused.
@@ -77,17 +86,21 @@ public extension VirtualSpaceEngine {
     /// window of the same exact process. The returned identity nevertheless
     /// remains the real focused surface so follow-focus freshness checks can
     /// never accept a different focused window.
-    func processFocusEvent(
+    package func processFocusEvent(
         sequence: UInt64,
         windowID: UInt32,
         pid: Int,
         processStartTime: UInt64,
         bundleID: String,
-        config: LoadedConfig
+        config: LoadedConfig,
+        token: ArrangeOperationToken
     ) -> FocusEventOutcome? {
-        guard focusEventGate.accept(sequence) else { return nil }
+        guard (try? validateMutationAdmission(token: token)) != nil else { return nil }
         guard sequence > latestFocusEventSequence else { return nil }
         latestFocusEventSequence = sequence
+        // Focus observation continues while an admitted operation owns the
+        // mutation lease, but automatic adoption/follow-focus work must not
+        // enqueue behind it and mutate the just-committed scope afterward.
         let identity = WindowIdentity(
             pid: pid,
             processStartTime: processStartTime,
@@ -189,7 +202,8 @@ public extension VirtualSpaceEngine {
             updateMRU: true,
             inventory: observation.inventory,
             allowBlockedBindingRefresh: trackingWindow.identity != focusedWindow.identity,
-            adoptionSpaceID: suspendedSpaceID
+            adoptionSpaceID: suspendedSpaceID,
+            token: token
         ), result.window != nil else {
             return nil
         }
@@ -220,7 +234,7 @@ public extension VirtualSpaceEngine {
             }
 
             do {
-                _ = try switchSpace(to: activeSpaceID, config: config, reconcile: true)
+                _ = try switchSpace(to: activeSpaceID, config: config, reconcile: true, token: token)
                 suspendedCompanionMainSpaces.removeValue(forKey: trackingWindow.identity)
             } catch {
                 logger.log(
@@ -253,13 +267,15 @@ public extension VirtualSpaceEngine {
     /// before the switch. A stale continuation can never move workspaces.
     /// The switch is scoped to the layout that owns the focused window; a
     /// dormant owner (host display disconnected) is a silent no-op.
-    func switchSpaceForFocusEvent(
+    package func switchSpaceForFocusEvent(
         sequence: UInt64,
         identity: WindowIdentity,
         layoutName: String,
         to targetSpaceID: Int,
-        config: LoadedConfig
+        config: LoadedConfig,
+        token: ArrangeOperationToken
     ) throws -> SpaceSwitchOutcome? {
+        try validateMutationAdmission(token: token)
         guard sequence == latestFocusEventSequence,
               focusEventGate.isCurrent(sequence)
         else {
@@ -279,12 +295,11 @@ public extension VirtualSpaceEngine {
         else {
             return nil // dormant owner: never redirect follow-focus elsewhere
         }
-        return try switchSpace(layoutName: layoutName, to: targetSpaceID, config: config)
+        return try switchSpace(layoutName: layoutName, to: targetSpaceID, config: config, token: token)
     }
 
-    func invalidateFocusEvents(upTo sequence: UInt64) {
+    nonisolated func invalidateFocusEvents(upTo sequence: UInt64) {
         focusEventGate.invalidate(with: sequence)
-        latestFocusEventSequence = max(latestFocusEventSequence, sequence)
     }
 
     // MARK: - window current
@@ -318,7 +333,12 @@ public extension VirtualSpaceEngine {
     // MARK: - focus
 
     /// focus --slot N: targets the primary workspace's tracked windows only.
-    func focusSlot(_ slot: Int, config: LoadedConfig) throws -> FocusJSON {
+    package func focusSlot(
+        _ slot: Int,
+        config: LoadedConfig,
+        token: ArrangeOperationToken
+    ) throws -> FocusJSON {
+        try validateMutationAdmission(token: token)
         try ensureAccessibility()
         guard let workspace = primaryWorkspace() else {
             throw VirtualSpaceEngineError.noActiveLayout
@@ -333,9 +353,12 @@ public extension VirtualSpaceEngine {
         }
 
         let inventory = control.windowInventory()
-        let windows = inventory.windows.filter(WindowEligibility.isManageableForVirtualWorkspace)
+        try validateMutationAdmission(token: token)
+        let windows = inventory.windows.filter {
+            WindowEligibility.isManageableForVirtualWorkspace($0) && !currentState.releasedWindowIdentities.contains($0.identity)
+        }
         let resolution = WindowRegistry.resolve(
-            entries: entries.map(\.registryEntry),
+            entries: automaticRegistryEntries(entries, config: config),
             manageableWindows: windows,
             fullInventory: inventory
         )
@@ -346,8 +369,15 @@ public extension VirtualSpaceEngine {
             throw VirtualSpaceEngineError.windowNotTracked
         }
 
-        try applyFocus(window: window)
-        markActivated(window: window)
+        try applyFocus(window: window, token: token)
+        if !operationCoordinator.permitsNewSideEffect(token: token) {
+            throw operationCoordinator.interruptionError(token: token) ?? ShitsuraeError(
+                .operationTimedOut,
+                "arrange deadline exceeded before recording focus",
+                subcode: "deadlineExceeded"
+            )
+        }
+        try markActivated(window: window, token: token)
 
         return FocusJSON(
             windowID: window.windowID,
@@ -361,12 +391,16 @@ public extension VirtualSpaceEngine {
     /// focus by selector: when the target window belongs to another virtual
     /// workspace, switch there first (v1 skipped this and focused an
     /// offscreen window — bug 1-b).
-    func focusWindow(selector: WindowTargetSelector, config: LoadedConfig) throws -> FocusJSON {
+    package func focusWindow(
+        selector: WindowTargetSelector,
+        config: LoadedConfig,
+        token: ArrangeOperationToken
+    ) throws -> FocusJSON {
+        try validateMutationAdmission(token: token)
         try ensureAccessibility()
         guard let window = resolveTargetWindow(selector: selector) else {
             throw VirtualSpaceEngineError.windowNotTracked
         }
-
         var didSwitchSpace = false
         let entry = trackedEntry(for: window)
 
@@ -376,12 +410,24 @@ public extension VirtualSpaceEngine {
            let ownerSpaceID = currentState.activeWorkspace(layoutName: entry.layoutName)?.spaceID,
            entry.spaceID != ownerSpaceID
         {
-            _ = try switchSpace(layoutName: entry.layoutName, to: entry.spaceID, config: config)
+            _ = try switchSpace(
+                layoutName: entry.layoutName,
+                to: entry.spaceID,
+                config: config,
+                token: token
+            )
             didSwitchSpace = true
         }
 
-        try applyFocus(window: window)
-        markActivated(window: window)
+        try applyFocus(window: window, token: token)
+        if !operationCoordinator.permitsNewSideEffect(token: token) {
+            throw operationCoordinator.interruptionError(token: token) ?? ShitsuraeError(
+                .operationTimedOut,
+                "arrange deadline exceeded before recording focus",
+                subcode: "deadlineExceeded"
+            )
+        }
+        try markActivated(window: window, token: token)
 
         return FocusJSON(
             windowID: window.windowID,
@@ -397,9 +443,15 @@ public extension VirtualSpaceEngine {
     /// while the complete identity is still CG-live. A tracked main window
     /// protected by a sheet, or temporarily unavailable through AX, is
     /// activated at the application level instead of forcing window focus.
-    func focusWindow(identity: WindowIdentity, config: LoadedConfig) throws -> FocusJSON {
+    package func focusWindow(
+        identity: WindowIdentity,
+        config: LoadedConfig,
+        token: ArrangeOperationToken
+    ) throws -> FocusJSON {
+        try validateMutationAdmission(token: token)
         try ensureAccessibility()
         let inventory = control.windowInventory()
+        try validateMutationAdmission(token: token)
         guard inventory.isAuthoritative,
               let window = inventory.windows.first(where: { $0.identity == identity })
         else {
@@ -417,6 +469,7 @@ public extension VirtualSpaceEngine {
                 throw VirtualSpaceEngineError.windowNotTracked
             }
             guard control.onScreenWindowIdentities().contains(identity),
+                  operationCoordinator.permitsNewSideEffect(token: token),
                   control.activateApplication(
                     pid: window.pid,
                     processStartTime: window.processStartTime,
@@ -436,6 +489,13 @@ public extension VirtualSpaceEngine {
                 updated.lastActivatedAt = Date.rfc3339UTC()
                 return updated
             }
+            if !operationCoordinator.permitsNewSideEffect(token: token) {
+                throw operationCoordinator.interruptionError(token: token) ?? ShitsuraeError(
+                    .operationTimedOut,
+                    "arrange deadline exceeded before recording focus",
+                    subcode: "deadlineExceeded"
+                )
+            }
             try replaceState(newState)
             return FocusJSON(
                 windowID: window.windowID,
@@ -452,12 +512,24 @@ public extension VirtualSpaceEngine {
            let ownerSpaceID = currentState.activeWorkspace(layoutName: entry.layoutName)?.spaceID,
            entry.spaceID != ownerSpaceID
         {
-            _ = try switchSpace(layoutName: entry.layoutName, to: entry.spaceID, config: config)
+            _ = try switchSpace(
+                layoutName: entry.layoutName,
+                to: entry.spaceID,
+                config: config,
+                token: token
+            )
             didSwitchSpace = true
         }
 
-        try applyFocus(window: window)
-        markActivated(window: window)
+        try applyFocus(window: window, token: token)
+        if !operationCoordinator.permitsNewSideEffect(token: token) {
+            throw operationCoordinator.interruptionError(token: token) ?? ShitsuraeError(
+                .operationTimedOut,
+                "arrange deadline exceeded before recording focus",
+                subcode: "deadlineExceeded"
+            )
+        }
+        try markActivated(window: window, token: token)
         return FocusJSON(
             windowID: window.windowID,
             bundleID: window.bundleID,
@@ -473,11 +545,13 @@ public extension VirtualSpaceEngine {
     ///
     /// The terminating process is excluded explicitly because AppKit can
     /// publish its termination before the last AX/CG window disappears.
-    func focusPreferredWindowInActiveWorkspace(
+    package func focusPreferredWindowInActiveWorkspace(
         excludingPID: Int,
         bundleID excludedBundleID: String,
-        config: LoadedConfig
+        config: LoadedConfig,
+        token: ArrangeOperationToken
     ) throws -> WindowIdentity? {
+        try validateMutationAdmission(token: token)
         try ensureAccessibility()
         guard let workspace = primaryWorkspace() else {
             throw VirtualSpaceEngineError.noActiveLayout
@@ -486,6 +560,7 @@ public extension VirtualSpaceEngine {
         let activeSpaceID = workspace.spaceID
 
         let inventory = control.windowInventory()
+        try validateMutationAdmission(token: token)
         guard inventory.isAuthoritative else {
             throw VirtualSpaceEngineError.stateError("window inventory unavailable")
         }
@@ -498,17 +573,18 @@ public extension VirtualSpaceEngine {
         _ = try? adoptUntrackedWindows(
             config: config,
             inventory: inventory,
-            excludedWindowIdentities: terminatingIdentities
+            excludedWindowIdentities: terminatingIdentities,
+            token: token
         )
 
         let entries = currentState.slots(layoutName: layoutName)
             .filter { $0.spaceID == activeSpaceID }
         let entriesByID = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
         let manageableWindows = inventory.windows.filter {
-            WindowEligibility.isManageableForVirtualWorkspace($0)
+            WindowEligibility.isManageableForVirtualWorkspace($0) && !currentState.releasedWindowIdentities.contains($0.identity)
         }
         let resolution = WindowRegistry.resolve(
-            entries: entries.map(\.registryEntry),
+            entries: automaticRegistryEntries(entries, config: config),
             manageableWindows: manageableWindows,
             fullInventory: inventory
         )
@@ -525,7 +601,7 @@ public extension VirtualSpaceEngine {
             return BoundWindow(entry: entry, window: window)
         }
         let ordered = SpaceSwitchPlanner.preferredFocusCandidates(from: candidates)
-        guard let focusedIdentity = focusTarget(from: ordered) else { return nil }
+        guard let focusedIdentity = focusTarget(from: ordered, token: token) else { return nil }
 
         if let focused = ordered.first(where: { $0.window.identity == focusedIdentity }) {
             var newState = currentState
@@ -541,29 +617,47 @@ public extension VirtualSpaceEngine {
         return focusedIdentity
     }
 
-    func applyFocus(window: WindowSnapshot) throws {
+    package func applyFocus(
+        window: WindowSnapshot,
+        token: ArrangeOperationToken
+    ) throws {
+        if !operationCoordinator.permitsNewSideEffect(token: token) {
+            throw operationCoordinator.interruptionError(token: token) ?? ShitsuraeError(
+                .operationTimedOut,
+                "arrange deadline exceeded before focus",
+                subcode: "deadlineExceeded"
+            )
+        }
         let firstResult = control.focusWindow(
             windowID: window.windowID,
             pid: window.pid,
             processStartTime: window.processStartTime,
             bundleID: window.bundleID
         )
-        if firstResult.isSuccess, waitForFocusedWindow(identity: window.identity) {
+        if firstResult.isSuccess, waitForFocusedWindow(identity: window.identity, token: token) {
             return
         }
 
-        if control.activateApplication(
+        let mayActivate = operationCoordinator.permitsNewSideEffect(token: token)
+        if mayActivate, control.activateApplication(
             pid: window.pid,
             processStartTime: window.processStartTime,
             bundleID: window.bundleID
         ) {
+            if !operationCoordinator.permitsNewSideEffect(token: token) {
+                throw operationCoordinator.interruptionError(token: token) ?? ShitsuraeError(
+                    .operationTimedOut,
+                    "arrange deadline exceeded before retrying focus",
+                    subcode: "deadlineExceeded"
+                )
+            }
             let retryResult = control.focusWindow(
                 windowID: window.windowID,
                 pid: window.pid,
                 processStartTime: window.processStartTime,
                 bundleID: window.bundleID
             )
-            if retryResult.isSuccess, waitForFocusedWindow(identity: window.identity) {
+            if retryResult.isSuccess, waitForFocusedWindow(identity: window.identity, token: token) {
                 return
             }
         }
@@ -574,17 +668,24 @@ public extension VirtualSpaceEngine {
     // MARK: - window move/resize/set
 
     /// Unified frame mutation: nil components keep the current value.
-    func setWindowFrame(
+    package func setWindowFrame(
         selector: WindowTargetSelector,
         x: LengthValue?,
         y: LengthValue?,
         width: LengthValue?,
         height: LengthValue?,
-        config: LoadedConfig
+        config: LoadedConfig,
+        token: ArrangeOperationToken
     ) throws -> WindowSetJSON {
+        try validateMutationAdmission(token: token)
         try ensureAccessibility()
         guard let window = resolveTargetWindow(selector: selector) else {
             throw VirtualSpaceEngineError.windowNotTracked
+        }
+        if let entry = trackedEntry(for: window) {
+            try ensureDefinitionCurrent(layoutName: entry.layoutName, config: config)
+        } else if let workspace = primaryWorkspace() {
+            try ensureDefinitionCurrent(layoutName: workspace.layoutName, config: config)
         }
 
         let displays = control.displays()
@@ -613,6 +714,13 @@ public extension VirtualSpaceEngine {
             }()
         )
 
+        if !operationCoordinator.permitsNewSideEffect(token: token) {
+            throw operationCoordinator.interruptionError(token: token) ?? ShitsuraeError(
+                .operationTimedOut,
+                "arrange deadline exceeded before changing window frame",
+                subcode: "deadlineExceeded"
+            )
+        }
         guard control.setWindowFrame(
             windowID: window.windowID,
             pid: window.pid,
@@ -625,6 +733,13 @@ public extension VirtualSpaceEngine {
 
         // Keep tracking in sync when the window is managed.
         if let entry = trackedEntry(for: window) {
+            if !operationCoordinator.permitsNewSideEffect(token: token) {
+                throw operationCoordinator.interruptionError(token: token) ?? ShitsuraeError(
+                    .operationTimedOut,
+                    "arrange deadline exceeded before recording window frame",
+                    subcode: "deadlineExceeded"
+                )
+            }
             var newState = currentState
             newState.slots = newState.slots.map { slot in
                 guard slot.id == entry.id else { return slot }
@@ -639,10 +754,21 @@ public extension VirtualSpaceEngine {
     }
 
     /// Snap the focused (or selected) window to a preset frame.
-    func snapWindow(selector: WindowTargetSelector, preset: SnapPreset) throws -> WindowSetJSON {
+    package func snapWindow(
+        selector: WindowTargetSelector,
+        preset: SnapPreset,
+        config: LoadedConfig,
+        token: ArrangeOperationToken
+    ) throws -> WindowSetJSON {
+        try validateMutationAdmission(token: token)
         try ensureAccessibility()
         guard let window = resolveTargetWindow(selector: selector) else {
             throw VirtualSpaceEngineError.windowNotTracked
+        }
+        if let entry = trackedEntry(for: window) {
+            try ensureDefinitionCurrent(layoutName: entry.layoutName, config: config)
+        } else if let workspace = primaryWorkspace() {
+            try ensureDefinitionCurrent(layoutName: workspace.layoutName, config: config)
         }
 
         let displays = control.displays()
@@ -655,6 +781,13 @@ public extension VirtualSpaceEngine {
         let basis = display.visibleFrame
         let frame = SnapPresetResolver.frame(for: preset, basis: basis)
 
+        if !operationCoordinator.permitsNewSideEffect(token: token) {
+            throw operationCoordinator.interruptionError(token: token) ?? ShitsuraeError(
+                .operationTimedOut,
+                "arrange deadline exceeded before snapping window",
+                subcode: "deadlineExceeded"
+            )
+        }
         guard control.setWindowFrame(
             windowID: window.windowID,
             pid: window.pid,
@@ -666,6 +799,13 @@ public extension VirtualSpaceEngine {
         }
 
         if let entry = trackedEntry(for: window) {
+            if !operationCoordinator.permitsNewSideEffect(token: token) {
+                throw operationCoordinator.interruptionError(token: token) ?? ShitsuraeError(
+                    .operationTimedOut,
+                    "arrange deadline exceeded before recording snapped frame",
+                    subcode: "deadlineExceeded"
+                )
+            }
             var newState = currentState
             newState.slots = newState.slots.map { slot in
                 guard slot.id == entry.id else { return slot }
@@ -683,11 +823,13 @@ public extension VirtualSpaceEngine {
 
     /// Reassigns a window (selector or focused) to another workspace,
     /// adopting it into tracking first when it is unmanaged.
-    func windowWorkspace(
+    package func windowWorkspace(
         selector: WindowTargetSelector,
         toSpaceID: Int,
-        config: LoadedConfig
+        config: LoadedConfig,
+        token: ArrangeOperationToken
     ) throws -> WindowWorkspaceJSON {
+        try validateMutationAdmission(token: token)
         try ensureAccessibility()
         guard let window = resolveTargetWindow(selector: selector) else {
             throw VirtualSpaceEngineError.windowNotTracked
@@ -704,7 +846,9 @@ public extension VirtualSpaceEngine {
             config: config,
             respectFocusIgnoreRules: false,
             updateMRU: false,
-            persistChanges: false
+            persistChanges: false,
+            allowReleasedClaim: true,
+            token: token
         )
         guard let freshWindow = tracking.window, let trackedEntry = tracking.entry else {
             throw VirtualSpaceEngineError.windowNotTracked
@@ -715,12 +859,13 @@ public extension VirtualSpaceEngine {
             window: freshWindow,
             trackedEntry: trackedEntry,
             toSpaceID: toSpaceID,
-            config: config
+            config: config,
+            token: token
         )
         let finalEntry = currentState.slots.first { $0.id == trackedEntry.id }
 
         return WindowWorkspaceJSON(
-            requestID: UUID().uuidString.lowercased(),
+            requestID: token.requestID,
             windowID: freshWindow.windowID,
             bundleID: freshWindow.bundleID,
             slot: finalEntry.map(\.slot) ?? 0,
@@ -736,15 +881,25 @@ public extension VirtualSpaceEngine {
 
     /// Pulls untracked on-screen windows of the primary workspace's host
     /// display into that workspace.
-    func adoptUntrackedWindows(
+    package func adoptUntrackedWindows(
         config: LoadedConfig,
         persistChanges: Bool = true,
         inventory suppliedInventory: WindowInventory? = nil,
         excludedWindowIdentities: Set<WindowIdentity> = [],
-        additionalIgnoreRules: IgnoreRuleSet? = nil
+        additionalIgnoreRules: IgnoreRuleSet? = nil,
+        token: ArrangeOperationToken
     ) throws -> Int {
+        try validateMutationAdmission(token: token)
         let displays = control.displays()
         guard let workspace = primaryWorkspace(displays: displays) else {
+            return 0
+        }
+        guard !currentState.selectedSetNeedsReapply(config: config.config),
+              !currentState.needsReapply(
+                  layoutName: workspace.layoutName,
+                  config: config.config
+              )
+        else {
             return 0
         }
         return try adoptUntrackedWindows(
@@ -754,7 +909,8 @@ public extension VirtualSpaceEngine {
             persistChanges: persistChanges,
             inventory: suppliedInventory,
             excludedWindowIdentities: excludedWindowIdentities,
-            additionalIgnoreRules: additionalIgnoreRules
+            additionalIgnoreRules: additionalIgnoreRules,
+            token: token
         )
     }
 
@@ -765,8 +921,17 @@ public extension VirtualSpaceEngine {
         persistChanges: Bool = true,
         inventory suppliedInventory: WindowInventory? = nil,
         excludedWindowIdentities: Set<WindowIdentity> = [],
-        additionalIgnoreRules: IgnoreRuleSet? = nil
+        additionalIgnoreRules: IgnoreRuleSet? = nil,
+        token: ArrangeOperationToken
     ) throws -> Int {
+        guard !currentState.selectedSetNeedsReapply(config: config.config),
+              !currentState.needsReapply(
+                  layoutName: workspace.layoutName,
+                  config: config.config
+              )
+        else {
+            return 0
+        }
         guard let layout = config.config.layouts[workspace.layoutName] else {
             return 0
         }
@@ -782,7 +947,19 @@ public extension VirtualSpaceEngine {
         }
 
         let inventory = suppliedInventory ?? control.windowInventory()
+        try validateMutationAdmission(token: token)
         guard inventory.isAuthoritative else { return 0 }
+        if currentState.releasedWindowIdentities.contains(where: { !inventory.mayContain($0) }) {
+            var cleaned = currentState
+            cleaned.releasedWindowIdentities = Set(
+                cleaned.releasedWindowIdentities.filter { inventory.mayContain($0) }
+            )
+            if persistChanges {
+                try replaceState(cleaned)
+            } else {
+                replaceStateInMemory(cleaned)
+            }
+        }
         let allWindows = inventory.windows
         let ineligibleAdoptedIDs = ineligibleAdoptedEntryIDs(layoutName: layoutName, windows: allWindows)
         let layoutSlots = currentState.slots(layoutName: layoutName)
@@ -798,6 +975,7 @@ public extension VirtualSpaceEngine {
                 && window.displayID == hostDisplay.id
                 && !window.minimized
                 && !excludedWindowIdentities.contains(window.identity)
+                && !currentState.releasedWindowIdentities.contains(window.identity)
                 && !crossLayoutExcluded.contains(window.identity)
                 && WindowEligibility.isManageableForVirtualWorkspace(window)
                 && !matchesOtherWorkspaceLayoutRule(
@@ -843,7 +1021,8 @@ public extension VirtualSpaceEngine {
     /// The passed snapshot is only an identity hint: the decision runs on a
     /// fresh enumeration via `trackWindow`, so a window that dropped out of
     /// AX visibility or closed since the snapshot was taken is never adopted.
-    func adoptWindowIntoActiveWorkspace(_ window: WindowSnapshot, config: LoadedConfig) throws -> Bool {
+    package func adoptWindowIntoActiveWorkspace(_ window: WindowSnapshot, config: LoadedConfig, token: ArrangeOperationToken) throws -> Bool {
+        try validateMutationAdmission(token: token)
         let result = try trackWindow(
             windowID: window.windowID,
             pid: window.pid,
@@ -851,7 +1030,8 @@ public extension VirtualSpaceEngine {
             expectedBundleID: window.bundleID,
             config: config,
             respectFocusIgnoreRules: true,
-            updateMRU: false
+            updateMRU: false,
+            token: token
         )
         return result.didAdopt
     }
@@ -872,7 +1052,7 @@ public extension VirtualSpaceEngine {
     /// this same enumeration — a caller-supplied snapshot is never trusted —
     /// so "resolve succeeded, later enumeration failed, adopt from stale
     /// data" is impossible by construction.
-    func trackWindow(
+    package func trackWindow(
         windowID: UInt32,
         pid: Int,
         processStartTime: UInt64,
@@ -883,8 +1063,11 @@ public extension VirtualSpaceEngine {
         inventory suppliedInventory: WindowInventory? = nil,
         allowBlockedBindingRefresh: Bool = false,
         adoptionSpaceID: Int? = nil,
-        persistChanges: Bool = true
+        persistChanges: Bool = true,
+        allowReleasedClaim: Bool = false,
+        token: ArrangeOperationToken
     ) throws -> WindowTrackingResult {
+        try validateMutationAdmission(token: token)
         guard let workspace = primaryWorkspace() else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
@@ -892,23 +1075,33 @@ public extension VirtualSpaceEngine {
         let activeSpaceID = workspace.spaceID
 
         let inventory = suppliedInventory ?? control.windowInventory()
+        try validateMutationAdmission(token: token)
         let targetIdentity = WindowIdentity(
             pid: pid,
             processStartTime: processStartTime,
             windowID: windowID,
             bundleID: expectedBundleID
         )
+        if !allowReleasedClaim,
+           currentState.releasedWindowIdentities.contains(targetIdentity),
+           let releasedWindow = inventory.windows.first(where: { $0.identity == targetIdentity })
+        {
+            return WindowTrackingResult(entry: nil, window: releasedWindow, didAdopt: false)
+        }
         // Focus projection may refresh the exact AX main's existing binding
         // and MRU while a sheet protects it from geometry. No other blocked
         // window enters the assignment pool, and a blocked target is never
         // newly adopted below. Windows another workspace owns (or hosts by
         // display affinity) never enter the pool at all.
-        let crossLayoutExcluded = crossLayoutExcludedIdentities(
+        var crossLayoutExcluded = crossLayoutExcludedIdentities(
             layoutName: layoutName,
             hostDisplayID: workspace.displayID,
             windows: inventory.windows,
             includeDisplayAffinity: true
         )
+        if allowReleasedClaim {
+            crossLayoutExcluded.remove(targetIdentity)
+        }
         // A target excluded by cross-layout scope is PRESENT but unmanaged
         // for this workspace — callers must be able to distinguish that from
         // absence, or the frontmost window's per-app shortcut policy would be
@@ -940,7 +1133,7 @@ public extension VirtualSpaceEngine {
 
         let slots = currentState.slots(layoutName: layoutName)
         let resolution = WindowRegistry.resolve(
-            entries: slots.map(\.registryEntry),
+            entries: automaticRegistryEntries(slots, config: config),
             manageableWindows: manageable,
             fullInventory: inventory
         )
@@ -957,10 +1150,18 @@ public extension VirtualSpaceEngine {
             }
             var newState = currentState
             newState.slots = newState.slots.map { $0.id == updated.id ? updated : $0 }
+            if allowReleasedClaim {
+                newState.releasedWindowIdentities.remove(window.identity)
+            }
             if persistChanges {
                 try replaceState(newState)
             }
             return WindowTrackingResult(entry: updated, window: window, didAdopt: false)
+        }
+
+        if currentState.selectedSetNeedsReapply(config: config.config)
+            || currentState.needsReapply(layoutName: layoutName, config: config.config) {
+            return WindowTrackingResult(entry: nil, window: window, didAdopt: false)
         }
 
         if resolution.deferredWindows.contains(where: { $0.identity == window.identity }) {
@@ -1000,6 +1201,9 @@ public extension VirtualSpaceEngine {
         }
         var newState = currentState
         newState.slots.append(entry)
+        if allowReleasedClaim {
+            newState.releasedWindowIdentities.remove(window.identity)
+        }
         if persistChanges {
             try replaceState(newState)
         }
@@ -1035,11 +1239,13 @@ public extension VirtualSpaceEngine {
 
     /// MRU-ordered candidates. Adopts untracked windows first so everything
     /// the user sees is reachable.
-    func switcherCandidates(
+    package func switcherCandidates(
         includeAllSpaces: Bool,
         config: LoadedConfig,
-        excludedApps: Set<String> = []
+        excludedApps: Set<String> = [],
+        token: ArrangeOperationToken
     ) throws -> [SwitcherCandidate] {
+        try validateMutationAdmission(token: token)
         guard let workspace = primaryWorkspace() else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
@@ -1048,16 +1254,19 @@ public extension VirtualSpaceEngine {
             requireLiveDisplayMatch: false,
             includeAllSpaces: includeAllSpaces,
             config: config,
-            excludedApps: excludedApps
+            excludedApps: excludedApps,
+            token: token
         )
     }
 
-    func switcherCandidates(
+    package func switcherCandidates(
         displayID: String,
         includeAllSpaces: Bool,
         config: LoadedConfig,
-        excludedApps: Set<String> = []
+        excludedApps: Set<String> = [],
+        token: ArrangeOperationToken
     ) throws -> [SwitcherCandidate] {
+        try validateMutationAdmission(token: token)
         guard let workspace = currentState.activeWorkspace(displayID: displayID) else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
@@ -1066,7 +1275,8 @@ public extension VirtualSpaceEngine {
             requireLiveDisplayMatch: true,
             includeAllSpaces: includeAllSpaces,
             config: config,
-            excludedApps: excludedApps
+            excludedApps: excludedApps,
+            token: token
         )
     }
 
@@ -1075,16 +1285,19 @@ public extension VirtualSpaceEngine {
         requireLiveDisplayMatch: Bool,
         includeAllSpaces: Bool,
         config: LoadedConfig,
-        excludedApps: Set<String>
+        excludedApps: Set<String>,
+        token: ArrangeOperationToken
     ) throws -> [SwitcherCandidate] {
         let layoutName = workspace.layoutName
         let inventory = control.windowInventory()
+        try validateMutationAdmission(token: token)
         guard inventory.isAuthoritative else { return [] }
         _ = try? adoptUntrackedWindows(
             in: workspace,
             config: config,
             displays: control.displays(),
-            inventory: inventory
+            inventory: inventory,
+            token: token
         )
 
         let activeSpaceID = workspace.spaceID
@@ -1104,7 +1317,7 @@ public extension VirtualSpaceEngine {
                 && !crossLayoutExcluded.contains($0.identity)
         }
         let resolution = WindowRegistry.resolve(
-            entries: layoutSlots.map(\.registryEntry),
+            entries: automaticRegistryEntries(layoutSlots, config: config),
             manageableWindows: windows,
             fullInventory: inventory
         )
@@ -1152,7 +1365,8 @@ public extension VirtualSpaceEngine {
 
     /// Cycle order: slotted windows first (slot ascending), then adopted
     /// windows in observed order. Used by nextWindow/prevWindow.
-    func cycleCandidates(config: LoadedConfig, excludedApps: Set<String> = []) throws -> [SwitcherCandidate] {
+    package func cycleCandidates(config: LoadedConfig, excludedApps: Set<String> = [], token: ArrangeOperationToken) throws -> [SwitcherCandidate] {
+        try validateMutationAdmission(token: token)
         guard let workspace = primaryWorkspace() else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
@@ -1160,15 +1374,18 @@ public extension VirtualSpaceEngine {
             in: workspace,
             requireLiveDisplayMatch: false,
             config: config,
-            excludedApps: excludedApps
+            excludedApps: excludedApps,
+            token: token
         )
     }
 
-    func cycleCandidates(
+    package func cycleCandidates(
         displayID: String,
         config: LoadedConfig,
-        excludedApps: Set<String> = []
+        excludedApps: Set<String> = [],
+        token: ArrangeOperationToken
     ) throws -> [SwitcherCandidate] {
+        try validateMutationAdmission(token: token)
         guard let workspace = currentState.activeWorkspace(displayID: displayID) else {
             throw VirtualSpaceEngineError.noActiveLayout
         }
@@ -1176,7 +1393,8 @@ public extension VirtualSpaceEngine {
             in: workspace,
             requireLiveDisplayMatch: true,
             config: config,
-            excludedApps: excludedApps
+            excludedApps: excludedApps,
+            token: token
         )
     }
 
@@ -1184,16 +1402,19 @@ public extension VirtualSpaceEngine {
         in workspace: ActiveWorkspace,
         requireLiveDisplayMatch: Bool,
         config: LoadedConfig,
-        excludedApps: Set<String>
+        excludedApps: Set<String>,
+        token: ArrangeOperationToken
     ) throws -> [SwitcherCandidate] {
         let layoutName = workspace.layoutName
         let inventory = control.windowInventory()
+        try validateMutationAdmission(token: token)
         guard inventory.isAuthoritative else { return [] }
         _ = try? adoptUntrackedWindows(
             in: workspace,
             config: config,
             displays: control.displays(),
-            inventory: inventory
+            inventory: inventory,
+            token: token
         )
 
         let activeSpaceID = workspace.spaceID
@@ -1213,7 +1434,7 @@ public extension VirtualSpaceEngine {
                 && !crossLayoutExcluded.contains($0.identity)
         }
         let resolution = WindowRegistry.resolve(
-            entries: layoutSlots.map(\.registryEntry),
+            entries: automaticRegistryEntries(layoutSlots, config: config),
             manageableWindows: windows,
             fullInventory: inventory
         )

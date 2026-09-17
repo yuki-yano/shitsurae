@@ -108,7 +108,13 @@ public enum SystemProbe {
     }
 
     @discardableResult
-    public static func launchApplication(request: ApplicationLaunchRequest) -> Bool {
+    public static func launchApplication(
+        request: ApplicationLaunchRequest,
+        timeoutSeconds: TimeInterval = 3,
+        permitsNewSideEffect: () -> Bool = { true }
+    ) -> Bool {
+        guard timeoutSeconds > 0, permitsNewSideEffect() else { return false }
+        let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(timeoutSeconds * 1_000_000_000)
         let workspace = NSWorkspace.shared
         if request.profileDirectory == nil,
            isApplicationRunning(bundleID: request.bundleID, workspace: workspace)
@@ -125,11 +131,12 @@ public enum SystemProbe {
            let executableURL = Bundle(url: appURL)?.executableURL
         {
             let arguments = ChromiumProfileSupport.launchArguments(profileDirectory: profileDirectory)
-            guard launchDetachedProcess(executable: executableURL.path, arguments: arguments) else {
+            guard permitsNewSideEffect(), DispatchTime.now().uptimeNanoseconds < deadline,
+                  launchDetachedProcess(executable: executableURL.path, arguments: arguments) else {
                 return false
             }
 
-            return waitForRunningApplication(bundleID: request.bundleID) {
+            return waitForRunningApplication(bundleID: request.bundleID, deadlineUptimeNS: deadline, permitsNewSideEffect: permitsNewSideEffect) {
                 isApplicationRunning(bundleID: $0, workspace: workspace)
             }
         }
@@ -137,19 +144,21 @@ public enum SystemProbe {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = false
         configuration.hides = false
+        guard permitsNewSideEffect(), DispatchTime.now().uptimeNanoseconds < deadline else { return false }
         workspace.openApplication(at: appURL, configuration: configuration, completionHandler: nil)
 
-        return waitForRunningApplication(bundleID: request.bundleID) {
+        return waitForRunningApplication(bundleID: request.bundleID, deadlineUptimeNS: deadline, permitsNewSideEffect: permitsNewSideEffect) {
             isApplicationRunning(bundleID: $0, workspace: workspace)
         }
     }
 
     public static func browserProfileDirectory(bundleID: String, pid: Int) -> String? {
-        guard ChromiumProfileSupport.supports(bundleID: bundleID),
+        guard AXReadPolicy.operationBudget?.permitsCall != false,
+              ChromiumProfileSupport.supports(bundleID: bundleID),
               let lsofOutput = runProcess(
                   executable: "/usr/sbin/lsof",
                   arguments: ChromiumProfileSupport.lsofArguments(pid: pid),
-                  timeoutSeconds: lsofTimeoutSeconds
+                  timeoutSeconds: min(lsofTimeoutSeconds, Double(AXReadPolicy.operationBudget?.remainingBudgetMS() ?? 2_000) / 1_000)
               )
         else {
             return nil
@@ -170,16 +179,25 @@ public enum SystemProbe {
         bundleID: String,
         attempts: Int = 30,
         intervalSeconds: TimeInterval = 0.1,
+        deadlineUptimeNS: UInt64? = nil,
+        permitsNewSideEffect: () -> Bool = { true },
         isRunning: (String) -> Bool,
         sleep: (TimeInterval) -> Void = Thread.sleep(forTimeInterval:)
     ) -> Bool {
         for attempt in 0 ..< attempts {
+            guard permitsNewSideEffect() else { return false }
+            if let deadlineUptimeNS, DispatchTime.now().uptimeNanoseconds >= deadlineUptimeNS { return false }
             if isRunning(bundleID) {
                 return true
             }
 
             if attempt < attempts - 1 {
-                sleep(intervalSeconds)
+                let now = DispatchTime.now().uptimeNanoseconds
+                let remaining = deadlineUptimeNS.map {
+                    Double($0 > now ? $0 - now : 0) / 1_000_000_000
+                } ?? intervalSeconds
+                guard remaining > 0 else { return false }
+                sleep(min(intervalSeconds, remaining))
             }
         }
 
@@ -266,13 +284,13 @@ public enum SystemProbe {
             termination.signal()
         }
 
+        let deadline = DispatchTime.now() + timeoutSeconds
         do {
             try process.run()
         } catch {
             return nil
         }
 
-        let deadline = DispatchTime.now() + timeoutSeconds
         let timedOut = termination.wait(timeout: deadline) == .timedOut
         if timedOut {
             process.terminate()

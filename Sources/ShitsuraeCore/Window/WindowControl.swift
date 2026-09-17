@@ -22,6 +22,7 @@ public enum WindowGeometryMutationResult: Equatable, Sendable {
 /// Side-effecting window operations the engines depend on. The live AX-backed
 /// implementation is `LiveWindowControl`; tests inject mocks.
 public protocol WindowControl: Sendable {
+    func applyingBudget(_ budget: WindowInteractionBudget?) -> any WindowControl
     func listWindows() -> [WindowSnapshot]
     func listAllWindows() -> [WindowSnapshot]
     /// Full CG inventory with authoritative failure information.
@@ -89,6 +90,10 @@ public protocol WindowControl: Sendable {
 }
 
 public extension WindowControl {
+    func applyingBudget(_ budget: WindowInteractionBudget?) -> any WindowControl {
+        guard let budget else { return self }
+        return BudgetedWindowControl(base: self, budget: budget)
+    }
     func sleep(milliseconds: Int) {
         Thread.sleep(forTimeInterval: TimeInterval(milliseconds) / 1000)
     }

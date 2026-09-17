@@ -8,6 +8,7 @@ public struct ShitsuraeConfig: Codable, Equatable, Sendable {
     public let overlay: OverlayDefinition?
     public let monitors: MonitorsDefinition?
     public let layouts: [String: LayoutDefinition]
+    public let layoutSets: [String: LayoutSetDefinition]
     public let shortcuts: ShortcutsDefinition?
     public let mode: ModeDefinition?
 
@@ -17,6 +18,7 @@ public struct ShitsuraeConfig: Codable, Equatable, Sendable {
         overlay: OverlayDefinition? = nil,
         monitors: MonitorsDefinition? = nil,
         layouts: [String: LayoutDefinition],
+        layoutSets: [String: LayoutSetDefinition] = [:],
         shortcuts: ShortcutsDefinition? = nil,
         mode: ModeDefinition? = nil
     ) {
@@ -25,6 +27,7 @@ public struct ShitsuraeConfig: Codable, Equatable, Sendable {
         self.overlay = overlay
         self.monitors = monitors
         self.layouts = layouts
+        self.layoutSets = layoutSets
         self.shortcuts = shortcuts
         self.mode = mode
     }
@@ -38,6 +41,7 @@ public struct ShitsuraeConfigFile: Decodable {
     public let overlay: OverlayDefinition?
     public let monitors: MonitorsDefinition?
     public let layouts: [String: LayoutDefinition]?
+    public let layoutSets: [String: LayoutSetDefinition]?
     public let shortcuts: ShortcutsDefinition?
     public let mode: ModeDefinition?
 
@@ -47,6 +51,7 @@ public struct ShitsuraeConfigFile: Decodable {
         case overlay
         case monitors
         case layouts
+        case layoutSets
         case shortcuts
         case mode
         case executionPolicy
@@ -83,8 +88,19 @@ public struct ShitsuraeConfigFile: Decodable {
         overlay = try container.decodeIfPresent(OverlayDefinition.self, forKey: .overlay)
         monitors = try container.decodeIfPresent(MonitorsDefinition.self, forKey: .monitors)
         layouts = try container.decodeIfPresent([String: LayoutDefinition].self, forKey: .layouts)
+        layoutSets = try container.decodeIfPresent([String: LayoutSetDefinition].self, forKey: .layoutSets)
         shortcuts = try container.decodeIfPresent(ShortcutsDefinition.self, forKey: .shortcuts)
         mode = try container.decodeIfPresent(ModeDefinition.self, forKey: .mode)
+    }
+}
+
+/// A named, exclusive collection of layouts that are managed together.
+/// Applying a set replaces the complete currently managed scope.
+public struct LayoutSetDefinition: Codable, Equatable, Sendable {
+    public let layouts: [String]
+
+    public init(layouts: [String]) {
+        self.layouts = layouts
     }
 }
 

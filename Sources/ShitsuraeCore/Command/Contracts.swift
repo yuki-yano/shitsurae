@@ -395,6 +395,9 @@ public struct DiagnosticsJSON: Codable, Equatable, Sendable {
         public let slotCount: Int
         public let hiddenCount: Int
         public let recoveryRequired: Bool
+        public let selectedLayoutSet: SelectedLayoutSet?
+        public let pendingLayoutTransition: PendingLayoutTransition?
+        public let needsReapply: Bool
         public let pendingUnresolvedSlots: [PendingUnresolvedSlot]
         public let configGeneration: String
         public let revision: UInt64
@@ -404,6 +407,9 @@ public struct DiagnosticsJSON: Codable, Equatable, Sendable {
             slotCount: Int,
             hiddenCount: Int,
             recoveryRequired: Bool,
+            selectedLayoutSet: SelectedLayoutSet? = nil,
+            pendingLayoutTransition: PendingLayoutTransition? = nil,
+            needsReapply: Bool = false,
             pendingUnresolvedSlots: [PendingUnresolvedSlot],
             configGeneration: String,
             revision: UInt64
@@ -412,6 +418,9 @@ public struct DiagnosticsJSON: Codable, Equatable, Sendable {
             self.slotCount = slotCount
             self.hiddenCount = hiddenCount
             self.recoveryRequired = recoveryRequired
+            self.selectedLayoutSet = selectedLayoutSet
+            self.pendingLayoutTransition = pendingLayoutTransition
+            self.needsReapply = needsReapply
             self.pendingUnresolvedSlots = pendingUnresolvedSlots
             self.configGeneration = configGeneration
             self.revision = revision

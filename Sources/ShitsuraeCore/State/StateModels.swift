@@ -313,22 +313,91 @@ public struct ActiveWorkspace: Codable, Equatable, Sendable {
     public var displayID: String
     public var layoutName: String
     public var spaceID: Int
+    public var appliedDefinitionDigest: String
 
-    public init(displayID: String, layoutName: String, spaceID: Int) {
+    public init(
+        displayID: String,
+        layoutName: String,
+        spaceID: Int,
+        appliedDefinitionDigest: String = ""
+    ) {
         self.displayID = displayID
         self.layoutName = layoutName
         self.spaceID = spaceID
+        self.appliedDefinitionDigest = appliedDefinitionDigest
+    }
+}
+
+public struct SelectedLayoutSet: Codable, Equatable, Sendable {
+    public let name: String
+    public let memberNames: [String]
+    public let definitionDigest: String
+
+    public init(name: String, memberNames: [String], definitionDigest: String) {
+        self.name = name
+        self.memberNames = memberNames
+        self.definitionDigest = definitionDigest
+    }
+}
+
+public enum LayoutTransitionScopeKind: String, Codable, Equatable, Sendable {
+    case layoutSet
+    case local
+}
+
+public enum LayoutTransitionPhase: String, Codable, Equatable, Sendable {
+    case precommit
+    case postcommit
+}
+
+public struct PendingLayoutTransition: Codable, Equatable, Sendable {
+    public let requestID: String
+    public let scopeKind: LayoutTransitionScopeKind
+    public var phase: LayoutTransitionPhase
+    public let sourceLayoutNames: [String]
+    public let targetLayoutNames: [String]
+    public let sourceSelectedSet: SelectedLayoutSet?
+    public let targetSet: SelectedLayoutSet?
+    public let definitionDigest: String
+    public let topologyDigest: String
+    public let startedAt: String
+
+    public init(
+        requestID: String,
+        scopeKind: LayoutTransitionScopeKind,
+        phase: LayoutTransitionPhase,
+        sourceLayoutNames: [String],
+        targetLayoutNames: [String],
+        sourceSelectedSet: SelectedLayoutSet?,
+        targetSet: SelectedLayoutSet?,
+        definitionDigest: String,
+        topologyDigest: String,
+        startedAt: String = Date.rfc3339UTC()
+    ) {
+        self.requestID = requestID
+        self.scopeKind = scopeKind
+        self.phase = phase
+        self.sourceLayoutNames = sourceLayoutNames
+        self.targetLayoutNames = targetLayoutNames
+        self.sourceSelectedSet = sourceSelectedSet
+        self.targetSet = targetSet
+        self.definitionDigest = definitionDigest
+        self.topologyDigest = topologyDigest
+        self.startedAt = startedAt
     }
 }
 
 public struct RuntimeState: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 6
+    public static let currentSchemaVersion = 7
 
     public var schemaVersion: Int
     public var updatedAt: String
     public var revision: UInt64
     public var configGeneration: String
     public var liveArrangeRecoveryRequired: Bool
+    public var selectedLayoutSet: SelectedLayoutSet?
+    public var releasedWindowIdentities: Set<WindowIdentity>
+    public var pendingLayoutTransition: PendingLayoutTransition?
     public var activeWorkspaces: [ActiveWorkspace]
     public var pendingVisibilityConvergences: [PendingVisibilityConvergence]
     public var slots: [SlotEntry]
@@ -339,6 +408,9 @@ public struct RuntimeState: Codable, Equatable, Sendable {
         revision: UInt64 = 0,
         configGeneration: String = "",
         liveArrangeRecoveryRequired: Bool = false,
+        selectedLayoutSet: SelectedLayoutSet? = nil,
+        releasedWindowIdentities: Set<WindowIdentity> = [],
+        pendingLayoutTransition: PendingLayoutTransition? = nil,
         activeWorkspaces: [ActiveWorkspace] = [],
         pendingVisibilityConvergences: [PendingVisibilityConvergence] = [],
         slots: [SlotEntry] = []
@@ -348,6 +420,9 @@ public struct RuntimeState: Codable, Equatable, Sendable {
         self.revision = revision
         self.configGeneration = configGeneration
         self.liveArrangeRecoveryRequired = liveArrangeRecoveryRequired
+        self.selectedLayoutSet = selectedLayoutSet
+        self.releasedWindowIdentities = releasedWindowIdentities
+        self.pendingLayoutTransition = pendingLayoutTransition
         self.activeWorkspaces = activeWorkspaces
         self.pendingVisibilityConvergences = pendingVisibilityConvergences
         self.slots = slots
@@ -366,7 +441,13 @@ public struct RuntimeState: Codable, Equatable, Sendable {
     /// and a layout is active on at most one display. When the layout moves
     /// to a new displayID (reconnect can change the display UUID) its pending
     /// recovery metadata migrates along so it can still be cleared.
-    public mutating func upsertActiveWorkspace(displayID: String, layoutName: String, spaceID: Int) {
+    public mutating func upsertActiveWorkspace(
+        displayID: String,
+        layoutName: String,
+        spaceID: Int,
+        appliedDefinitionDigest: String? = nil
+    ) {
+        let previousDigest = activeWorkspaces.first(where: { $0.layoutName == layoutName })?.appliedDefinitionDigest
         let previousDisplayIDs = activeWorkspaces
             .filter { $0.layoutName == layoutName && $0.displayID != displayID }
             .map(\.displayID)
@@ -375,8 +456,18 @@ public struct RuntimeState: Codable, Equatable, Sendable {
         if let index = activeWorkspaces.firstIndex(where: { $0.displayID == displayID }) {
             activeWorkspaces[index].layoutName = layoutName
             activeWorkspaces[index].spaceID = spaceID
+            if let appliedDefinitionDigest {
+                activeWorkspaces[index].appliedDefinitionDigest = appliedDefinitionDigest
+            }
         } else {
-            activeWorkspaces.append(ActiveWorkspace(displayID: displayID, layoutName: layoutName, spaceID: spaceID))
+            activeWorkspaces.append(
+                ActiveWorkspace(
+                    displayID: displayID,
+                    layoutName: layoutName,
+                    spaceID: spaceID,
+                    appliedDefinitionDigest: appliedDefinitionDigest ?? previousDigest ?? ""
+                )
+            )
         }
 
         for previousDisplayID in previousDisplayIDs {
@@ -410,7 +501,41 @@ public struct RuntimeState: Codable, Equatable, Sendable {
     }
 
     public var recoveryRequired: Bool {
-        !pendingVisibilityConvergences.isEmpty || liveArrangeRecoveryRequired
+        pendingLayoutTransition != nil || !pendingVisibilityConvergences.isEmpty || liveArrangeRecoveryRequired
+    }
+
+    public func needsReapply(layoutName: String, config: ShitsuraeConfig) -> Bool {
+        guard let workspace = activeWorkspace(layoutName: layoutName) else { return false }
+        return workspace.appliedDefinitionDigest != ConfigDigest.workspace(layoutName: layoutName, config: config)
+    }
+
+    public func selectedSetNeedsReapply(config: ShitsuraeConfig) -> Bool {
+        guard let selectedLayoutSet else { return false }
+        guard let definition = config.layoutSets[selectedLayoutSet.name] else { return true }
+        // Membership changes invalidate the complete selected set. Definition
+        // changes are intentionally checked per workspace by `needsReapply` so
+        // editing one member does not stop unrelated displays. Member order is
+        // presentation-only and never changes the effective set.
+        return Set(selectedLayoutSet.memberNames) != Set(definition.layouts)
+    }
+
+    public func anySelectedSetScopeNeedsReapply(config: ShitsuraeConfig) -> Bool {
+        guard let selectedLayoutSet else { return false }
+        if selectedSetNeedsReapply(config: config) { return true }
+        return selectedLayoutSet.memberNames.contains {
+            needsReapply(layoutName: $0, config: config)
+        }
+    }
+
+    /// Includes manually managed and dormant scopes, not only set members.
+    public func anyActiveScopeNeedsReapply(config: ShitsuraeConfig) -> Bool {
+        selectedSetNeedsReapply(config: config) || activeWorkspaces.contains {
+            needsReapply(layoutName: $0.layoutName, config: config)
+        }
+    }
+
+    public var hasRecoverableManagement: Bool {
+        !activeWorkspaces.isEmpty || slots.contains { $0.visibilityState.isManagedHidden }
     }
 
     /// Canonical in-memory and on-disk ordering. Only immutable layout

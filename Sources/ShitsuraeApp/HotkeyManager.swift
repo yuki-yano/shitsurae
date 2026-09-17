@@ -207,11 +207,22 @@ private final class HotkeyFastPathExecutor: @unchecked Sendable {
 
         let engine = engine
         let logger = logger
+        let token: ArrangeOperationToken
+        do {
+            token = try engine.operationCoordinator.tryAdmit(
+                requestID: UUID().uuidString.lowercased(),
+                operation: .switchSpace
+            )
+        } catch {
+            onFinish(label, .failure(String(describing: error)))
+            return
+        }
         HotkeyFastPathPreparation.perform(
             invalidateFocusEvents: { engine.invalidatePendingFocusEvents() },
             onStart: { onStart(label) }
         )
         Task.detached(priority: .high) {
+            defer { engine.operationCoordinator.abandon(token: token) }
             let activity = ProcessInfo.processInfo.beginActivity(
                 options: [.userInitiated, .latencyCritical],
                 reason: "Shitsurae \(label)"
@@ -224,7 +235,8 @@ private final class HotkeyFastPathExecutor: @unchecked Sendable {
                 let routed = try await engine.routeAndSwitchSpace(
                     candidates: candidates,
                     cursorLocation: cursorLocation,
-                    config: config
+                    config: config,
+                    token: token
                 )
                 let outcome = routed.outcome
                 if let message = SpaceSwitchCompletion.incompleteMessage(
@@ -242,13 +254,29 @@ private final class HotkeyFastPathExecutor: @unchecked Sendable {
                         ]
                     )
                     self.onFinish(label, .partial(routed, message))
+                    engine.operationCoordinator.finish(
+                        token: token,
+                        result: "partial",
+                        exitCode: ErrorCode.partialSuccess.rawValue
+                    )
                 } else {
                     self.onFinish(label, .success(routed))
+                    engine.operationCoordinator.finish(token: token, result: "success", exitCode: 0)
                 }
             } catch {
                 let message = (error as? VirtualSpaceEngineError).map {
                     CommandRouter.mapEngineError($0).message
                 } ?? String(describing: error)
+                let exitCode = (error as? ShitsuraeError)?.code.rawValue
+                    ?? (error as? VirtualSpaceEngineError).map {
+                        CommandRouter.mapEngineError($0).code.rawValue
+                    }
+                    ?? ErrorCode.validationError.rawValue
+                engine.operationCoordinator.finish(
+                    token: token,
+                    result: "failed",
+                    exitCode: exitCode
+                )
                 logger.log(level: "warn", event: "app.action.failed", fields: ["label": label, "error": message])
                 self.onFinish(label, .failure(message))
             }
@@ -670,6 +698,9 @@ final class HotkeyManager {
 
         let engine = model.engine
         let holdModifiers = Set(shortcuts.switcherTrigger.modifiers.map { $0.lowercased() })
+        let token: ArrangeOperationToken
+        do { token = try engine.operationCoordinator.tryAdmit(requestID: UUID().uuidString.lowercased(), operation: .focus) }
+        catch { return }
 
         sessionGeneration += 1
         let generation = sessionGeneration
@@ -686,14 +717,18 @@ final class HotkeyManager {
         fastPathState.updateOverlaySessionActive(true)
 
         Task { @MainActor in
+            defer { engine.operationCoordinator.abandon(token: token) }
             // The switcher targets the active workspace on the display where
             // the trigger event captured the cursor.
-            let candidates = (try? await engine.switcherCandidates(
-                displayID: displayID,
-                includeAllSpaces: false,
-                config: config,
-                excludedApps: shortcuts.switcherExcludedApps
-            )) ?? []
+            let candidates: [SwitcherCandidate]
+            do {
+                candidates = try await engine.switcherCandidates(displayID: displayID, includeAllSpaces: false,
+                    config: config, excludedApps: shortcuts.switcherExcludedApps, token: token)
+                engine.operationCoordinator.finish(token: token, result: "success", exitCode: 0)
+            } catch {
+                candidates = []
+                engine.operationCoordinator.finish(token: token, result: "failed", exitCode: (error as? ShitsuraeError)?.code.rawValue ?? 3, detail: String(describing: error))
+            }
 
             guard self.sessionGeneration == generation else {
                 return // superseded by a newer session
@@ -752,6 +787,9 @@ final class HotkeyManager {
         // Release detection must track the hotkey that actually fired —
         // prevWindow may use different modifiers than nextWindow.
         let holdModifiers = Set(trigger.modifiers.map { $0.lowercased() })
+        let token: ArrangeOperationToken
+        do { token = try engine.operationCoordinator.tryAdmit(requestID: UUID().uuidString.lowercased(), operation: .focus) }
+        catch { return }
 
         sessionGeneration += 1
         let generation = sessionGeneration
@@ -768,11 +806,16 @@ final class HotkeyManager {
         fastPathState.updateOverlaySessionActive(true)
 
         Task { @MainActor in
-            let candidates = (try? await engine.cycleCandidates(
-                displayID: displayID,
-                config: config,
-                excludedApps: shortcuts.cycleExcludedApps
-            )) ?? []
+            defer { engine.operationCoordinator.abandon(token: token) }
+            let candidates: [SwitcherCandidate]
+            do {
+                candidates = try await engine.cycleCandidates(displayID: displayID, config: config,
+                    excludedApps: shortcuts.cycleExcludedApps, token: token)
+                engine.operationCoordinator.finish(token: token, result: "success", exitCode: 0)
+            } catch {
+                candidates = []
+                engine.operationCoordinator.finish(token: token, result: "failed", exitCode: (error as? ShitsuraeError)?.code.rawValue ?? 3, detail: String(describing: error))
+            }
 
             guard self.sessionGeneration == generation else {
                 return

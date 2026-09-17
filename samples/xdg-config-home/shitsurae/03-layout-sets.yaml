@@ -1,0 +1,46 @@
+# Named sets replace the complete managed scope.
+# Preview: shitsurae arrange --set home --dry-run --json
+# Apply:   shitsurae arrange --set mobile --json
+monitors:
+  main:
+    primary: true
+  calendar:
+    id: uuid-calendar
+  research:
+    id: uuid-research
+
+layouts:
+  default:
+    display:
+      monitor: main
+    spaces:
+      - spaceID: 1
+        windows: []
+
+  calendar:
+    display:
+      monitor: calendar
+    spaces:
+      - spaceID: 1
+        windows: []
+
+  research:
+    display:
+      monitor: research
+    spaces:
+      - spaceID: 1
+        windows: []
+
+  # This is an independent definition, not an override of default.
+  macbook-pro:
+    display:
+      monitor: main
+    spaces:
+      - spaceID: 1
+        windows: []
+
+layoutSets:
+  home:
+    layouts: [default, calendar, research]
+  mobile:
+    layouts: [macbook-pro]

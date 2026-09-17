@@ -897,6 +897,63 @@ struct VisibilityApplierTests {
         ])
     }
 
+    @Test func convergeStopsStartingRetriesWhenOperationBudgetExpires() {
+        let first = TestFixtures.window(id: 1, bundleID: "app.one", isAXBacked: true)
+        let second = TestFixtures.window(id: 2, bundleID: "app.two", isAXBacked: true)
+        let control = MockWindowControl(windows: [first, second], displays: [TestFixtures.display])
+
+        func change(for window: WindowSnapshot) -> AppliedVisibilityChange {
+            var original = SlotEntry(
+                layoutName: "work",
+                spaceID: 1,
+                slot: Int(window.windowID),
+                origin: .layout,
+                definitionFingerprint: "fp-\(window.windowID)",
+                layoutSpaceID: 1,
+                bundleID: window.bundleID,
+                windowID: window.windowID,
+                lastVisibleFrame: window.frame,
+                visibilityState: .visible
+            )
+            var desired = original
+            desired.spaceID = 2
+            desired.layoutSpaceID = 2
+            desired.visibilityState = .hiddenOffscreen
+            desired.lastHiddenFrame = ResolvedFrame(
+                x: -699,
+                y: window.frame.y,
+                width: window.frame.width,
+                height: window.frame.height
+            )
+            original.lastHiddenFrame = nil
+            return AppliedVisibilityChange(
+                window: window,
+                originalEntry: original,
+                effectiveEntry: original,
+                desiredEntry: desired,
+                restoredFromMinimized: false,
+                geometryMutationResult: .notAttempted
+            )
+        }
+
+        var permissionChecks = 0
+        let outcome = VisibilityApplier.converge(
+            changes: [change(for: first), change(for: second)],
+            control: control,
+            logger: TestFixtures.nullLogger(),
+            retryDelaysMS: [1, 1],
+            permitsNewSideEffect: {
+                permissionChecks += 1
+                return permissionChecks <= 2
+            },
+            remainingBudgetMS: { 1 }
+        )
+
+        #expect(outcome.hasPending)
+        #expect(outcome.retryCount == 1)
+        #expect(control.setPositionAttemptWindowIDs == [first.windowID])
+    }
+
     @Test func convergeFinalRecheckDetectsSiblingReflowAfterRetry() {
         let firstVisible = TestFixtures.window(id: 1, bundleID: "app.shared", isAXBacked: true)
         let secondVisible = TestFixtures.window(id: 2, bundleID: "app.shared", isAXBacked: true)

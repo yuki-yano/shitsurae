@@ -6,10 +6,14 @@ import ShitsuraeCore
 // GUI app over the unix socket (auto-launching the app when needed), and
 // prints the payload. The CLI holds no window-management logic.
 
-func executeRemote(_ request: CommandRequest, json: Bool) -> Never {
+func executeRemote(_ request: CommandRequest, json: Bool, autoLaunch: Bool = true) -> Never {
     do {
-        let responseData = try CommandClient.send(request: request)
-        let probe = try JSONDecoder().decode(CommandResponseProbe.self, from: responseData)
+        let responseData = try CommandClient.send(request: request, autoLaunch: autoLaunch, progress: { elapsedMS in
+            FileHandle.standardError.write(Data("waiting: requestID=\(request.requestID ?? "unknown") elapsedMS=\(elapsedMS)\n".utf8))
+        })
+        guard let probe = try? JSONDecoder().decode(CommandResponseProbe.self, from: responseData) else {
+            throw CommandClientError.outcomeUnknown(requestID: request.requestID ?? "unknown")
+        }
 
         if let object = try JSONSerialization.jsonObject(with: responseData) as? [String: Any] {
             if let error = object["error"] as? [String: Any] {
@@ -32,10 +36,24 @@ func executeRemote(_ request: CommandRequest, json: Bool) -> Never {
     } catch CommandClientError.serverUnavailable {
         writeFormattedError(
             code: .backendUnavailable,
-            message: "Shitsurae.app is not reachable (launch failed?)",
+            message: "Shitsurae.app is unreachable (including when it is not running)",
             json: json
         )
         exit(Int32(ErrorCode.backendUnavailable.rawValue))
+    } catch let CommandClientError.outcomeUnknown(requestID) {
+        if json {
+            let object: [String: Any] = [
+                "requestID": requestID,
+                "result": "outcomeUnknown",
+                "exitCode": ErrorCode.ipcCommunicationError.rawValue,
+            ]
+            printJSONFragment(object)
+        } else {
+            FileHandle.standardError.write(
+                Data("error: operation outcome is unknown (requestID: \(requestID)); check 'shitsurae arrange --status'\n".utf8)
+            )
+        }
+        exit(Int32(ErrorCode.ipcCommunicationError.rawValue))
     } catch {
         writeFormattedError(
             code: .ipcCommunicationError,
@@ -68,6 +86,51 @@ func printJSONFragment(_ object: Any) {
 func printHumanReadable(_ payload: Any) {
     guard let dictionary = payload as? [String: Any] else {
         print(payload)
+        return
+    }
+
+    if let setName = dictionary["setName"] as? String,
+       let result = dictionary["result"] as? String
+    {
+        let phase = dictionary["phase"] as? String
+        let committed = dictionary["ownershipCommitted"] as? Bool
+        let selected = dictionary["selectedSet"] as? String
+        let focus = dictionary["focusOutcome"] as? String
+        print(
+            [
+                "set: \(setName)",
+                "result=\(result)",
+                phase.map { "phase=\($0)" },
+                committed.map { "ownershipCommitted=\($0)" },
+                selected.map { "selectedSet=\($0)" },
+                focus.map { "focus=\($0)" },
+            ].compactMap { $0 }.joined(separator: "\t")
+        )
+        let members = (dictionary["memberResults"] ?? dictionary["members"]) as? [[String: Any]] ?? []
+        for member in members {
+            let layout = member["layout"] as? String ?? "?"
+            let display = member["resolvedDisplayID"] as? String ?? "?"
+            let space = member["targetSpace"].map { "\($0)" } ?? "?"
+            let memberResult = member["result"] as? String ?? "planned"
+            let reason = (member["reason"] as? String).map { " reason=\($0)" } ?? ""
+            print("\(layout)\tdisplay=\(display)\tspace=\(space)\tresult=\(memberResult)\(reason)")
+        }
+        if let unresolved = dictionary["unresolved"] as? [[String: Any]] {
+            for slot in unresolved {
+                print("unresolved: spaceID=\(slot["spaceID"] ?? "?") slot=\(slot["slot"] ?? "?") reason=\(slot["reason"] ?? "?")")
+            }
+        }
+        return
+    }
+
+    if let sets = dictionary["sets"] as? [[String: Any]] {
+        for set in sets {
+            let name = set["name"] as? String ?? "?"
+            let layouts = (set["layouts"] as? [String])?.joined(separator: ",") ?? ""
+            let selected = set["selected"] as? Bool == true ? " selected" : ""
+            let needsReapply = set["needsReapply"] as? Bool == true ? " needsReapply" : ""
+            print("\(name)\tlayouts=[\(layouts)]\(selected)\(needsReapply)")
+        }
         return
     }
 
@@ -155,6 +218,7 @@ struct ShitsuraeCommand: ParsableCommand {
         subcommands: [
             Arrange.self,
             Layouts.self,
+            LayoutSets.self,
             Validate.self,
             Diagnostics.self,
             Display.self,
@@ -172,6 +236,15 @@ struct Arrange: ParsableCommand {
     @Argument(help: "Layout names; multiple names are applied as one logical batch")
     var layouts: [String] = []
 
+    @Option(name: .customLong("set"), help: "Apply a named layout set as the complete managed scope")
+    var layoutSet: String?
+
+    @Flag(name: .customLong("status"), help: "Show the active operation and last outcome without launching the app")
+    var status = false
+
+    @Flag(name: .customLong("recover"), help: "Restore windows and stop managing the affected scope")
+    var recover = false
+
     @Flag(name: .customLong("dry-run"), help: "Show the plan without applying")
     var dryRun = false
 
@@ -184,8 +257,18 @@ struct Arrange: ParsableCommand {
     @OptionGroup var jsonFlag: JSONFlag
 
     func validate() throws {
-        guard !layouts.isEmpty else {
-            throw ValidationError("at least one layout name is required")
+        let modes = [layoutSet != nil, status, recover, !layouts.isEmpty].filter { $0 }.count
+        guard modes == 1 else {
+            throw ValidationError("choose exactly one of layout names, --set, --status, or --recover")
+        }
+        if layoutSet != nil, stateOnly || space != nil {
+            throw ValidationError("--set accepts only --dry-run and --json")
+        }
+        if status, dryRun || stateOnly || space != nil {
+            throw ValidationError("--status does not accept arrange options")
+        }
+        if recover, dryRun || stateOnly || space != nil {
+            throw ValidationError("--recover does not accept arrange options")
         }
         if layouts.count > 1, dryRun || stateOnly || space != nil {
             throw ValidationError(
@@ -195,6 +278,15 @@ struct Arrange: ParsableCommand {
     }
 
     func run() throws {
+        if let layoutSet {
+            executeRemote(CLIRequestBuilder.arrangeSet(name: layoutSet, dryRun: dryRun), json: jsonFlag.json)
+        }
+        if status {
+            executeRemote(CLIRequestBuilder.arrangeStatus(), json: jsonFlag.json, autoLaunch: false)
+        }
+        if recover {
+            executeRemote(CLIRequestBuilder.arrangeRecover(), json: jsonFlag.json)
+        }
         let request = CLIRequestBuilder.arrange(
             layouts: layouts,
             dryRun: dryRun,
@@ -202,6 +294,25 @@ struct Arrange: ParsableCommand {
             spaceID: space
         )
         executeRemote(request, json: jsonFlag.json)
+    }
+}
+
+struct LayoutSets: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "layout-sets",
+        abstract: "Layout set operations",
+        subcommands: [List.self],
+        defaultSubcommand: List.self
+    )
+
+    struct List: ParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "List defined layout sets")
+
+        @OptionGroup var jsonFlag: JSONFlag
+
+        func run() throws {
+            executeRemote(CommandRequest(command: "layoutSetsList"), json: jsonFlag.json)
+        }
     }
 }
 

@@ -331,6 +331,42 @@ After reconnection, Shitsurae resolves the declared display again and restores t
 > Use narrow match rules for layouts on non-primary displays, such as a dedicated `bundleID`, `title`, or `profile`.
 > A broad rule such as a browser's bare `bundleID` can also match that application's windows on other displays.
 
+### Layout sets
+
+A layout set is an exclusive named collection of layouts. Applying a set replaces the complete managed scope; it is different from the local `arrange <layout...>` command.
+
+```yaml
+layoutSets:
+  home:
+    layouts: [default, calendar, research]
+  mobile:
+    layouts: [macbook-pro]
+```
+
+`home` manages all three displays together, while `mobile` manages only the independent `macbook-pro` layout. Every member of one set must resolve to a different connected display. Identical window matchers may be reused between exclusive sets, but not between members of the same set.
+
+Preview and apply a set with:
+
+```bash
+shitsurae arrange --set home --dry-run --json
+shitsurae arrange --set home
+shitsurae layout-sets list --json
+```
+
+The preview and live operation share the same planner. A named set is strict: a missing or colliding display rejects the whole operation before window changes. If a required app does not produce a window in time, Shitsurae can still commit the new ownership safely and returns `partial` (exit 51); apply the same set again after the window appears.
+
+Windows owned by layouts outside the new set are not closed. Hidden or unreachable windows are returned to the current primary display and released from management. Reachable visible windows are left in place. Released live window identities stay unmanaged until an explicit arrange or window-workspace command claims them.
+
+Applying individual layouts remains available. After a local arrange changes the managed member collection, the GUI reports the selection as **Manual** instead of inferring a set name.
+
+Reapplying the same set preserves adopted windows in retained members and their virtual workspace membership.
+Editing one member requires reapplication of that scope only; changing the selected set's member collection requires applying the whole set.
+
+Normal Quit restores managed hidden or unreachable windows, leaves reachable secondary windows in place, and ends the runtime scopes while preserving previously released identities.
+It does not newly release every live window.
+Explicit recovery releases its rescued live windows and works without a valid config.
+Unverified physical changes keep recovery information; missing-slot-only or focus-only partial results may be reapplied normally.
+
 ## How virtual workspaces work
 
 Shitsurae does not manipulate native macOS Spaces.
@@ -352,6 +388,11 @@ shitsurae diagnostics --json
 
 shitsurae arrange work --dry-run --json
 shitsurae arrange work
+shitsurae arrange --set home --dry-run --json
+shitsurae arrange --set home
+shitsurae arrange --status --json
+shitsurae arrange --recover --json
+shitsurae layout-sets list --json
 
 shitsurae space list --json
 shitsurae space current --json
@@ -366,7 +407,9 @@ shitsurae switcher list --json
 ```
 
 The CLI connects to the Shitsurae app over a Unix domain socket.
-It launches the app automatically if it is not already running.
+It launches the app automatically if it is not already running, except for `arrange --status`, which only reports whether the current endpoint is reachable.
+
+Mutation requests have a 60-second dispatch budget and a bounded response wait. If the connection fails after request bytes were sent, the CLI does not retry the mutation and reports `outcomeUnknown` (exit 31) with its request ID. Use `arrange --status` to distinguish an in-flight operation from a completed result.
 
 Run `shitsurae <subcommand> --help` to see the options for each command.
 
@@ -398,7 +441,15 @@ If macOS or the frontmost application uses the same key, change the Shitsurae bi
 ### Recovery required appears
 
 This means an operation remains whose final window visibility could not be confirmed safely.
-First quit Shitsurae normally and verify that parked windows return to the screen.
+Use the config-independent recovery command to return reachable exact window identities to the current primary display and remove the affected scope from management:
+
+```bash
+shitsurae arrange --recover --json
+```
+
+Recovery saves progress per window. If it returns `partial`, unresolved entries and the transition journal are retained so the command can be retried. There is no force-clear operation for a layout-set transition.
+
+The older `space recover --force-clear-pending` command only clears ordinary Space visibility convergence after you have independently confirmed every managed window is visible. It refuses to clear a layout transition journal.
 
 Clear the state manually only after confirming that every managed window is visible and the pending recovery data is no longer needed.
 

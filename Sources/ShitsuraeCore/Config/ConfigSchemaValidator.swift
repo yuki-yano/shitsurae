@@ -134,6 +134,9 @@ enum ConfigSchemaValidator {
         "display": display,
         "spaces": .sequence(space),
     ])
+    private static let layoutSet = Schema.mapping(fields: [
+        "layouts": scalarSequence,
+    ])
     private static let ignoreWindow = Schema.mapping(fields: [
         "bundleID": .scalar,
         "titleRegex": .scalar,
@@ -200,6 +203,7 @@ enum ConfigSchemaValidator {
             ])
         ),
         "layouts": .mapping(fields: [:], dynamicValues: layout),
+        "layoutSets": .mapping(fields: [:], dynamicValues: layoutSet),
         "shortcuts": shortcuts,
         "mode": .mapping(fields: [
             "followFocus": .scalar,

@@ -10,6 +10,7 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     private var windowsByID: [UInt32: WindowSnapshot]
     private var displayList: [DisplayInfo]
 
+    var accessibilityAvailable = true
     var failFrameWindowIDs: Set<UInt32> = []
     var failPositionWindowIDs: Set<UInt32> = []
     /// Rejects frame requests larger than a window-specific limit. This models
@@ -36,6 +37,10 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     /// race where windows settling during convergence change key focus before
     /// the engine performs its final focus decision.
     var stealFocusOnPositionAttempt: UInt32?
+    /// Simulates a user selecting a different window while arrange geometry
+    /// is in progress. The identity is changed under the same lock as the
+    /// frame write so the test has no scheduling race.
+    var userFocusOnFrameMutationAttempt: UInt32?
     private(set) var focusedWindowIDs: [UInt32] = []
     private var currentFocusedWindowIdentity: WindowIdentity?
     private var currentFrontmostWindowIdentity: WindowIdentity?
@@ -50,10 +55,16 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     private(set) var launchedRequests: [ApplicationLaunchRequest] = []
     private(set) var sleptMilliseconds: [Int] = []
     var onFrameMutationAttempt: (() -> Void)?
+    var onMinimizeAttempt: (() -> Void)?
+    var onFocusAttempt: (() -> Void)?
 
     init(windows: [WindowSnapshot], displays: [DisplayInfo]) {
         self.windowsByID = Dictionary(uniqueKeysWithValues: windows.map { ($0.windowID, $0) })
         self.displayList = displays
+    }
+
+    func accessibilityGranted() -> Bool {
+        accessibilityAvailable
     }
 
     func currentWindows() -> [WindowSnapshot] {
@@ -125,6 +136,7 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     /// windows closing mid-flow. The state set by the last consumed snapshot
     /// persists once the queue is exhausted.
     var windowListSequence: [[WindowSnapshot]] = []
+    var onInventoryRead: (() -> Void)?
 
     func listWindows() -> [WindowSnapshot] {
         currentWindows()
@@ -142,6 +154,7 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     }
 
     func windowInventory() -> WindowInventory {
+        onInventoryRead?()
         guard windowInventoryAvailable else { return .unavailable }
         let windows = listAllWindows()
         return .available(windows, liveWindowHandles: liveWindowHandlesOverride)
@@ -266,6 +279,11 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         frameMutationAttemptWindowIDs.append(windowID)
         setFrameAttemptWindowIDs.append(windowID)
         onFrameMutationAttempt?()
+        if let focusedID = userFocusOnFrameMutationAttempt {
+            currentFocusedWindowIdentity = windowsByID[focusedID]?.identity
+            currentFrontmostWindowIdentity = currentFocusedWindowIdentity
+            mainWindowIdentity = currentFocusedWindowIdentity
+        }
         guard let window = windowsByID[windowID],
               window.pid == pid,
               window.processStartTime == processStartTime,
@@ -349,6 +367,7 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         bundleID: String,
         minimized: Bool
     ) -> WindowInteractionResult {
+        onMinimizeAttempt?()
         lock.lock()
         defer { lock.unlock() }
         minimizeAttempts.append((windowID: windowID, minimized: minimized))
@@ -375,6 +394,7 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
         processStartTime: UInt64,
         bundleID: String
     ) -> WindowInteractionResult {
+        onFocusAttempt?()
         lock.lock()
         defer { lock.unlock() }
         guard let window = windowsByID[windowID],
@@ -598,13 +618,20 @@ enum TestFixtures {
 
     static func loadedConfig(
         layouts: [String: LayoutDefinition],
+        layoutSets: [String: LayoutSetDefinition] = [:],
+        ignore: IgnoreDefinition? = nil,
         monitors: MonitorsDefinition = MonitorsDefinition([
             "main": MonitorTargetDefinition(primary: true),
             "calendar": MonitorTargetDefinition(width: 2560, height: 1440),
         ])
     ) -> LoadedConfig {
         LoadedConfig(
-            config: ShitsuraeConfig(monitors: monitors, layouts: layouts),
+            config: ShitsuraeConfig(
+                ignore: ignore,
+                monitors: monitors,
+                layouts: layouts,
+                layoutSets: layoutSets
+            ),
             configFiles: [],
             directoryURL: URL(fileURLWithPath: "/tmp"),
             configGeneration: String(repeating: "a", count: 64)

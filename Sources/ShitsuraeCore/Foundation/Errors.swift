@@ -17,6 +17,8 @@ public enum ErrorCode: Int, Codable, CaseIterable, Sendable {
     case operationTimedOut = 50
     case partialSuccess = 51
     case spaceSwitchFailed = 52
+    case operationBusy = 53
+    case operationBlocked = 54
 }
 
 public struct ShitsuraeError: Error, Sendable, Equatable {

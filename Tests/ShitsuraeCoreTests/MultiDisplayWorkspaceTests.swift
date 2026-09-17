@@ -931,14 +931,14 @@ struct MultiDisplayWorkspaceTests {
         try await engine.bootstrapState(layoutName: "calendar", activeSpaceID: 1, config: dualConfig)
 
         control.setDisplays([TestFixtures.display])
-        await engine.handleDisplayConfigurationChange(config: dualConfig)
+        try await engine.handleDisplayConfigurationChange(config: dualConfig)
         var state = await engine.currentState
         #expect(state.activeWorkspace(displayID: "uuid-sub")?.layoutName == "calendar")
 
         // Reconnect with a CHANGED display UUID: UUID equality can never
         // restore this; declaration re-resolution must.
         control.setDisplays([TestFixtures.display, TestFixtures.secondaryDisplay(id: "uuid-sub-2")])
-        await engine.handleDisplayConfigurationChange(config: dualConfig)
+        try await engine.handleDisplayConfigurationChange(config: dualConfig)
 
         state = await engine.currentState
         #expect(state.activeWorkspace(displayID: "uuid-sub") == nil)

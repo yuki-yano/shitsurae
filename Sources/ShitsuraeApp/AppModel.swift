@@ -153,9 +153,13 @@ private struct WorkspaceLiveCapture: Sendable {
     let displays: [DisplayInfo]
 }
 
+private struct PartialActionError: Error {
+    let message: String
+}
+
 @MainActor
 final class AppModel: ObservableObject {
-    let logger = ShitsuraeLogger()
+    let logger: ShitsuraeLogger
     let configManager: ConfigManager
     let engine: VirtualSpaceEngine
     let router: CommandRouter
@@ -164,6 +168,7 @@ final class AppModel: ObservableObject {
     private(set) var hotkeyManager: HotkeyManager?
 
     @Published var layouts: [String] = []
+    @Published var layoutSets: [String] = []
     @Published var activeLayoutName: String?
     @Published var activeSpaceID: Int?
     @Published var availableSpaceIDs: [Int] = []
@@ -174,6 +179,16 @@ final class AppModel: ObservableObject {
     @Published var configErrors: [ValidateErrorItem] = []
     @Published var diagnostics: DiagnosticsJSON?
     @Published private(set) var workspaceState: WorkspaceStateSnapshot?
+    @Published private(set) var runtimeState = RuntimeState()
+    @Published private(set) var arrangeStatus = ArrangeStatusJSON(
+        active: nil,
+        lastOutcome: nil,
+        pendingTransition: nil
+    )
+    @Published private(set) var lastLayoutSetResult: LayoutSetExecutionJSON?
+    private var displayChanges = DisplayChangeEventState()
+    private var arrangeOperationStatusTask: Task<Void, Never>?
+    private var operationMonitoringStarted = false
     @Published var lastActionMessage: String?
     @Published var actionStatus: ActionStatus = .idle
     @Published private(set) var startupStatus: AppStartupStatus = .preparing
@@ -182,6 +197,7 @@ final class AppModel: ObservableObject {
         case idle
         case running(String)
         case success(String)
+        case partial(String, String)
         case failed(String, String)
 
         var isRunning: Bool {
@@ -217,6 +233,7 @@ final class AppModel: ObservableObject {
     private var workspaceStateCaptureGeneration: UInt64 = 0
 
     init() {
+        logger = ShitsuraeLogger()
         let focusEventGate = FocusEventGate()
         self.focusEventGate = focusEventGate
         focusEventCoordinator = FocusEventCoordinator(gate: focusEventGate)
@@ -246,6 +263,20 @@ final class AppModel: ObservableObject {
         }
         router = CommandRouter(engine: engine, configManager: configManager, logger: logger)
     }
+
+    /// Dependency-only construction: does not start servers, AX observers,
+    /// permissions checks or OS notifications.
+    init(engine: VirtualSpaceEngine, configManager: ConfigManager, logger: ShitsuraeLogger) {
+        self.logger = logger
+        self.engine = engine
+        self.configManager = configManager
+        let gate = FocusEventGate()
+        focusEventGate = gate
+        focusEventCoordinator = FocusEventCoordinator(gate: gate)
+        router = CommandRouter(engine: engine, configManager: configManager, logger: logger)
+    }
+
+    deinit { arrangeOperationStatusTask?.cancel() }
 
     /// State loading is fail-closed: an unsupported or corrupt file may be
     /// the only record of windows parked offscreen, so it is never discarded
@@ -337,6 +368,7 @@ final class AppModel: ObservableObject {
             return
         }
         self.server = server
+        startArrangeOperationMonitoring()
 
         let hotkeyManager = HotkeyManager(model: self)
         hotkeyManager.start()
@@ -377,8 +409,8 @@ final class AppModel: ObservableObject {
         shutdownCompletions.append(completion)
         guard !shutdownInProgress else { return }
         shutdownInProgress = true
+        stopArrangeOperationMonitoring()
 
-        let config = configManager.configIfLoaded()
         hotkeyManager?.stop()
         windowEventMonitor.stop()
         server?.stop()
@@ -390,19 +422,39 @@ final class AppModel: ObservableObject {
         observers.removeAll()
 
         // Leave no window stranded offscreen while Shitsurae isn't running,
-        // then discard the runtime state — but only when every hidden window
+        // then end management — but only when every hidden window
         // was actually restored. A failed restore keeps the state so the
         // next session can still find and recover the parked windows.
         let engine = engine
         let logger = logger
         Task {
             var restored = false
-            if let config {
-                restored = await engine.restoreAllForShutdown(config: config)
+            do {
+                let requestID = UUID().uuidString.lowercased()
+                let token = try engine.operationCoordinator.tryAdmit(
+                    requestID: requestID,
+                    operation: .shutdown,
+                    permitsRecovery: true
+                )
+                defer { engine.operationCoordinator.abandon(token: token) }
+                let result = try await engine.shutdownManagedWindows(
+                    requestID: requestID,
+                    token: token
+                )
+                restored = result.exitCode == ErrorCode.success.rawValue
+                engine.operationCoordinator.finish(
+                    token: token,
+                    result: result.result,
+                    exitCode: result.exitCode
+                )
+            } catch {
+                logger.log(
+                    level: "warn",
+                    event: "app.shutdown.admissionFailed",
+                    fields: ["error": String(describing: error)]
+                )
             }
-            if restored {
-                await engine.clearRuntimeState()
-            } else {
+            if !restored {
                 logger.log(
                     level: "warn",
                     event: "app.shutdown.restoreIncomplete",
@@ -417,9 +469,13 @@ final class AppModel: ObservableObject {
 
     // MARK: - Config
 
-    private func handleConfigChange() {
+    func handleConfigChange() {
+        guard !shutdownInProgress else { return }
+        displayChanges.invalidateForConfigurationChange()
+        engine.operationCoordinator.invalidateCurrent(reason: .configurationChanged)
         let loaded = configManager.configIfLoaded()
         layouts = loaded.map { $0.config.layouts.keys.sorted() } ?? []
+        layoutSets = loaded.map { $0.config.layoutSets.keys.sorted() } ?? []
         configErrors = configManager.configErrors()
         hotkeyManager?.reload(shortcuts: loaded?.config.resolvedShortcuts)
         applyLaunchAtLogin(loaded?.config.app?.launchAtLogin)
@@ -441,6 +497,31 @@ final class AppModel: ObservableObject {
 
     // MARK: - Status
 
+    /// Application lifetime responsibility. No ArrangeView is needed for
+    /// CLI completion/status propagation or coalesced display reconciliation.
+    func startArrangeOperationMonitoring(interval: Duration = .milliseconds(500)) {
+        guard !shutdownInProgress, !operationMonitoringStarted else { return }
+        operationMonitoringStarted = true
+        arrangeOperationStatusTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard self?.operationMonitoringStarted == true, self?.shutdownInProgress == false else { return }
+                self?.refreshArrangeOperationStatus()
+                // Do not retain the application model across the suspension.
+                try? await Task.sleep(for: interval)
+            }
+        }
+    }
+
+    func stopArrangeOperationMonitoring() {
+        operationMonitoringStarted = false
+        arrangeOperationStatusTask?.cancel()
+        arrangeOperationStatusTask = nil
+        displayChanges.invalidateForConfigurationChange()
+        if engine.operationCoordinator.status().active?.operation == .displayChange {
+            engine.operationCoordinator.invalidateCurrent()
+        }
+    }
+
     func refreshStatus() {
         accessibilityGranted = SystemProbe.accessibilityGranted()
         screenRecordingGranted = SystemProbe.screenRecordingGranted()
@@ -450,6 +531,8 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             let primaryLayoutName = await engine.activeLayoutName()
             let primarySpaceID = await engine.activeSpaceID()
+            runtimeState = await engine.currentState
+            arrangeStatus = engine.operationCoordinator.status()
             activeLayoutName = primaryLayoutName
             activeSpaceID = primarySpaceID
             if let layoutName = primaryLayoutName,
@@ -468,6 +551,35 @@ final class AppModel: ObservableObject {
             }
             diagnostics = await router.diagnostics()
         }
+    }
+
+    func refreshArrangeOperationStatus() {
+        let previous = arrangeStatus
+        let next = engine.operationCoordinator.status()
+        let presentation = ArrangeOperationPollPresentation.make(previous: previous, next: next)
+        arrangeStatus = next
+        if next.active == nil {
+            if presentation.shouldRefreshRuntime {
+                if let outcome = presentation.outcome {
+                    let label = presentation.label ?? "Window Operation"
+                    switch outcome.kind {
+                    case .success: actionStatus = .success(label)
+                    case .partial: actionStatus = .partial(label, outcome.message)
+                    case .failed: actionStatus = .failed(label, outcome.message)
+                    }
+                    lastActionMessage = "\(label): \(outcome.message)"
+                }
+                refreshStatus()
+            }
+            drainPendingDisplayChange()
+        }
+    }
+
+    var shouldOfferWindowRecovery: Bool {
+        let config = configManager.configIfLoaded()?.config
+        return ArrangeActionResultPresentation.shouldOfferRecovery(state: runtimeState,
+            needsReapply: config.map { runtimeState.anyActiveScopeNeedsReapply(config: $0) } ?? false,
+            configurationUnavailable: config == nil || !configErrors.isEmpty)
     }
 
     func refreshWorkspaceState() async {
@@ -558,16 +670,22 @@ final class AppModel: ObservableObject {
     }
 
     func applyLayout(_ name: String, spaceID: Int?) {
-        runEngineAction("arrange \(name)", urgency: .interactive) { engine, config in
-            let result = try await engine.arrange(layoutName: name, spaceID: spaceID, config: config)
-            if result.result == "failed" {
-                let detail = result.hardErrors.map(\.message).joined(separator: "; ")
+        runEngineAction("arrange \(name)", operation: .arrange, urgency: .interactive) { engine, config, token in
+            let result = try await engine.arrange(
+                layoutName: name,
+                spaceID: spaceID,
+                config: config,
+                token: token
+            )
+            if result.result != "success" {
+                let detail = (result.hardErrors + result.softErrors).map(\.message).joined(separator: "; ")
                 let message = [result.subcode, detail.isEmpty ? nil : detail]
                     .compactMap { $0 }
                     .joined(separator: ": ")
-                throw VirtualSpaceEngineError.stateError(
-                    message.isEmpty ? "arrange failed" : message
-                )
+                if result.result == "failed" {
+                    throw ShitsuraeError(ErrorCode(rawValue: result.exitCode) ?? .validationError, message, subcode: result.subcode)
+                }
+                throw PartialActionError(message: message.isEmpty ? "arrange incomplete" : message)
             }
         }
     }
@@ -585,16 +703,167 @@ final class AppModel: ObservableObject {
             return
         }
 
-        runEngineAction(label, urgency: .interactive) { engine, config in
-            let result = try await engine.arrange(layoutNames: names, config: config)
-            if result.layouts.contains(where: { $0.result == "failed" }) {
+        runEngineAction(label, operation: .arrange, urgency: .interactive) { engine, config, token in
+            let result = try await engine.arrange(
+                layoutNames: names,
+                config: config,
+                token: token
+            )
+            if result.result != "success" {
                 let failed = result.layouts
-                    .filter { $0.result == "failed" }
+                    .filter { $0.result != "success" && $0.result != "skipped" }
                     .map(\.layout)
                     .joined(separator: ", ")
-                throw VirtualSpaceEngineError.stateError(
-                    "arrange failed for: \(failed)"
+                if result.result == "failed" {
+                    throw ShitsuraeError(ErrorCode(rawValue: result.exitCode) ?? .validationError, "arrange failed for: \(failed)")
+                }
+                throw PartialActionError(message: "arrange incomplete for: \(failed)")
+            }
+        }
+    }
+
+    var layoutSetPresentations: [LayoutSetPresentation] {
+        guard let config = configManager.configIfLoaded()?.config else { return [] }
+        return LayoutSetPresentation.makeAll(
+            config: config,
+            state: runtimeState,
+            displays: displays
+        )
+    }
+
+    func applyLayoutSetFromMainWindow(_ name: String) {
+        let label = "apply layout set \(name)"
+        guard let config = configManager.configIfLoaded() else {
+            actionStatus = .failed(label, "config not loaded")
+            return
+        }
+        let requestID = UUID().uuidString.lowercased()
+        let token: ArrangeOperationToken
+        do {
+            token = try engine.operationCoordinator.tryAdmit(
+                requestID: requestID,
+                operation: .arrangeSet
+            )
+        } catch {
+            let message = String(describing: error)
+            actionStatus = .failed(label, message)
+            lastActionMessage = "\(label): \(message)"
+            return
+        }
+        markInteractiveActivation()
+        actionStatus = .running(label)
+        let engine = engine
+        Task(priority: .high) {
+            defer { engine.operationCoordinator.abandon(token: token) }
+            do {
+                let result = try await engine.arrangeSet(
+                    setName: name,
+                    requestID: requestID,
+                    config: config,
+                    token: token
                 )
+                engine.operationCoordinator.finish(
+                    token: token,
+                    result: result.result,
+                    exitCode: result.exitCode,
+                    detail: result.outcomeDetail
+                )
+                await MainActor.run {
+                    self.lastLayoutSetResult = result
+                    let presentation = ArrangeActionResultPresentation.make(result: result)
+                    switch presentation.kind {
+                    case .success:
+                        self.actionStatus = .success(label)
+                        self.lastActionMessage = "\(label): ok"
+                    case .partial:
+                        self.actionStatus = .partial(label, presentation.message)
+                        self.lastActionMessage = "\(label): partial"
+                    case .failed:
+                        self.actionStatus = .failed(label, presentation.message)
+                        self.lastActionMessage = "\(label): failed"
+                    }
+                    self.refreshStatus()
+                }
+            } catch {
+                let message = String(describing: error)
+                let exitCode = (error as? ShitsuraeError)?.code.rawValue
+                    ?? (error as? VirtualSpaceEngineError).map {
+                        CommandRouter.mapEngineError($0).code.rawValue
+                    }
+                    ?? ErrorCode.validationError.rawValue
+                engine.operationCoordinator.finish(
+                    token: token,
+                    result: "failed",
+                    exitCode: exitCode,
+                    detail: message
+                )
+                await MainActor.run {
+                    self.actionStatus = .failed(label, message)
+                    self.lastActionMessage = "\(label): \(message)"
+                    self.refreshStatus()
+                }
+            }
+        }
+    }
+
+    func recoverLayoutsFromMainWindow() {
+        let label = "restore windows and stop managing"
+        let requestID = UUID().uuidString.lowercased()
+        let token: ArrangeOperationToken
+        do {
+            token = try engine.operationCoordinator.tryAdmit(
+                requestID: requestID,
+                operation: .recover,
+                permitsRecovery: true
+            )
+        } catch {
+            actionStatus = .failed(label, String(describing: error))
+            return
+        }
+        actionStatus = .running(label)
+        let engine = engine
+        Task(priority: .high) {
+            defer { engine.operationCoordinator.abandon(token: token) }
+            do {
+                let result = try await engine.recoverLayoutTransition(
+                    requestID: requestID,
+                    token: token
+                )
+                engine.operationCoordinator.finish(
+                    token: token,
+                    result: result.result,
+                    exitCode: result.exitCode,
+                    detail: result.remainingCount > 0 ? "\(result.remainingCount) windows still need recovery" : nil
+                )
+                await MainActor.run {
+                    if result.result == "success" {
+                        self.actionStatus = .success(label)
+                    } else if result.result == "partial" {
+                        self.actionStatus = .partial(
+                            label,
+                            "\(result.remainingCount) windows still need recovery"
+                        )
+                    } else {
+                        self.actionStatus = .failed(label, "exitCode=\(result.exitCode); \(result.remainingCount) windows still need recovery")
+                    }
+                    self.refreshStatus()
+                }
+            } catch {
+                let exitCode = (error as? ShitsuraeError)?.code.rawValue
+                    ?? (error as? VirtualSpaceEngineError).map {
+                        CommandRouter.mapEngineError($0).code.rawValue
+                    }
+                    ?? ErrorCode.validationError.rawValue
+                engine.operationCoordinator.finish(
+                    token: token,
+                    result: "failed",
+                    exitCode: exitCode,
+                    detail: String(describing: error)
+                )
+                await MainActor.run {
+                    self.actionStatus = .failed(label, String(describing: error))
+                    self.refreshStatus()
+                }
             }
         }
     }
@@ -620,10 +889,6 @@ final class AppModel: ObservableObject {
         to spaceID: Int,
         focusPolicy: SpaceSwitchFocusPolicy
     ) {
-        // Mark before the switch: the engine focuses the target window
-        // mid-switch and the OS activation notification must not re-trigger
-        // follow-focus.
-        markInteractiveActivation()
         let label = layoutName.map { "switch \($0) to space \(spaceID)" }
             ?? "switch to space \(spaceID)"
         let primaryDisplayID = displays.first(where: \.isPrimary)?.id
@@ -637,20 +902,22 @@ final class AppModel: ObservableObject {
             }
         } ?? primaryDisplayID
         let targetsPrimaryWorkspace = targetDisplayID == primaryDisplayID
-        runEngineAction(label, urgency: .interactive) { [weak self] engine, config in
+        runEngineAction(label, operation: .switchSpace, urgency: .interactive) { [weak self] engine, config, token in
             let outcome: SpaceSwitchOutcome
             if let layoutName {
                 outcome = try await engine.switchSpace(
                     layoutName: layoutName,
                     to: spaceID,
                     config: config,
-                    focusPolicy: focusPolicy
+                    focusPolicy: focusPolicy,
+                    token: token
                 )
             } else {
                 outcome = try await engine.switchSpace(
                     to: spaceID,
                     config: config,
-                    focusPolicy: focusPolicy
+                    focusPolicy: focusPolicy,
+                    token: token
                 )
             }
             await MainActor.run {
@@ -672,19 +939,19 @@ final class AppModel: ObservableObject {
     }
 
     func moveCurrentWindowToSpace(_ spaceID: Int) {
-        runEngineAction("move window to space \(spaceID)", urgency: .interactive) { engine, config in
+        runEngineAction("move window to space \(spaceID)", urgency: .interactive) { engine, config, token in
             _ = try await engine.windowWorkspace(
                 selector: WindowTargetSelector(),
                 toSpaceID: spaceID,
-                config: config
+                config: config,
+                token: token
             )
         }
     }
 
     func focusSlot(_ slot: Int) {
-        markInteractiveActivation()
-        runEngineAction("focus slot \(slot)", urgency: .interactive) { [weak self] engine, config in
-            _ = try await engine.focusSlot(slot, config: config)
+        runEngineAction("focus slot \(slot)", operation: .focus, urgency: .interactive) { [weak self] engine, config, token in
+            _ = try await engine.focusSlot(slot, config: config, token: token)
             await MainActor.run {
                 self?.markInteractiveActivation()
                 self?.frontmostWindowBelongsToActiveWorkspace = true
@@ -693,9 +960,8 @@ final class AppModel: ObservableObject {
     }
 
     func focusWindow(identity: WindowIdentity) {
-        markInteractiveActivation()
-        runEngineAction("focus window \(identity.windowID)", urgency: .interactive) { [weak self] engine, config in
-            let result = try await engine.focusWindow(identity: identity, config: config)
+        runEngineAction("focus window \(identity.windowID)", operation: .focus, urgency: .interactive) { [weak self] engine, config, token in
+            let result = try await engine.focusWindow(identity: identity, config: config, token: token)
             await MainActor.run {
                 self?.markInteractiveActivation()
                 if result.didSwitchSpace {
@@ -707,8 +973,13 @@ final class AppModel: ObservableObject {
     }
 
     func snapFocusedWindow(_ preset: SnapPreset) {
-        runEngineAction("snap \(preset.rawValue)", urgency: .interactive) { engine, _ in
-            _ = try await engine.snapWindow(selector: WindowTargetSelector(), preset: preset)
+        runEngineAction("snap \(preset.rawValue)", urgency: .interactive) { engine, config, token in
+            _ = try await engine.snapWindow(
+                selector: WindowTargetSelector(),
+                preset: preset,
+                config: config,
+                token: token
+            )
         }
     }
 
@@ -719,14 +990,15 @@ final class AppModel: ObservableObject {
                 snapFocusedWindow(preset)
             }
         case .move, .resize, .moveResize:
-            runEngineAction("globalAction \(action.type.rawValue)", urgency: .interactive) { engine, config in
+            runEngineAction("globalAction \(action.type.rawValue)", urgency: .interactive) { engine, config, token in
                 _ = try await engine.setWindowFrame(
                     selector: WindowTargetSelector(),
                     x: action.x,
                     y: action.y,
                     width: action.width,
                     height: action.height,
-                    config: config
+                    config: config,
+                    token: token
                 )
             }
         }
@@ -734,12 +1006,13 @@ final class AppModel: ObservableObject {
 
     func cycleWindow(forward: Bool, displayID: String) {
         let targetsPrimaryDisplay = displays.first(where: \.isPrimary)?.id == displayID
-        runEngineAction("cycle", urgency: .interactive) { [weak self] engine, config in
+        runEngineAction("cycle", operation: .focus, urgency: .interactive) { [weak self] engine, config, token in
             let shortcuts = config.config.resolvedShortcuts
             let candidates = try await engine.cycleCandidates(
                 displayID: displayID,
                 config: config,
-                excludedApps: shortcuts.cycleExcludedApps
+                excludedApps: shortcuts.cycleExcludedApps,
+                token: token
             )
             guard !candidates.isEmpty else { return }
 
@@ -754,7 +1027,11 @@ final class AppModel: ObservableObject {
                 nextIndex = (currentIndex - 1 + candidates.count) % candidates.count
             }
 
-            _ = try await engine.focusWindow(identity: candidates[nextIndex].identity, config: config)
+            _ = try await engine.focusWindow(
+                identity: candidates[nextIndex].identity,
+                config: config,
+                token: token
+            )
             await MainActor.run {
                 self?.markInteractiveActivation()
                 self?.frontmostWindowBelongsToActiveWorkspace = targetsPrimaryDisplay
@@ -832,21 +1109,39 @@ final class AppModel: ObservableObject {
 
     private func runEngineAction(
         _ label: String,
+        operation: ArrangeOperationKind = .window,
         urgency: EngineActionUrgency = .normal,
-        _ body: @escaping @Sendable (VirtualSpaceEngine, LoadedConfig) async throws -> Void
+        _ body: @escaping @Sendable (
+            VirtualSpaceEngine,
+            LoadedConfig,
+            ArrangeOperationToken
+        ) async throws -> Void
     ) {
-        if case .interactive = urgency {
-            markInteractiveActivation()
-        }
         guard let config = configManager.configIfLoaded() else {
             lastActionMessage = "config not loaded"
             actionStatus = .failed(label, "config not loaded")
             return
         }
+        let token: ArrangeOperationToken
+        do {
+            token = try engine.operationCoordinator.tryAdmit(
+                requestID: UUID().uuidString.lowercased(),
+                operation: operation
+            )
+        } catch {
+            let message = String(describing: error)
+            lastActionMessage = "\(label): \(message)"
+            actionStatus = .failed(label, message)
+            return
+        }
+        if case .interactive = urgency {
+            markInteractiveActivation()
+        }
         let engine = engine
         let activityOptions = urgency.activityOptions
         actionStatus = .running(label)
         Task(priority: urgency.taskPriority) {
+            defer { engine.operationCoordinator.abandon(token: token) }
             let activity = activityOptions.map {
                 ProcessInfo.processInfo.beginActivity(
                     options: $0,
@@ -860,16 +1155,45 @@ final class AppModel: ObservableObject {
             }
 
             do {
-                try await body(engine, config)
+                try await body(engine, config, token)
+                engine.operationCoordinator.finish(token: token, result: "success", exitCode: 0)
                 await MainActor.run {
                     self.lastActionMessage = "\(label): ok"
                     self.actionStatus = .success(label)
+                    self.refreshStatus()
+                }
+            } catch let partial as PartialActionError {
+                engine.operationCoordinator.finish(
+                    token: token,
+                    result: "partial",
+                    exitCode: ErrorCode.partialSuccess.rawValue,
+                    detail: partial.message
+                )
+                self.logger.log(
+                    level: "warn",
+                    event: "app.action.partial",
+                    fields: ["label": label, "error": partial.message]
+                )
+                await MainActor.run {
+                    self.lastActionMessage = "\(label): partial: \(partial.message)"
+                    self.actionStatus = .partial(label, partial.message)
                     self.refreshStatus()
                 }
             } catch {
                 let message = (error as? VirtualSpaceEngineError).map {
                     CommandRouter.mapEngineError($0).message
                 } ?? String(describing: error)
+                let exitCode = (error as? ShitsuraeError)?.code.rawValue
+                    ?? (error as? VirtualSpaceEngineError).map {
+                        CommandRouter.mapEngineError($0).code.rawValue
+                    }
+                    ?? ErrorCode.validationError.rawValue
+                engine.operationCoordinator.finish(
+                    token: token,
+                    result: "failed",
+                    exitCode: exitCode,
+                    detail: message
+                )
                 self.logger.log(level: "warn", event: "app.action.failed", fields: ["label": label, "error": message])
                 await MainActor.run {
                     self.lastActionMessage = "\(label): \(message)"
@@ -909,7 +1233,7 @@ final class AppModel: ObservableObject {
             NSWorkspace.didTerminateApplicationNotification,
         ] {
             observers.append(
-                workspaceCenter.addObserver(forName: name, object: nil, queue: .main) { notification in
+                workspaceCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
                     guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                           let bundleID = app.bundleIdentifier
                     else {
@@ -1217,16 +1541,28 @@ final class AppModel: ObservableObject {
     ) {
         guard let config = configManager.configIfLoaded() else { return }
 
+        let token: ArrangeOperationToken
+        do {
+            token = try engine.operationCoordinator.tryAdmit(
+                requestID: UUID().uuidString.lowercased(),
+                operation: .focus
+            )
+        } catch {
+            return
+        }
+
         // Supersede any activation/focus event emitted for AppKit's automatic
         // replacement before it can trigger follow-focus.
         markInteractiveActivation()
         let engine = engine
         Task { [weak self] in
+            defer { engine.operationCoordinator.abandon(token: token) }
             do {
                 let focusedIdentity = try await engine.focusPreferredWindowInActiveWorkspace(
                     excludingPID: identity.pid,
                     bundleID: identity.bundleID,
-                    config: config
+                    config: config,
+                    token: token
                 )
                 await MainActor.run { [weak self] in
                     guard let self else { return }
@@ -1235,7 +1571,18 @@ final class AppModel: ObservableObject {
                         frontmostBundleID: focusedIdentity?.bundleID
                     )
                 }
+                engine.operationCoordinator.finish(token: token, result: "success", exitCode: 0)
             } catch {
+                let exitCode = (error as? ShitsuraeError)?.code.rawValue
+                    ?? (error as? VirtualSpaceEngineError).map {
+                        CommandRouter.mapEngineError($0).code.rawValue
+                    }
+                    ?? ErrorCode.validationError.rawValue
+                engine.operationCoordinator.finish(
+                    token: token,
+                    result: "failed",
+                    exitCode: exitCode
+                )
                 self?.logger.log(
                     level: "warn",
                     event: "app.terminationFocusRestoreFailed",
@@ -1253,20 +1600,55 @@ final class AppModel: ObservableObject {
     }
 
     private func invalidateEngineFocusEvents(upTo sequence: UInt64) {
-        let engine = engine
-        Task {
-            await engine.invalidateFocusEvents(upTo: sequence)
-        }
+        engine.invalidateFocusEvents(upTo: sequence)
     }
 
-    private func handleDisplayChange() {
-        guard let config = configManager.configIfLoaded() else { return }
+    func handleDisplayChange() {
+        guard operationMonitoringStarted, !shutdownInProgress else { return }
+        displayChanges.recordDisplayChange()
+        engine.operationCoordinator.invalidateCurrent(reason: .displayConfigurationChanged)
+        drainPendingDisplayChange()
+    }
+
+    private func drainPendingDisplayChange() {
+        guard operationMonitoringStarted, !shutdownInProgress,
+              configManager.configErrors().isEmpty,
+              engine.operationCoordinator.status().active == nil,
+              engine.operationCoordinator.status().pendingTransition == nil,
+              let config = configManager.configIfLoaded(),
+              let generation = displayChanges.beginLatest() else { return }
         let engine = engine
         Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.displayChanges.finish()
+                self.drainPendingDisplayChange()
+            }
+            guard self.operationMonitoringStarted, !self.shutdownInProgress,
+                  self.configManager.configErrors().isEmpty,
+                  generation == self.displayChanges.generation else { return }
+            let token: ArrangeOperationToken
+            do {
+                token = try engine.operationCoordinator.tryAdmit(
+                    requestID: UUID().uuidString.lowercased(),
+                    operation: .displayChange
+                )
+            } catch {
+                return
+            }
+            defer { engine.operationCoordinator.abandon(token: token) }
+            self.displayChanges.didAdmit(generation)
+            self.logger.log(event: "app.displayChange.admitted", fields: ["generation": generation])
             // Restores dormant workspaces whose display reconnected and
             // reconciles every workspace whose host is connected.
-            await engine.handleDisplayConfigurationChange(config: config)
-            await MainActor.run { self?.refreshStatus() }
+            do {
+                try await engine.handleDisplayConfigurationChange(config: config, token: token)
+                engine.operationCoordinator.finish(token: token, result: "success", exitCode: 0)
+            } catch {
+                let mapped = error as? ShitsuraeError
+                engine.operationCoordinator.finish(token: token, result: "failed", exitCode: mapped?.code.rawValue ?? 3, detail: String(describing: error))
+            }
+            if self.operationMonitoringStarted, !self.shutdownInProgress { self.refreshStatus() }
         }
     }
 }

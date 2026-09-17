@@ -227,7 +227,7 @@ struct ArrangeTests {
         )
         control.setDisplays([compactDisplay])
 
-        await engine.handleDisplayConfigurationChange(config: config)
+        try await engine.handleDisplayConfigurationChange(config: config)
 
         #expect(control.window(1)?.frame == ResolvedFrame(x: 0, y: 0, width: 500, height: 575))
         #expect(control.window(2)?.frame == ResolvedFrame(x: 500, y: 0, width: 500, height: 575))
@@ -402,7 +402,11 @@ struct ArrangeTests {
 
         #expect(result.result == "failed")
         #expect(result.subcode == "restoreIncomplete")
-        #expect(await engine.currentState == before)
+        let after = await engine.currentState
+        #expect(after.pendingLayoutTransition?.phase == .precommit)
+        #expect(after.pendingLayoutTransition?.sourceLayoutNames == [])
+        #expect(after.activeWorkspaces == before.activeWorkspaces)
+        #expect(after.slots.map(\.id) == before.slots.map(\.id))
         #expect(!control.frameMutationAttemptWindowIDs.contains(sibling.windowID))
     }
 

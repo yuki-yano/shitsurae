@@ -626,7 +626,7 @@ public enum WindowEnumerator {
             let appElement = AXUIElementCreateApplication(pid_t(pid))
             AXReadPolicy.apply(to: appElement)
             var windowsRef: CFTypeRef?
-            let windowsStatus = AXUIElementCopyAttributeValue(
+            let windowsStatus = AXReadPolicy.copyAttributeValue(
                 appElement,
                 kAXWindowsAttribute as CFString,
                 &windowsRef
@@ -645,7 +645,7 @@ public enum WindowEnumerator {
             for element in windowElements {
                 AXReadPolicy.apply(to: element)
                 var windowID: CGWindowID = 0
-                let windowIDStatus = AXUIElementGetWindowID(element, &windowID)
+                let windowIDStatus = AXReadPolicy.windowID(element, &windowID)
                 if windowIDStatus == .cannotComplete {
                     continue processLoop
                 }
@@ -663,7 +663,7 @@ public enum WindowEnumerator {
                 processBacked.insert(identity)
 
                 var minimizedRef: CFTypeRef?
-                let minimizedStatus = AXUIElementCopyAttributeValue(
+                let minimizedStatus = AXReadPolicy.copyAttributeValue(
                     element,
                     kAXMinimizedAttribute as CFString,
                     &minimizedRef
@@ -739,7 +739,7 @@ public enum WindowEnumerator {
             AXReadPolicy.apply(to: appElement)
 
             var windowsRef: CFTypeRef?
-            let windowsStatus = AXUIElementCopyAttributeValue(
+            let windowsStatus = AXReadPolicy.copyAttributeValue(
                 appElement,
                 kAXWindowsAttribute as CFString,
                 &windowsRef
@@ -765,7 +765,7 @@ public enum WindowEnumerator {
             for element in windowElements {
                 AXReadPolicy.apply(to: element)
                 var windowID: CGWindowID = 0
-                let windowIDStatus = AXUIElementGetWindowID(element, &windowID)
+                let windowIDStatus = AXReadPolicy.windowID(element, &windowID)
                 if windowIDStatus == .cannotComplete {
                     continue processLoop
                 }
@@ -781,7 +781,7 @@ public enum WindowEnumerator {
                 processBacked.insert(identity)
 
                 var minimizedRef: CFTypeRef?
-                let minimizedStatus = AXUIElementCopyAttributeValue(
+                let minimizedStatus = AXReadPolicy.copyAttributeValue(
                     element,
                     kAXMinimizedAttribute as CFString,
                     &minimizedRef
@@ -796,7 +796,7 @@ public enum WindowEnumerator {
                 }
 
                 var roleRef: CFTypeRef?
-                let roleStatus = AXUIElementCopyAttributeValue(
+                let roleStatus = AXReadPolicy.copyAttributeValue(
                     element,
                     kAXRoleAttribute as CFString,
                     &roleRef
@@ -811,7 +811,7 @@ public enum WindowEnumerator {
                 }
 
                 var subroleRef: CFTypeRef?
-                let subroleStatus = AXUIElementCopyAttributeValue(
+                let subroleStatus = AXReadPolicy.copyAttributeValue(
                     element,
                     kAXSubroleAttribute as CFString,
                     &subroleRef
@@ -826,7 +826,7 @@ public enum WindowEnumerator {
                 }
 
                 var modalRef: CFTypeRef?
-                let modalStatus = AXUIElementCopyAttributeValue(
+                let modalStatus = AXReadPolicy.copyAttributeValue(
                     element,
                     kAXModalAttribute as CFString,
                     &modalRef
@@ -845,7 +845,7 @@ public enum WindowEnumerator {
                 attribute: CFString
             ) -> (identity: WindowIdentity?, status: AXError, shouldBackOff: Bool) {
                 var ref: CFTypeRef?
-                let attributeStatus = AXUIElementCopyAttributeValue(
+                let attributeStatus = AXReadPolicy.copyAttributeValue(
                     appElement,
                     attribute,
                     &ref
@@ -862,7 +862,7 @@ public enum WindowEnumerator {
                 let resolvedElement = resolved as! AXUIElement
                 AXReadPolicy.apply(to: resolvedElement)
                 var resolvedWindowID: CGWindowID = 0
-                let windowIDStatus = AXUIElementGetWindowID(
+                let windowIDStatus = AXReadPolicy.windowID(
                     resolvedElement,
                     &resolvedWindowID
                 )
@@ -970,7 +970,7 @@ public enum WindowEnumerator {
         let appElement = AXUIElementCreateApplication(pid)
         AXReadPolicy.apply(to: appElement)
         var ref: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, attribute, &ref) == .success,
+        guard AXReadPolicy.copyAttributeValue(appElement, attribute, &ref) == .success,
               let resolved = ref
         else {
             return nil
@@ -979,7 +979,7 @@ public enum WindowEnumerator {
         let resolvedElement = resolved as! AXUIElement
         AXReadPolicy.apply(to: resolvedElement)
         var resolvedWindowID: CGWindowID = 0
-        guard AXUIElementGetWindowID(resolvedElement, &resolvedWindowID) == .success else {
+        guard AXReadPolicy.windowID(resolvedElement, &resolvedWindowID) == .success else {
             return nil
         }
         return UInt32(resolvedWindowID)

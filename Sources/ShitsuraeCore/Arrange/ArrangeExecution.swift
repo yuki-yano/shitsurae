@@ -6,10 +6,12 @@ public extension VirtualSpaceEngine {
     /// Layouts whose declared host display is unavailable are reported as
     /// skipped; available layouts continue in caller order. Physical mutations
     /// are serialized; only the primary-hosted layout may apply initial focus.
-    func arrange(
+    package func arrange(
         layoutNames: [String],
-        config: LoadedConfig
+        config: LoadedConfig,
+        token: ArrangeOperationToken
     ) throws -> ArrangeBatchExecutionJSON {
+        try validateMutationAdmission(token: token)
         guard layoutNames.count >= 2 else {
             throw VirtualSpaceEngineError.invalidArrangeBatch(
                 "multi-display arrange requires at least two layouts"
@@ -72,7 +74,8 @@ public extension VirtualSpaceEngine {
                 layoutName: layoutName,
                 spaceID: nil,
                 config: config,
-                applyInitialFocus: hostDisplayIDByLayout[layoutName] == primaryDisplayID
+                applyInitialFocus: hostDisplayIDByLayout[layoutName] == primaryDisplayID,
+                token: token
             )
         }
         return ArrangeBatchExecutionJSON(layouts: results)
@@ -80,11 +83,13 @@ public extension VirtualSpaceEngine {
 
     // MARK: - Dry run
 
-    func arrangeDryRun(
+    package func arrangeDryRun(
         layoutName: String,
         spaceID: Int?,
-        config: LoadedConfig
+        config: LoadedConfig,
+        token: ArrangeOperationToken
     ) throws -> ArrangeDryRunJSON {
+        try validateMutationAdmission(token: token)
         let (layout, hostDisplay, displays) = try arrangeContext(
             layoutName: layoutName,
             spaceID: spaceID,
@@ -92,6 +97,9 @@ public extension VirtualSpaceEngine {
         )
 
         let observation = control.focusedWindowObservation()
+        _ = try LayoutRuntimeValidator.validate(layoutName: layoutName, layout: layout, host: hostDisplay,
+            config: config.config, state: currentState, displays: displays,
+            observation: observation.inventory.isAuthoritative ? observation : nil)
         let plan = ArrangePlanner.buildPlan(
             layoutName: layoutName,
             layout: layout,
@@ -113,12 +121,16 @@ public extension VirtualSpaceEngine {
 
     // MARK: - State only
 
-    func arrangeStateOnly(
+    package func arrangeStateOnly(
         layoutName: String,
         spaceID: Int?,
-        config: LoadedConfig
+        config: LoadedConfig,
+        token: ArrangeOperationToken
     ) throws -> ArrangeExecutionJSON {
-        let (layout, hostDisplay, _) = try arrangeContext(layoutName: layoutName, spaceID: spaceID, config: config)
+        try validateMutationAdmission(token: token)
+        let (layout, hostDisplay, displays) = try arrangeContext(layoutName: layoutName, spaceID: spaceID, config: config)
+        _ = try LayoutRuntimeValidator.validate(layoutName: layoutName, layout: layout, host: hostDisplay,
+            config: config.config, state: currentState, displays: displays, observation: nil)
         let activeSpaceID = resolvedActiveSpaceID(
             requestedSpaceID: spaceID,
             layout: layout,
@@ -126,7 +138,7 @@ public extension VirtualSpaceEngine {
             hostDisplay: hostDisplay
         )
 
-        try bootstrapState(layoutName: layoutName, activeSpaceID: activeSpaceID, config: config)
+        try bootstrapState(layoutName: layoutName, activeSpaceID: activeSpaceID, config: config, token: token)
 
         return ArrangeExecutionJSON(
             layout: layoutName,
@@ -151,13 +163,40 @@ public extension VirtualSpaceEngine {
     /// Full arrange: restore hidden windows → launch/wait/place every window
     /// of the selected scope → rebuild state → re-hide non-active workspaces.
     /// The pre/post processing v1 spread across CommandService lives here.
-    func arrange(
+    package func arrange(
         layoutName: String,
         spaceID: Int?,
         config: LoadedConfig,
-        applyInitialFocus: Bool = true
+        applyInitialFocus: Bool = true,
+        token: ArrangeOperationToken
     ) throws -> ArrangeExecutionJSON {
+        try validateMutationAdmission(token: token)
         logger.log(event: "arrange.start", fields: ["layout": layoutName])
+        func permitsSideEffect() -> Bool {
+            operationCoordinator.permitsNewSideEffect(token: token)
+        }
+        func deadlineResult(_ phase: ArrangeOperationPhase) -> ArrangeExecutionJSON {
+            let interruption = operationCoordinator.interruptionError(token: token)
+                ?? ShitsuraeError(.operationTimedOut, "arrange deadline exceeded during \(phase.rawValue)", subcode: "deadlineExceeded")
+            return ArrangeExecutionJSON(
+                layout: layoutName,
+                result: "failed",
+                subcode: interruption.subcode,
+                unresolvedSlots: [],
+                hardErrors: [
+                    ErrorItem(
+                        code: interruption.code.rawValue,
+                        message: interruption.message,
+                        spaceID: nil,
+                        slot: nil
+                    ),
+                ],
+                softErrors: [],
+                skipped: [],
+                warnings: [],
+                exitCode: interruption.code.rawValue
+            )
+        }
 
         guard control.accessibilityGranted() else {
             return ArrangeExecutionJSON(
@@ -180,31 +219,72 @@ public extension VirtualSpaceEngine {
             )
         }
 
+        guard currentState.pendingLayoutTransition == nil else {
+            throw ShitsuraeError(
+                .operationBlocked,
+                "window recovery is required before arranging another layout",
+                subcode: "recoveryRequired"
+            )
+        }
+
         let (layout, hostDisplay, displays) = try arrangeContext(
             layoutName: layoutName,
             spaceID: spaceID,
             config: config
         )
         let arrangeObservation = control.focusedWindowObservation()
+        guard arrangeObservation.inventory.isAuthoritative else {
+            return restoreIncompleteResult(layoutName: layoutName)
+        }
 
-        // Restore only the layout this arrange replaces on ITS display —
-        // never another display's workspace (arrange calendar must not
-        // restore the primary layout's hidden windows).
-        if let replacedLayoutName = currentState.activeWorkspace(displayID: hostDisplay.id)?.layoutName,
-           replacedLayoutName != layoutName
-        {
-            let previousEntries = currentState.slots(layoutName: replacedLayoutName)
-            let previousHiddenEntries = previousEntries.filter(\.visibilityState.isManagedHidden)
-            guard restoreHiddenEntriesBeforeArrange(
-                previousHiddenEntries,
-                registryEntries: previousEntries.map(\.registryEntry),
-                recoveryLayout: layout,
-                hostDisplay: hostDisplay,
-                displays: displays,
-                preferredVisibleFramesByFingerprint: [:]
-            ) else {
-                return restoreIncompleteResult(layoutName: layoutName)
-            }
+        let replacementLayoutNames = Set(currentState.activeWorkspaces.compactMap { workspace -> String? in
+            if workspace.layoutName == layoutName { return nil }
+            if workspace.displayID == hostDisplay.id { return workspace.layoutName }
+            guard let previousLayout = config.config.layouts[workspace.layoutName],
+                  let resolved = DisplayResolver.hostDisplay(
+                      layout: previousLayout,
+                      config: config.config,
+                      displays: displays
+                  ),
+                  resolved.id == hostDisplay.id
+            else { return nil }
+            return workspace.layoutName
+        })
+
+        guard permitsSideEffect() else {
+            return deadlineResult(.preflight)
+        }
+
+        _ = try LayoutRuntimeValidator.validate(layoutName: layoutName, layout: layout, host: hostDisplay,
+            config: config.config, state: currentState, displays: displays, observation: arrangeObservation)
+        let localRequestID = token.requestID
+        let targetDigest = ConfigDigest.workspace(layoutName: layoutName, config: config.config)
+        var journaled = currentState
+        journaled.pendingLayoutTransition = PendingLayoutTransition(
+            requestID: localRequestID,
+            scopeKind: .local,
+            phase: .precommit,
+            sourceLayoutNames: replacementLayoutNames.sorted(),
+            targetLayoutNames: [layoutName],
+            sourceSelectedSet: currentState.selectedLayoutSet,
+            targetSet: nil,
+            definitionDigest: targetDigest,
+            topologyDigest: LayoutSetPlanner.topologyDigest(displays)
+        )
+        try replaceState(journaled)
+        do {
+            operationCoordinator.update(token: token, phase: .journaled, layout: layoutName)
+        }
+
+        let replacementEntries = currentState.slots.filter {
+            replacementLayoutNames.contains($0.layoutName)
+        }
+        let replacementRestore = try restoreEntriesForTransition(replacementEntries, token: token)
+        guard permitsSideEffect() else {
+            return deadlineResult(.releasing)
+        }
+        guard replacementRestore.unresolvedEntryIDs.isEmpty else {
+            return restoreIncompleteResult(layoutName: layoutName)
         }
 
         let plan = ArrangePlanner.buildPlan(
@@ -264,33 +344,38 @@ public extension VirtualSpaceEngine {
         // Restoring hidden entries from another requested space (or adopted /
         // ignored entries) can both mutate out-of-scope windows and make an
         // otherwise independent arrange fail on an AX-invisible window.
-        guard restoreHiddenWindowsBeforeArrange(
+        let restoredHiddenWindows = restoreHiddenWindowsBeforeArrange(
             layoutName: layoutName,
             layout: layout,
             arrangedFingerprints: arrangedFingerprints,
             arrangedFramesByFingerprint: arrangedFramesByFingerprint,
             configuredFingerprints: configuredFingerprints,
-            config: config
-        ) else {
+            config: config,
+            token: token
+        )
+        guard restoredHiddenWindows else {
+            if !permitsSideEffect() {
+                return deadlineResult(.releasing)
+            }
             return restoreIncompleteResult(layoutName: layoutName)
         }
 
         // Arrange is the user-initiated takeover: display affinity does not
         // apply, but windows bound to a *different-display* workspace's
         // layout slots stay untouchable.
-        let arrangeExcludedIdentities = crossLayoutExcludedIdentities(
-            layoutName: layoutName,
-            hostDisplayID: hostDisplay.id,
-            windows: [],
-            includeDisplayAffinity: false
-        )
+        let arrangeExcludedIdentities = ArrangeWindowSelection.protectedIdentities(
+            state: currentState, layoutName: layoutName, retiring: replacementLayoutNames)
 
         var softErrors: [ErrorItem] = []
         var boundWindows: [String: WindowSnapshot] = [:] // fingerprint → window
         var provisionalBindings: [String: WindowSnapshot] = [:]
         var frames: [String: ResolvedFrame] = [:]
+        var placementUnverified = false
 
         for step in plan.steps {
+            guard permitsSideEffect() else {
+                return deadlineResult(.waitingForWindows)
+            }
             let definition = step.definition
             let launch = definition.launch ?? true
             let fingerprint = SlotEntry.fingerprint(
@@ -335,7 +420,8 @@ public extension VirtualSpaceEngine {
                 registryEntries: arrangeRegistryEntries,
                 ignoreRules: config.config.ignore?.apply,
                 excludedIdentities: arrangeExcludedIdentities,
-                provisionalBindings: &provisionalBindings
+                provisionalBindings: &provisionalBindings,
+                token: token
             ) else {
                 softErrors.append(
                     ErrorItem(
@@ -349,7 +435,21 @@ public extension VirtualSpaceEngine {
             }
 
             if let resolvedFrame = step.resolvedFrame {
+                guard permitsSideEffect() else {
+                    return deadlineResult(.placing)
+                }
+                do {
+                    operationCoordinator.update(
+                        token: token,
+                        phase: .placing,
+                        layout: layoutName,
+                        space: step.spaceID,
+                        slot: definition.slot,
+                        inFlight: true
+                    )
+                }
                 if !setFrame(window: window, frame: resolvedFrame) {
+                    placementUnverified = true
                     softErrors.append(
                         ErrorItem(
                             code: ErrorCode.operationTimedOut.rawValue,
@@ -360,35 +460,19 @@ public extension VirtualSpaceEngine {
                     )
                     // Still bind the window: placement failed but tracking works.
                 }
+                do {
+                    operationCoordinator.update(
+                        token: token,
+                        phase: .placing,
+                        layout: layoutName,
+                        space: step.spaceID,
+                        slot: definition.slot
+                    )
+                }
             }
 
             boundWindows[fingerprint] = window
             frames[fingerprint] = step.resolvedFrame ?? window.frame
-        }
-
-        if applyInitialFocus,
-           let initialFocusSlot = layout.initialFocus?.slot,
-           let focusStep = plan.steps.first(where: { $0.definition.slot == initialFocusSlot })
-        {
-            let fingerprint = SlotEntry.fingerprint(
-                layoutName: layoutName,
-                spaceID: focusStep.spaceID,
-                definition: focusStep.definition
-            )
-            if let window = boundWindows[fingerprint] {
-                do {
-                    try applyFocus(window: window)
-                } catch {
-                    softErrors.append(
-                        ErrorItem(
-                            code: ErrorCode.operationTimedOut.rawValue,
-                            message: "failed to focus initial slot",
-                            spaceID: focusStep.spaceID,
-                            slot: focusStep.definition.slot
-                        )
-                    )
-                }
-            }
         }
 
         let postArrangeObservation = control.focusedWindowObservation()
@@ -406,8 +490,12 @@ public extension VirtualSpaceEngine {
         let ignoredFingerprints = plan.ignoredDefinitionFingerprints
             .union(postArrangeIgnoredFingerprints)
 
+        guard permitsSideEffect() else {
+            return deadlineResult(.placing)
+        }
+
         // Rebuild state for the arranged scope, binding resolved windows.
-        try rebuildStateAfterArrange(
+        let unverifiedAdopted = try rebuildStateAfterArrange(
             layoutName: layoutName,
             layout: layout,
             arrangedSpaceID: spaceID,
@@ -415,14 +503,23 @@ public extension VirtualSpaceEngine {
             frames: frames,
             ignoredFingerprints: ignoredFingerprints,
             config: config,
-            hostDisplay: hostDisplay
+            hostDisplay: hostDisplay,
+            retiringLayoutNames: replacementLayoutNames,
+            releasedIdentities: replacementRestore.live,
+            observation: postArrangeObservation
         )
+        placementUnverified = !unverifiedAdopted.isEmpty || placementUnverified
+        softErrors.append(contentsOf: unverifiedAdopted.map {
+            ErrorItem(code: ErrorCode.partialSuccess.rawValue, message: $0.reason,
+                spaceID: $0.entry.spaceID, slot: $0.entry.slot)
+        })
 
         // Adopt windows no layout slot claimed into the active workspace so
         // they are tracked (and hidden/shown) from the start.
         _ = try? adoptUntrackedWindows(
             config: config,
-            additionalIgnoreRules: config.config.ignore?.apply
+            additionalIgnoreRules: config.config.ignore?.apply,
+            token: token
         )
 
         // Re-hide everything outside the active workspace of THIS layout.
@@ -438,11 +535,73 @@ public extension VirtualSpaceEngine {
             config: config,
             reconcile: true,
             adoptionIgnoreRules: config.config.ignore?.apply,
-            shouldFocusTarget: applyInitialFocus
+            shouldFocusTarget: applyInitialFocus && layout.initialFocus == nil,
+            allowLayoutTransition: true,
+            token: token
         )
 
+        guard permitsSideEffect() else {
+            return deadlineResult(.visibility)
+        }
+
+        if applyInitialFocus,
+           let initialFocusSlot = layout.initialFocus?.slot,
+           let focusStep = plan.steps.first(where: {
+               $0.spaceID == activeSpaceID && $0.definition.slot == initialFocusSlot
+           })
+        {
+            let fingerprint = SlotEntry.fingerprint(
+                layoutName: layoutName,
+                spaceID: focusStep.spaceID,
+                definition: focusStep.definition
+            )
+            if let window = boundWindows[fingerprint] {
+                do {
+                    do {
+                        operationCoordinator.update(
+                            token: token,
+                            phase: .focusing,
+                            layout: layoutName,
+                            space: focusStep.spaceID,
+                            slot: focusStep.definition.slot,
+                            inFlight: true
+                        )
+                    }
+                    try applyFocus(window: window, token: token)
+                    do {
+                        operationCoordinator.update(
+                            token: token,
+                            phase: .focusing,
+                            layout: layoutName,
+                            space: focusStep.spaceID,
+                            slot: focusStep.definition.slot
+                        )
+                    }
+                } catch {
+                    softErrors.append(
+                        ErrorItem(
+                            code: ErrorCode.operationTimedOut.rawValue,
+                            message: "failed to focus initial slot",
+                            spaceID: focusStep.spaceID,
+                            slot: focusStep.definition.slot
+                        )
+                    )
+                }
+            } else {
+                softErrors.append(
+                    ErrorItem(
+                        code: ErrorCode.targetWindowNotFound.rawValue,
+                        message: "initial focus window was not resolved",
+                        spaceID: focusStep.spaceID,
+                        slot: focusStep.definition.slot
+                    )
+                )
+            }
+        }
+
         let unresolvedSlots = switchOutcome.unresolvedSlots
-        let completedWithoutGaps = softErrors.isEmpty && unresolvedSlots.isEmpty
+        let completedWithoutGaps = softErrors.isEmpty && unresolvedSlots.isEmpty && switchOutcome.converged
+            && !placementUnverified && !switchOutcome.physicalStateUnverified
         let result = completedWithoutGaps ? "success" : "partial"
         let exitCode = completedWithoutGaps
             ? ErrorCode.success.rawValue
@@ -456,6 +615,16 @@ public extension VirtualSpaceEngine {
                 "exitCode": exitCode,
             ]
         )
+
+        guard permitsSideEffect() else {
+            return deadlineResult(.finalizing)
+        }
+
+        var finalized = currentState
+        if !placementUnverified && !switchOutcome.physicalStateUnverified {
+            finalized.pendingLayoutTransition = nil
+            try replaceState(finalized)
+        }
 
         return ArrangeExecutionJSON(
             layout: layoutName,
@@ -528,7 +697,8 @@ public extension VirtualSpaceEngine {
         arrangedFingerprints: Set<String>,
         arrangedFramesByFingerprint: [String: ResolvedFrame],
         configuredFingerprints: Set<String>,
-        config: LoadedConfig
+        config: LoadedConfig,
+        token: ArrangeOperationToken
     ) -> Bool {
         let displays = control.displays()
         guard let hostDisplay = DisplayResolver.hostDisplay(
@@ -571,7 +741,8 @@ public extension VirtualSpaceEngine {
             recoveryLayout: layout,
             hostDisplay: hostDisplay,
             displays: displays,
-            preferredVisibleFramesByFingerprint: arrangedFramesByFingerprint
+            preferredVisibleFramesByFingerprint: arrangedFramesByFingerprint,
+            token: token
         )
     }
 
@@ -581,7 +752,8 @@ public extension VirtualSpaceEngine {
         recoveryLayout: LayoutDefinition,
         hostDisplay: DisplayInfo,
         displays: [DisplayInfo],
-        preferredVisibleFramesByFingerprint: [String: ResolvedFrame]
+        preferredVisibleFramesByFingerprint: [String: ResolvedFrame],
+        token: ArrangeOperationToken
     ) -> Bool {
         guard !hiddenEntries.isEmpty else { return true }
 
@@ -622,12 +794,25 @@ public extension VirtualSpaceEngine {
             plans.append(plan)
         }
 
-        let applied = VisibilityApplier.apply(plans: plans, control: control, logger: logger)
+        let applied = VisibilityApplier.apply(
+            plans: plans,
+            control: control,
+            logger: logger,
+            permitsNewSideEffect: {
+                operationCoordinator.permitsNewSideEffect(token: token)
+            }
+        )
         let convergence = VisibilityApplier.converge(
             changes: applied,
             control: control,
             logger: logger,
-            retryDelaysMS: retryDelaysMS
+            retryDelaysMS: retryDelaysMS,
+            permitsNewSideEffect: {
+                operationCoordinator.permitsNewSideEffect(token: token)
+            },
+            remainingBudgetMS: {
+                operationCoordinator.remainingBudgetMS(token: token)
+            }
         )
         guard !convergence.hasPending,
               convergence.changes.allSatisfy({ $0.effectiveEntry == $0.desiredEntry })
@@ -635,6 +820,9 @@ public extension VirtualSpaceEngine {
             return false
         }
 
+        if !operationCoordinator.permitsNewSideEffect(token: token) {
+            return false
+        }
         var newState = currentState
         var restoredEntries = Dictionary(uniqueKeysWithValues: convergence.changes.map {
             ($0.effectiveEntry.id, $0.effectiveEntry)
@@ -686,8 +874,11 @@ public extension VirtualSpaceEngine {
         frames: [String: ResolvedFrame],
         ignoredFingerprints: Set<String>,
         config: LoadedConfig,
-        hostDisplay: DisplayInfo
-    ) throws {
+        hostDisplay: DisplayInfo,
+        retiringLayoutNames: Set<String>,
+        releasedIdentities: Set<WindowIdentity>,
+        observation: WindowObservation
+    ) throws -> [RetainedAdoptedWindows.UnverifiedEntry] {
         let existing = currentState.slots(layoutName: layoutName)
         let existingByFingerprint = Dictionary(
             existing.map { ($0.definitionFingerprint, $0) },
@@ -745,13 +936,15 @@ public extension VirtualSpaceEngine {
         }
 
         let claimedIdentities = Set(boundWindows.values.map(\.identity))
-        let adopted = existing.filter {
-            $0.origin == .adopted
-                && ($0.boundIdentity.map { !claimedIdentities.contains($0) } ?? true)
-        }
+        let targetSpaceID = resolvedActiveSpaceID(requestedSpaceID: arrangedSpaceID, layout: layout,
+            layoutName: layoutName, hostDisplay: hostDisplay)
+        let adopted = RetainedAdoptedWindows.retain(existing, layout: layout, targetSpaceID: targetSpaceID,
+            claimed: claimedIdentities, observation: observation)
 
         var newState = currentState
-        newState.slots = newState.slots.filter { $0.layoutName != layoutName } + entries + adopted
+        newState.slots = newState.slots.filter {
+            $0.layoutName != layoutName && !retiringLayoutNames.contains($0.layoutName)
+        } + entries + adopted.entries
         // Layout rules beat other workspaces' adopted bindings: a window this
         // arrange claimed leaves any adopted entry another workspace held for
         // it (the reclaim half of the cross-layout ownership rules).
@@ -760,6 +953,9 @@ public extension VirtualSpaceEngine {
                 && entry.origin == .adopted
                 && (entry.boundIdentity.map { claimedIdentities.contains($0) } ?? false)
         }
+        newState.releasedWindowIdentities.formUnion(releasedIdentities.subtracting(claimedIdentities))
+        newState.releasedWindowIdentities.subtract(claimedIdentities)
+        newState.activeWorkspaces.removeAll { retiringLayoutNames.contains($0.layoutName) }
         newState.configGeneration = config.configGeneration
         let activeSpaceID = resolvedActiveSpaceID(
             requestedSpaceID: arrangedSpaceID,
@@ -770,11 +966,32 @@ public extension VirtualSpaceEngine {
         newState.upsertActiveWorkspace(
             displayID: hostDisplay.id,
             layoutName: layoutName,
-            spaceID: activeSpaceID
+            spaceID: activeSpaceID,
+            appliedDefinitionDigest: ConfigDigest.workspace(layoutName: layoutName, config: config.config)
         )
+        if let selected = newState.selectedLayoutSet {
+            let activeNames = Set(newState.activeWorkspaces.map(\.layoutName))
+            if activeNames != Set(selected.memberNames) {
+                newState.selectedLayoutSet = nil
+            } else if let currentDefinition = config.config.layoutSets[selected.name],
+                      Set(currentDefinition.layouts) == Set(selected.memberNames),
+                      currentDefinition.layouts.allSatisfy({ member in
+                          newState.activeWorkspace(layoutName: member)?.appliedDefinitionDigest
+                              == ConfigDigest.workspace(layoutName: member, config: config.config)
+                      })
+            {
+                newState.selectedLayoutSet = SelectedLayoutSet(
+                    name: selected.name,
+                    memberNames: currentDefinition.layouts.sorted(),
+                    definitionDigest: ConfigDigest.layoutSet(name: selected.name, config: config.config)
+                )
+            }
+        }
+        newState.pendingLayoutTransition?.phase = .postcommit
         newState.liveArrangeRecoveryRequired = false
 
         try replaceState(newState)
+        return adopted.unverified
     }
 
     private func waitForWindow(
@@ -787,12 +1004,17 @@ public extension VirtualSpaceEngine {
         registryEntries: [(fingerprint: String, entry: WindowRegistry.Entry)],
         ignoreRules: IgnoreRuleSet?,
         excludedIdentities: Set<WindowIdentity>,
-        provisionalBindings: inout [String: WindowSnapshot]
+        provisionalBindings: inout [String: WindowSnapshot],
+        token: ArrangeOperationToken
     ) -> WindowSnapshot? {
-        let deadline = Date().addingTimeInterval(TimeInterval(arrangeWaitTimeoutMS) / 1000)
+        let started = DispatchTime.now().uptimeNanoseconds
+        let localBudgetNS = UInt64(max(0, arrangeWaitTimeoutMS)) * 1_000_000
         var preferredFullscreenWindow: WindowSnapshot?
 
-        while Date() <= deadline {
+        while DispatchTime.now().uptimeNanoseconds <= started &+ localBudgetNS {
+            if !operationCoordinator.permitsNewSideEffect(token: token) {
+                break
+            }
             // index rules must see the FULL pool: shrinking it per bound
             // window shifts the index positions and breaks index:2 after
             // index:1 has bound (same bug class as v1's switch path).
@@ -800,15 +1022,14 @@ public extension VirtualSpaceEngine {
             let observation = control.focusedWindowObservation()
             let inventory = observation.inventory
             guard inventory.isAuthoritative else {
-                let remainingMS = Int(deadline.timeIntervalSinceNow * 1000)
+                let elapsedNS = DispatchTime.now().uptimeNanoseconds - started
+                let remainingMS = Int(localBudgetNS > elapsedNS ? (localBudgetNS - elapsedNS) / 1_000_000 : 0)
                 if remainingMS <= 0 { break }
-                control.sleep(milliseconds: min(100, remainingMS))
+                let operationRemaining = operationCoordinator.remainingBudgetMS(token: token)
+                control.sleep(milliseconds: min(100, min(remainingMS, operationRemaining)))
                 continue
             }
-            let manageable = WindowEligibility.geometryCandidates(in: observation).filter {
-                !excludedIdentities.contains($0.identity)
-                    && !PolicyEngine.matchesIgnoreRule(window: $0, rules: ignoreRules)
-            }
+            let manageable = ArrangeWindowSelection.candidates(observation: observation, ignore: ignoreRules, excluded: excludedIdentities)
             let entries = registryEntries.map { item -> WindowRegistry.Entry in
                 guard let bound = provisionalBindings[item.fingerprint] else {
                     return item.entry
@@ -867,7 +1088,8 @@ public extension VirtualSpaceEngine {
                 }
             }
 
-            let remainingMS = Int(deadline.timeIntervalSinceNow * 1000)
+            let elapsedNS = DispatchTime.now().uptimeNanoseconds - started
+            let remainingMS = Int(localBudgetNS > elapsedNS ? (localBudgetNS - elapsedNS) / 1_000_000 : 0)
             if remainingMS <= 0 {
                 // Never steal a sibling while the exact binding is alive. If
                 // the only reason the exact window was excluded is native
@@ -878,7 +1100,8 @@ public extension VirtualSpaceEngine {
                 }
                 break
             }
-            control.sleep(milliseconds: min(100, remainingMS))
+            let operationRemaining = operationCoordinator.remainingBudgetMS(token: token)
+            control.sleep(milliseconds: min(100, min(remainingMS, operationRemaining)))
         }
 
         logger.error(event: "arrange.waitWindow.timeout", fields: ["spaceID": spaceID, "slot": slot])
@@ -891,36 +1114,8 @@ public extension VirtualSpaceEngine {
         config: LoadedConfig,
         excluding excludedFingerprints: Set<String>
     ) -> [(fingerprint: String, entry: WindowRegistry.Entry)] {
-        let existingByFingerprint = Dictionary(
-            currentState.slots(layoutName: layoutName)
-                .filter { $0.origin == .layout }
-                .map { ($0.definitionFingerprint, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
-
-        return layout.spaces.flatMap { space in
-            space.windows.compactMap { definition -> (fingerprint: String, entry: WindowRegistry.Entry)? in
-                guard !PolicyEngine.matchesIgnoreAppRule(
-                    windowDefinition: definition,
-                    rules: config.config.ignore?.apply
-                ) else {
-                    return nil
-                }
-                let fresh = SlotEntry.makeEntry(
-                    layoutName: layoutName,
-                    spaceID: space.spaceID,
-                    definition: definition
-                )
-                guard !excludedFingerprints.contains(fresh.definitionFingerprint) else {
-                    return nil
-                }
-                return (
-                    fingerprint: fresh.definitionFingerprint,
-                    entry: existingByFingerprint[fresh.definitionFingerprint]?.registryEntry
-                        ?? fresh.registryEntry
-                )
-            }
-        }
+        ArrangeWindowSelection.registryEntries(layoutName: layoutName, layout: layout,
+            config: config.config, state: currentState, excluding: excludedFingerprints)
     }
 
     private func selectWindow(

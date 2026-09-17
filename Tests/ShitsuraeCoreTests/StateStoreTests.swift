@@ -108,7 +108,7 @@ struct StateStoreTests {
         try store.saveStrict(state: state)
         let loaded = try store.loadStrict()
 
-        #expect(loaded.schemaVersion == 6)
+        #expect(loaded.schemaVersion == 7)
         #expect(loaded.activeLayoutName == "work")
         #expect(loaded.activeSpaceID(displayID: "uuid-main") == 2)
         #expect(loaded.primaryActiveSpaceID == 2)

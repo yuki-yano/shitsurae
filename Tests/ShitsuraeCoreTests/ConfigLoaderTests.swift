@@ -229,6 +229,62 @@ struct ConfigLoaderTests {
         }
     }
 
+    @Test func mergesLayoutSetsAcrossFiles() throws {
+        let dir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try write(basicLayout, as: "01-basic.yaml", in: dir)
+        try write(
+            """
+            layoutSets:
+              home:
+                layouts: [work]
+            """,
+            as: "02-home.yaml",
+            in: dir
+        )
+        try write(
+            """
+            layouts:
+              mobile:
+                spaces:
+                  - spaceID: 1
+                    windows: []
+            layoutSets:
+              travel:
+                layouts: [mobile]
+            """,
+            as: "03-travel.yaml",
+            in: dir
+        )
+
+        let loaded = try ConfigLoader().load(from: dir)
+        #expect(loaded.config.layoutSets.keys.sorted() == ["home", "travel"])
+        #expect(loaded.config.layoutSets["home"]?.layouts == ["work"])
+    }
+
+    @Test func rejectsDuplicateLayoutSetAcrossFiles() throws {
+        let dir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try write(basicLayout, as: "01-basic.yaml", in: dir)
+        let layoutSet = """
+        layoutSets:
+          home:
+            layouts: [work]
+        """
+        try write(layoutSet, as: "02-home.yaml", in: dir)
+        try write(layoutSet, as: "03-duplicate-home.yaml", in: dir)
+
+        do {
+            _ = try ConfigLoader().load(from: dir)
+            Issue.record("expected ConfigLoadError")
+        } catch let error as ConfigLoadError {
+            #expect(error.code == .configMergeConflict)
+            #expect(error.errors.contains { $0.message.contains("layout set") })
+        } catch {
+            Issue.record("unexpected error type: \(error)")
+        }
+    }
+
     @Test func mergesIgnoreAppsAsUnion() throws {
         let dir = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
