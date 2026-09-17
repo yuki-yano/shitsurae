@@ -197,9 +197,10 @@ struct CommandRouterTests {
         let (router, engine, control, cleanup) = try makeRouter(windows: standardWindows())
         defer { cleanup() }
         let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
         control.onFrameMutationAttempt = {
             control.onFrameMutationAttempt = nil
-            _ = release.wait(timeout: .now() + 1)
+            release.wait()
         }
         var request = CommandRequest(command: "arrangeSet")
         request.requestID = "active-duplicate"
@@ -214,7 +215,7 @@ struct CommandRouterTests {
             }
             try await Task.sleep(for: .milliseconds(5))
         }
-        #expect(observedInFlight)
+        try #require(observedInFlight)
 
         let duplicateData = await router.handle(requestData: requestData)
         let duplicate = try #require(

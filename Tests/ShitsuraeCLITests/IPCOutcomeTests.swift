@@ -56,7 +56,9 @@ private final class CLIOutcomeSocket: @unchecked Sendable {
                             "payload": ["requestID": request.requestID!, "result": "success"]]) + Data("\n".utf8)
                     }
                     if case .slowChunks = behavior {
-                        for byte in response { var value = byte; _ = Darwin.write(client, &value, 1); Thread.sleep(forTimeInterval: 0.012) }
+                        _ = response.prefix(1).withUnsafeBytes { Darwin.write(client, $0.baseAddress, $0.count) }
+                        Thread.sleep(forTimeInterval: 1.1)
+                        _ = response.dropFirst().withUnsafeBytes { Darwin.write(client, $0.baseAddress, $0.count) }
                     } else { _ = response.withUnsafeBytes { Darwin.write(client, $0.baseAddress, $0.count) } }
                 }
                 Darwin.close(client)
