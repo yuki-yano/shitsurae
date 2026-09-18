@@ -514,10 +514,11 @@ struct LayoutSetTests {
         )
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let releaseWrite = DispatchSemaphore(value: 0)
+        defer { releaseWrite.signal() }
         let enteredWrite = TestSignal()
         control.onFrameMutationAttempt = {
             enteredWrite.signal()
-            _ = releaseWrite.wait(timeout: .now() + 2)
+            releaseWrite.wait()
         }
         let token = try engine.operationCoordinator.tryAdmit(
             requestID: "blocking-write",
@@ -540,7 +541,7 @@ struct LayoutSetTests {
             }
             try await Task.sleep(for: .milliseconds(5))
         }
-        #expect(observedInFlight)
+        try #require(observedInFlight)
         clock.advance(milliseconds: 61_000)
 
         let status = engine.operationCoordinator.status()
