@@ -429,15 +429,45 @@ struct ArrangeView: View {
                         .foregroundStyle(.secondary)
                     Button("Open Config Directory") { model.openConfigDirectory() }
                 } else {
-                    Picker("Layout Set", selection: $selectedLayoutSetName) {
-                        ForEach(model.layoutSetPresentations) { item in
-                            Text(item.name).tag(item.name as String?)
+                    HStack(spacing: 12) {
+                        Spacer()
+                        Picker("Layout Set", selection: $selectedLayoutSetName) {
+                            ForEach(model.layoutSetPresentations) { item in
+                                Text(item.name).tag(item.name as String?)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: 280, alignment: .trailing)
+                        .accessibilityLabel("Layout Set")
+                        .accessibilityHint("Selects a layout set without applying it")
+
+                        if let item = selectedLayoutSet {
+                            Button("Apply Layout Set", systemImage: "rectangle.3.group") {
+                                model.applyLayoutSetFromMainWindow(item.name)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!item.canApply || operationRunning)
+                            .accessibilityHint("Replaces the complete managed layout scope with this set")
                         }
                     }
-                    .accessibilityLabel("Layout Set")
-                    .accessibilityHint("Selects a layout set without applying it")
 
                     if let item = selectedLayoutSet {
+                        if let reason = item.blockingReason {
+                            Label(reason, systemImage: "exclamationmark.triangle")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                        if item.needsReapply {
+                            Label("Needs Reapply", systemImage: "arrow.clockwise")
+                                .font(.caption.bold())
+                                .foregroundStyle(.orange)
+                        }
+                        Text("\(item.releasedCount) currently managed windows may be shown on the primary display and released from management. Windows claimed by the new set are transferred instead.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Divider()
+
                         ForEach(item.members) { member in
                             HStack {
                                 Text(member.layoutName).font(.subheadline.bold())
@@ -464,28 +494,6 @@ struct ArrangeView: View {
                                     layout: layout
                                 )
                             }
-                        }
-                        Text("\(item.releasedCount) currently managed windows may be shown on the primary display and released from management. Windows claimed by the new set are transferred instead.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        if let reason = item.blockingReason {
-                            Label(reason, systemImage: "exclamationmark.triangle")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                        }
-                        if item.needsReapply {
-                            Label("Needs Reapply", systemImage: "arrow.clockwise")
-                                .font(.caption.bold())
-                                .foregroundStyle(.orange)
-                        }
-                        HStack {
-                            Spacer()
-                            Button("Apply Layout Set", systemImage: "rectangle.3.group") {
-                                model.applyLayoutSetFromMainWindow(item.name)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(!item.canApply || operationRunning)
-                            .accessibilityHint("Replaces the complete managed layout scope with this set")
                         }
                     }
                 }
