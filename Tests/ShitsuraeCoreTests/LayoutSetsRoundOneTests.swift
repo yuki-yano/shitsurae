@@ -269,10 +269,10 @@ struct LayoutSetsRoundOneTests {
         let (e, c, _, url) = try engine([w]); defer { remove(url) }
         let entered = TestSignal(), release = DispatchSemaphore(value: 0)
         defer { release.signal() }
-        c.onFrameMutationAttempt = { entered.signal(); _ = release.wait(timeout: .now() + 3) }
+        c.onFrameMutationAttempt = { entered.signal(); release.wait() }
         let active = Task { try await e.arrangeSet(setName: "one", requestID: "active", config: cfg) }
         for _ in 0..<200 { if entered.isSet { break }; try await Task.sleep(for: .milliseconds(5)) }
-        #expect(entered.isSet)
+        try #require(entered.isSet)
         #expect(e.operationCoordinator.status().active?.inFlight == true)
         let calls: [@Sendable () async throws -> Void] = [
             { _ = try await e.arrange(layoutName: "main", spaceID: nil, config: cfg) },

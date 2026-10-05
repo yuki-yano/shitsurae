@@ -23,7 +23,7 @@ private final class LifecycleWindowControl: WindowControl, @unchecked Sendable {
         inventoryBlocked = blocking
         lock.unlock()
         if blocking {
-            _ = release.wait(timeout: .now() + 3)
+            release.wait()
             lock.lock(); inventoryBlocked = false; lock.unlock()
         }
         return .available(windows)
