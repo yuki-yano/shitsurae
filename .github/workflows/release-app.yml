@@ -67,8 +67,28 @@ jobs:
 
           echo "value=${VERSION}" >> "${GITHUB_OUTPUT}"
 
+      - name: Resolve Swift cache environment
+        id: swift_cache
+        shell: bash
+        run: |
+          SWIFT_CACHE_SWIFT="$(swift --version 2>&1)"
+          SWIFT_CACHE_XCODE="$(xcodebuild -version)"
+          SWIFT_CACHE_SDK="$(xcrun --show-sdk-version)"
+          SWIFT_CACHE_OS="$(sw_vers -productVersion)"
+          TOOLCHAIN_HASH="$(printf '%s\n' "${SWIFT_CACHE_SWIFT}" "${SWIFT_CACHE_XCODE}" "${SWIFT_CACHE_SDK}" "${SWIFT_CACHE_OS}" | shasum -a 256 | awk '{ print $1 }')"
+          printf 'toolchain=%s\n' "${TOOLCHAIN_HASH}" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore Swift dependencies and debug build outputs
+        id: swift_cache_restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .build
+          key: swift-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.swift_cache.outputs.toolchain }}-default-debug-noindex-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ hashFiles('Sources/**', 'Tests/**', '.github/workflows/**', 'Scripts/**') }}
+          restore-keys: |
+            swift-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.swift_cache.outputs.toolchain }}-default-debug-noindex-${{ hashFiles('Package.swift', 'Package.resolved') }}-
+
       - name: Run Swift tests
-        run: env -u LIBRARY_PATH swift test
+        run: env -u LIBRARY_PATH swift test --disable-index-store
 
       - name: Build app release asset
         env:

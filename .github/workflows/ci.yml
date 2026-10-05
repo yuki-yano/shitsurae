@@ -20,10 +20,55 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
+      - name: Resolve Swift cache environment
+        id: swift_cache
+        shell: bash
+        run: |
+          SWIFT_CACHE_SWIFT="$(swift --version 2>&1)"
+          SWIFT_CACHE_XCODE="$(xcodebuild -version)"
+          SWIFT_CACHE_SDK="$(xcrun --show-sdk-version)"
+          SWIFT_CACHE_OS="$(sw_vers -productVersion)"
+          TOOLCHAIN_HASH="$(printf '%s\n' "${SWIFT_CACHE_SWIFT}" "${SWIFT_CACHE_XCODE}" "${SWIFT_CACHE_SDK}" "${SWIFT_CACHE_OS}" | shasum -a 256 | awk '{ print $1 }')"
+          printf 'toolchain=%s\n' "${TOOLCHAIN_HASH}" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore Swift dependencies and debug build outputs
+        id: swift_cache_restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .build
+          key: swift-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.swift_cache.outputs.toolchain }}-default-debug-noindex-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ hashFiles('Sources/**', 'Tests/**', '.github/workflows/**', 'Scripts/**') }}
+          restore-keys: |
+            swift-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.swift_cache.outputs.toolchain }}-default-debug-noindex-${{ hashFiles('Package.swift', 'Package.resolved') }}-
+
       - name: Run Swift tests
-        run: env -u LIBRARY_PATH swift test
+        run: env -u LIBRARY_PATH swift test --disable-index-store
+
+      - name: Resolve schema tool cache environment
+        id: schema_tools
+        shell: bash
+        run: |
+          SCHEMA_NODE_VERSION="$(node --version)"
+          SCHEMA_NPM_VERSION="$(npm --version)"
+          printf 'version=%s-%s\n' "${SCHEMA_NODE_VERSION}" "${SCHEMA_NPM_VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Cache schema validator packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.npm/_cacache
+            ~/.npm/_npx
+          key: schema-ajv-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.schema_tools.outputs.version }}-${{ hashFiles('Scripts/validate-config-schema.sh') }}
 
       - name: Validate config schema and samples
         run: |
           brew install gojq
           ./Scripts/validate-config-schema.sh
+
+      # Keep new compiled snapshots on main; PRs reuse them without saving
+      # branch-scoped build archives that other branches cannot restore.
+      - name: Save Swift dependencies and debug build outputs
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.swift_cache_restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .build
+          key: ${{ steps.swift_cache_restore.outputs.cache-primary-key }}

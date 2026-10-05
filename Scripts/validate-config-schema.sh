@@ -12,18 +12,15 @@ schema="schemas/shitsurae-config.schema.json"
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
 
-npx --yes ajv-cli compile -s "$schema" --spec=draft2020
+npx --yes ajv-cli@5.0.0 compile -s "$schema" --spec=draft2020
 
-status=0
+# Preserve each sample path in diagnostics while validating all converted
+# samples in one invocation.
 for sample in samples/xdg-config-home/shitsurae/*.yaml samples/xdg-config-home/shitsurae/virtual/*.yaml; do
-  json="$workdir/$(basename "$sample").json"
+  json="$workdir/${sample%.yaml}.json"
+  mkdir -p "$(dirname "$json")"
   gojq --yaml-input . "$sample" > "$json"
-  if npx --yes ajv-cli validate -s "$schema" -d "$json" --spec=draft2020 > /dev/null 2>&1; then
-    echo "valid: $sample"
-  else
-    echo "INVALID: $sample" >&2
-    npx --yes ajv-cli validate -s "$schema" -d "$json" --spec=draft2020 || true
-    status=1
-  fi
+  echo "sample: $sample"
 done
-exit $status
+
+npx --yes ajv-cli@5.0.0 validate -s "$schema" -d "$workdir/samples/**/*.json" --spec=draft2020
