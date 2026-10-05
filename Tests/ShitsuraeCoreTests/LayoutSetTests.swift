@@ -1,4 +1,5 @@
 import Foundation
+import ShitsuraeTestSupport
 import Testing
 @testable import ShitsuraeCore
 
@@ -527,7 +528,7 @@ struct LayoutSetTests {
             operation: .arrangeSet,
             budgetMS: 60_000
         )
-        let task = Task {
+        let task = Task(executorPreference: BlockingTestTaskExecutor()) {
             try await engine.arrangeSet(
                 setName: "mobile",
                 requestID: "blocking-write",

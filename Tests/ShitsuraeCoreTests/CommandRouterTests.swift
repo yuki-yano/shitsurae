@@ -1,4 +1,5 @@
 import Foundation
+import ShitsuraeTestSupport
 import Testing
 @testable import ShitsuraeCore
 
@@ -196,7 +197,9 @@ struct CommandRouterTests {
         request.requestID = "active-duplicate"
         request.setName = "mobile"
         let requestData = try JSONEncoder().encode(request)
-        let first = Task { await router.handle(requestData: requestData) }
+        let first = Task(executorPreference: BlockingTestTaskExecutor()) {
+            await router.handle(requestData: requestData)
+        }
         var observedInFlight = false
         for _ in 0 ..< 100 {
             if engine.operationCoordinator.status().active?.inFlight == true {

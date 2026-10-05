@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import ShitsuraeCore
+import ShitsuraeTestSupport
 import Testing
 @testable import Shitsurae
 
@@ -120,7 +121,9 @@ struct AppOperationLifecycleTests {
         request.requestID = "actual-cli-route"
         let data = try JSONEncoder().encode(request)
         let router = model.router
-        let cli = Task.detached { await router.handle(requestData: data) }
+        let cli = Task.detached(executorPreference: BlockingTestTaskExecutor()) {
+            await router.handle(requestData: data)
+        }
         try #require(await eventually { control.isInventoryBlocked })
         model.startArrangeOperationMonitoring(interval: .milliseconds(10))
         model.handleDisplayChange(); model.handleDisplayChange(); model.handleDisplayChange()

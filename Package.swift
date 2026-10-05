@@ -35,13 +35,17 @@ let package = Package(
             dependencies: ["ShitsuraeCore"],
             path: "Sources/ShitsuraeApp"
         ),
+        .target(
+            name: "ShitsuraeTestSupport",
+            path: "Tests/ShitsuraeTestSupport"
+        ),
         .testTarget(
             name: "ShitsuraeCoreTests",
-            dependencies: ["ShitsuraeCore"]
+            dependencies: ["ShitsuraeCore", "ShitsuraeTestSupport"]
         ),
         .testTarget(
             name: "ShitsuraeAppTests",
-            dependencies: ["Shitsurae"]
+            dependencies: ["Shitsurae", "ShitsuraeTestSupport"]
         ),
         .testTarget(
             name: "ShitsuraeCLITests",
