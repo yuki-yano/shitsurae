@@ -516,11 +516,19 @@ struct CommandServerTests {
         #expect(server.start())
         defer { server.stop() }
 
-        let response = try CommandClient.send(
-            request: CommandRequest(command: "layoutsList"),
-            socketURL: socketURL,
-            autoLaunch: false
-        )
+        // The synchronous client must not occupy a cooperative worker while
+        // the server needs that same pool to dispatch its async router.
+        let response: Data = try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global().async {
+                continuation.resume(with: Result {
+                    try CommandClient.send(
+                        request: CommandRequest(command: "layoutsList"),
+                        socketURL: socketURL,
+                        autoLaunch: false
+                    )
+                })
+            }
+        }
         let object = try #require(JSONSerialization.jsonObject(with: response) as? [String: Any])
         #expect(object["ok"] as? Bool == true)
         let payload = try #require(object["payload"] as? [String: Any])
