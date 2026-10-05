@@ -10,6 +10,7 @@ final class ScriptedUnixServer: @unchecked Sendable {
         case malformed
         case slowChunks
         case doNotRead
+        case holdResponseUntilStop
     }
 
     let socketURL: URL
@@ -17,7 +18,12 @@ final class ScriptedUnixServer: @unchecked Sendable {
     private let behavior: Behavior
     private let lock = NSLock()
     private var _connectionCount = 0
-    private let finished = DispatchSemaphore(value: 0)
+    private var stopping = false
+    private let finished = DispatchGroup()
+    private let cancellation = DispatchSemaphore(value: 0)
+    private let firstAccepted = DispatchSemaphore(value: 0)
+    private var drainSucceeded = false
+    private let observesConnections: Bool
 
     var connectionCount: Int {
         lock.lock()
@@ -27,6 +33,7 @@ final class ScriptedUnixServer: @unchecked Sendable {
 
     init(behavior: Behavior, observe: Bool = true) throws {
         self.behavior = behavior
+        observesConnections = observe
         socketURL = URL(fileURLWithPath: "/tmp/shitsurae-client-\(UUID().uuidString.prefix(8)).sock")
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw POSIXError(.ENOTSOCK) }
@@ -45,13 +52,14 @@ final class ScriptedUnixServer: @unchecked Sendable {
                 Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
-        guard bindResult == 0, Darwin.listen(fd, 1) == 0 else {
+        guard bindResult == 0, Darwin.listen(fd, 1) == 0, fcntl(fd, F_SETFL, O_NONBLOCK) == 0 else {
             let code = errno
             Darwin.close(fd)
             throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
         }
 
         if observe {
+            finished.enter()
             DispatchQueue.global(qos: .userInitiated).async { [self] in
                 observeConnections()
             }
@@ -63,33 +71,82 @@ final class ScriptedUnixServer: @unchecked Sendable {
         unlink(socketURL.path)
     }
 
-    func waitUntilFinished(timeout: TimeInterval = 1) {
-        _ = finished.wait(timeout: .now() + timeout)
+    /// Call only after the synchronous client has returned. All of its
+    /// connections have then been queued, so draining accept to EAGAIN makes
+    /// the final count complete without a timed observation window.
+    func stopAndDrain(timeout: TimeInterval = 2) -> Bool {
+        guard observesConnections else { return true }
+        lock.lock()
+        let needsCancellation = !stopping
+        stopping = true
+        lock.unlock()
+        if needsCancellation { cancellation.signal() }
+        guard finished.wait(timeout: .now() + timeout) == .success else { return false }
+        lock.lock()
+        defer { lock.unlock() }
+        return drainSucceeded
+    }
+
+    func waitForFirstConnection(timeout: TimeInterval = 2) -> Bool {
+        firstAccepted.wait(timeout: .now() + timeout) == .success
+    }
+
+    private var isStopping: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stopping
+    }
+
+    private func pause(seconds: TimeInterval) {
+        guard !isStopping else { return }
+        _ = cancellation.wait(timeout: .now() + seconds)
     }
 
     private func observeConnections() {
-        defer { finished.signal() }
-        let deadline = DispatchTime.now().uptimeNanoseconds + 700_000_000
-        while DispatchTime.now().uptimeNanoseconds < deadline {
+        defer { finished.leave() }
+        while !isStopping {
             var descriptor = pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0)
-            guard poll(&descriptor, 1, 50) > 0 else { continue }
-            runOnce()
+            if poll(&descriptor, 1, 50) > 0 {
+                let client = accept(listenFD, nil, nil)
+                if client >= 0 { runOnce(client: client) }
+            }
+        }
+        // The worker owns accept and closes every queued connection before
+        // announcing completion. A client bug that retried is still counted.
+        while true {
+            let client = accept(listenFD, nil, nil)
+            if client < 0 {
+                let code = errno
+                if code == EINTR { continue }
+                lock.lock()
+                drainSucceeded = code == EAGAIN || code == EWOULDBLOCK
+                lock.unlock()
+                break
+            }
+            recordConnection()
+            Darwin.close(client)
         }
     }
 
-    private func runOnce() {
-        let client = accept(listenFD, nil, nil)
-        guard client >= 0 else { return }
-        defer { Darwin.close(client) }
+    private func recordConnection() {
         lock.lock()
         _connectionCount += 1
+        let isFirst = _connectionCount == 1
         lock.unlock()
+        if isFirst { firstAccepted.signal() }
+    }
+
+    private func runOnce(client: Int32) {
+        defer { Darwin.close(client) }
+        recordConnection()
         var noSigpipe: Int32 = 1
         _ = setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe, socklen_t(MemoryLayout<Int32>.size))
-        if case .doNotRead = behavior { Thread.sleep(forTimeInterval: 0.2); return }
+        if case .doNotRead = behavior { pause(seconds: 0.2); return }
 
         var buffer = [UInt8](repeating: 0, count: 4096)
-        while true {
+        while !isStopping {
+            var descriptor = pollfd(fd: client, events: Int16(POLLIN), revents: 0)
+            guard poll(&descriptor, 1, 50) > 0 else { continue }
             let count = Darwin.read(client, &buffer, buffer.count)
             guard count > 0 else { break }
             if buffer.prefix(count).contains(UInt8(ascii: "\n")) { break }
@@ -102,15 +159,19 @@ final class ScriptedUnixServer: @unchecked Sendable {
             _ = Data("{".utf8).withUnsafeBytes { raw in
                 Darwin.write(client, raw.baseAddress, raw.count)
             }
-            Thread.sleep(forTimeInterval: delay)
+            pause(seconds: delay)
         case .malformed:
-            _ = Data("{broken}\n".utf8).withUnsafeBytes { Darwin.write(client, $0.baseAddress, $0.count) }
+            let malformed = Data("{broken}\n".utf8)
+            _ = malformed.withUnsafeBytes { Darwin.write(client, $0.baseAddress, $0.count) }
         case .slowChunks:
             for byte in Data("{\"ok\":true,\"exitCode\":0,\"payload\":{}}\n".utf8) {
+                if isStopping { break }
                 var value = byte
                 _ = Darwin.write(client, &value, 1)
-                Thread.sleep(forTimeInterval: 0.02)
+                pause(seconds: 0.02)
             }
+        case .holdResponseUntilStop:
+            if !isStopping { cancellation.wait() }
         case .doNotRead: break
         }
     }
@@ -118,6 +179,38 @@ final class ScriptedUnixServer: @unchecked Sendable {
 
 @Suite("Command client", .serialized)
 struct CommandClientTests {
+    @Test func drainIncludesConnectionsQueuedWhileWorkerIsBusy() throws {
+        let server = try ScriptedUnixServer(behavior: .holdResponseUntilStop)
+        defer { #expect(server.stopAndDrain()) }
+        do {
+            _ = try CommandClient.sendOnce(payload: Data("{}".utf8), socketURL: server.socketURL,
+                responseTimeoutSeconds: 0.05, requestID: "drain-proof")
+            Issue.record("expected response timeout")
+        } catch let error as CommandClientError {
+            #expect(error == .outcomeUnknown(requestID: "drain-proof"))
+        }
+
+        try #require(server.waitForFirstConnection())
+        let queued = socket(AF_UNIX, SOCK_STREAM, 0)
+        try #require(queued >= 0)
+        defer { Darwin.close(queued) }
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &address.sun_path) { buffer in
+            server.socketURL.path.utf8CString.withUnsafeBytes { source in
+                buffer.copyMemory(from: UnsafeRawBufferPointer(rebasing: source.prefix(buffer.count - 1)))
+            }
+        }
+        let result = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(queued, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        try #require(result == 0)
+        #expect(server.stopAndDrain())
+        #expect(server.connectionCount == 2)
+    }
+
     @Test func backloggedConnectIsFiniteBeforeAnyRequestIsSent() throws {
         let server = try ScriptedUnixServer(behavior: .doNotRead, observe: false)
         var queuedFDs: [Int32] = []
@@ -162,6 +255,7 @@ struct CommandClientTests {
 
     @Test func doesNotRetryAfterRequestBytesWereSent() throws {
         let server = try ScriptedUnixServer(behavior: .disconnectAfterRequest)
+        defer { #expect(server.stopAndDrain()) }
         let requestID = "single-execution"
         var request = CommandRequest(command: "arrangeSet")
         request.requestID = requestID
@@ -180,12 +274,13 @@ struct CommandClientTests {
         } catch let error as CommandClientError {
             #expect(error == .outcomeUnknown(requestID: requestID))
         }
-        server.waitUntilFinished()
+        #expect(server.stopAndDrain())
         #expect(server.connectionCount == 1)
     }
 
     @Test func partialResponseUsesOneAbsoluteMonotonicDeadline() throws {
         let server = try ScriptedUnixServer(behavior: .partialResponseThenDelay(0.2))
+        defer { #expect(server.stopAndDrain()) }
         var request = CommandRequest(command: "arrangeStatus")
         request.requestID = "partial-deadline"
         let started = DispatchTime.now().uptimeNanoseconds
@@ -203,13 +298,14 @@ struct CommandClientTests {
         }
         let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000_000
         #expect(elapsed < 0.15)
+        #expect(server.stopAndDrain())
         #expect(server.connectionCount == 1)
-        server.waitUntilFinished()
     }
 
     @Test(arguments: [ScriptedUnixServer.Behavior.malformed, .slowChunks, .doNotRead])
     func corruptSlowAndBackpressuredConnectionsKeepOriginalIDAndNeverResend(behavior: ScriptedUnixServer.Behavior) throws {
         let server = try ScriptedUnixServer(behavior: behavior)
+        defer { #expect(server.stopAndDrain()) }
         var request = CommandRequest(command: "arrangeSet")
         request.requestID = "original-id"
         if case .doNotRead = behavior { request.title = String(repeating: "x", count: 4 << 20) }
@@ -220,7 +316,7 @@ struct CommandClientTests {
             Issue.record("expected unknown")
         } catch let error as CommandClientError { #expect(error == .outcomeUnknown(requestID: "original-id")) }
         #expect(DispatchTime.now().uptimeNanoseconds - started < 300_000_000)
-        server.waitUntilFinished(timeout: 2)
+        #expect(server.stopAndDrain())
         #expect(server.connectionCount == 1)
     }
 }

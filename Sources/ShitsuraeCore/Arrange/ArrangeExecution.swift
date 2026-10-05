@@ -1007,11 +1007,11 @@ public extension VirtualSpaceEngine {
         provisionalBindings: inout [String: WindowSnapshot],
         token: ArrangeOperationToken
     ) -> WindowSnapshot? {
-        let started = DispatchTime.now().uptimeNanoseconds
+        let started = arrangeUptimeNanoseconds()
         let localBudgetNS = UInt64(max(0, arrangeWaitTimeoutMS)) * 1_000_000
         var preferredFullscreenWindow: WindowSnapshot?
 
-        while DispatchTime.now().uptimeNanoseconds <= started &+ localBudgetNS {
+        while arrangeUptimeNanoseconds() <= started &+ localBudgetNS {
             if !operationCoordinator.permitsNewSideEffect(token: token) {
                 break
             }
@@ -1022,7 +1022,7 @@ public extension VirtualSpaceEngine {
             let observation = control.focusedWindowObservation()
             let inventory = observation.inventory
             guard inventory.isAuthoritative else {
-                let elapsedNS = DispatchTime.now().uptimeNanoseconds - started
+                let elapsedNS = arrangeUptimeNanoseconds() - started
                 let remainingMS = Int(localBudgetNS > elapsedNS ? (localBudgetNS - elapsedNS) / 1_000_000 : 0)
                 if remainingMS <= 0 { break }
                 let operationRemaining = operationCoordinator.remainingBudgetMS(token: token)
@@ -1088,7 +1088,7 @@ public extension VirtualSpaceEngine {
                 }
             }
 
-            let elapsedNS = DispatchTime.now().uptimeNanoseconds - started
+            let elapsedNS = arrangeUptimeNanoseconds() - started
             let remainingMS = Int(localBudgetNS > elapsedNS ? (localBudgetNS - elapsedNS) / 1_000_000 : 0)
             if remainingMS <= 0 {
                 // Never steal a sibling while the exact binding is alive. If

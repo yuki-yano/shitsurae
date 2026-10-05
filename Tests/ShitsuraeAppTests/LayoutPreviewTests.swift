@@ -60,33 +60,10 @@ struct LayoutPreviewTests {
                 spaceID: nil
             ),
         ])
-    }
-
-    @Test func omitsDisplaysMarkedDoNotApplyFromArrangePreview() {
-        let choices = [
-            DisplayLayoutChoice(
-                displayID: "primary",
-                isPrimary: true,
-                monitorAlias: nil,
-                layoutNames: ["default"],
-                activeLayoutName: nil
-            ),
-            DisplayLayoutChoice(
-                displayID: "secondary",
-                isPrimary: false,
-                monitorAlias: nil,
-                layoutNames: ["calendar"],
-                activeLayoutName: nil
-            ),
-        ]
-
-        let selections = selectedDisplayLayouts(
-            choices: choices,
-            selectionByDisplayID: ["secondary": "calendar"],
-            spaceByDisplayID: [:]
-        )
-
-        #expect(selections.map(\.displayID) == ["secondary"])
+        let secondaryOnly = selectedDisplayLayouts(choices: choices,
+            selectionByDisplayID: ["research": "research", "calendar": "calendar"],
+            spaceByDisplayID: ["research": 2])
+        #expect(secondaryOnly == Array(selections.dropFirst()))
     }
 
     @Test func resolvesLengthsAgainstTheSelectedDisplaysVisibleFrameAndScale() throws {

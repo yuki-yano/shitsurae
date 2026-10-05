@@ -98,6 +98,8 @@ public actor VirtualSpaceEngine {
     /// workspace without follow-focus undoing the user's explicit switch.
     var suspendedCompanionMainSpaces: [WindowIdentity: Int] = [:]
 
+    /// Monotonic local window appearance clock; independent of the operation lease clock.
+    let arrangeUptimeNanoseconds: @Sendable () -> UInt64
     let transitionCheckpoint: @Sendable (LayoutTransitionCheckpoint) throws -> Void
 
     public init(
@@ -106,6 +108,7 @@ public actor VirtualSpaceEngine {
         logger: ShitsuraeLogger,
         retryDelaysMS: [Int] = VisibilityApplier.defaultRetryDelaysMS,
         arrangeWaitTimeoutMS: Int = 5000,
+        arrangeUptimeNanoseconds: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
         focusEventGate: FocusEventGate = FocusEventGate(),
         operationCoordinator: ArrangeOperationCoordinator = ArrangeOperationCoordinator(),
         transitionCheckpoint: @escaping @Sendable (LayoutTransitionCheckpoint) throws -> Void = { _ in }
@@ -115,6 +118,7 @@ public actor VirtualSpaceEngine {
         self.logger = logger
         self.retryDelaysMS = retryDelaysMS
         self.arrangeWaitTimeoutMS = arrangeWaitTimeoutMS
+        self.arrangeUptimeNanoseconds = arrangeUptimeNanoseconds
         self.focusEventGate = focusEventGate
         self.operationCoordinator = operationCoordinator
         self.transitionCheckpoint = transitionCheckpoint

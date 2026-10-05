@@ -13,25 +13,22 @@ struct FocusEventCoordinatorTests {
         #expect(coordinator.isCurrent(2))
     }
 
-    @Test func interactiveInvalidationMakesPendingEventStale() {
-        let coordinator = FocusEventCoordinator()
-        #expect(coordinator.accept(1))
-        coordinator.invalidate(with: 2)
-        #expect(!coordinator.isCurrent(1))
-        #expect(coordinator.isCurrent(2))
-    }
-
     @Test func sharedGateInvalidatesContinuationBeforeActorScheduling() {
         let gate = FocusEventGate()
         let coordinator = FocusEventCoordinator(gate: gate)
         #expect(coordinator.accept(1))
 
+        coordinator.invalidate(with: 2)
+        #expect(!coordinator.isCurrent(1))
+        #expect(coordinator.isCurrent(2))
+        #expect(coordinator.accept(3))
+
         // Models synchronous user-action invalidation while the engine actor's
         // older conditional switch is still queued.
-        gate.invalidate(with: 2)
+        gate.invalidate(with: 4)
 
-        #expect(!coordinator.isCurrent(1))
-        #expect(!gate.isCurrent(1))
+        #expect(!coordinator.isCurrent(3))
+        #expect(!gate.isCurrent(3))
     }
 
     @Test func backgroundWindowEventDoesNotSupersedeFrontmostActivationRetry() {
@@ -46,23 +43,6 @@ struct FocusEventCoordinatorTests {
         #expect(coordinator.isCurrent(3))
     }
 
-    @Test func thumbnailCacheKeyIncludesProcessGeneration() {
-        let old = WindowIdentity(
-            pid: 100,
-            processStartTime: 1,
-            windowID: 20,
-            bundleID: "com.google.Chrome"
-        )
-        let replacement = WindowIdentity(
-            pid: 100,
-            processStartTime: 2,
-            windowID: 20,
-            bundleID: "com.google.Chrome"
-        )
-
-        #expect(WindowThumbnailProvider.cacheKey(for: old) != WindowThumbnailProvider.cacheKey(for: replacement))
-    }
-
     @Test func thumbnailCacheIsOnlyASubsecondPlaceholder() {
         let identity = WindowIdentity(
             pid: 100,
@@ -70,40 +50,25 @@ struct FocusEventCoordinatorTests {
             windowID: 20,
             bundleID: "com.example.Editor"
         )
+        let replacement = WindowIdentity(pid: identity.pid, processStartTime: 2,
+            windowID: identity.windowID, bundleID: identity.bundleID)
+        var generation: UInt64 = 1
         var now = Date(timeIntervalSince1970: 100)
         let provider = WindowThumbnailProvider(
             placeholderTTL: 1,
             now: { now },
-            processStartTime: { _ in 1 }
+            processStartTime: { _ in generation }
         )
         let image = NSImage(size: NSSize(width: 10, height: 10))
+        let replacementImage = NSImage(size: NSSize(width: 20, height: 20))
         provider.storeForTesting(image, identity: identity, capturedAt: now)
-
+        provider.storeForTesting(replacementImage, identity: replacement, capturedAt: now)
         #expect(provider.placeholder(identity: identity) === image)
-
+        generation = 2
+        #expect(provider.placeholder(identity: replacement) === replacementImage)
+        #expect(provider.placeholder(identity: identity) == nil)
         now.addTimeInterval(1.001)
-        #expect(provider.placeholder(identity: identity) == nil)
-    }
-
-    @Test func thumbnailCacheRejectsReusedProcessGeneration() {
-        let identity = WindowIdentity(
-            pid: 100,
-            processStartTime: 1,
-            windowID: 20,
-            bundleID: "com.example.Editor"
-        )
-        let now = Date(timeIntervalSince1970: 100)
-        let provider = WindowThumbnailProvider(
-            now: { now },
-            processStartTime: { _ in 2 }
-        )
-        provider.storeForTesting(
-            NSImage(size: NSSize(width: 10, height: 10)),
-            identity: identity,
-            capturedAt: now
-        )
-
-        #expect(provider.placeholder(identity: identity) == nil)
+        #expect(provider.placeholder(identity: replacement) == nil)
     }
 
     @Test func thumbnailSessionLoadsShareableContentOnlyOnce() async {
@@ -246,9 +211,6 @@ struct HotkeyManagerTests {
     @Test func interactiveEngineActionsUseLatencyCriticalHighPriorityScheduling() {
         #expect(EngineActionUrgency.interactive.taskPriority == .high)
         #expect(EngineActionUrgency.interactive.activityOptions == [.userInitiated, .latencyCritical])
-    }
-
-    @Test func normalEngineActionsDoNotRequestLatencyCriticalScheduling() {
         #expect(EngineActionUrgency.normal.taskPriority == nil)
         #expect(EngineActionUrgency.normal.activityOptions == nil)
     }

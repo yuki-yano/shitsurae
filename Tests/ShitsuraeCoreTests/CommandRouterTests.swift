@@ -35,16 +35,6 @@ struct CommandRouterTests {
         #expect(status.lastOutcome?.operation == .arrangeSet)
         #expect(status.lastOutcome?.detail?.isEmpty == false)
     }
-    @Test func mutatingStateOnlyArrangeInvalidatesPendingFocus() {
-        var stateOnly = CommandRequest(command: "arrange")
-        stateOnly.stateOnly = true
-        #expect(CommandRouter.invalidatesPendingFocus(stateOnly))
-
-        var dryRun = CommandRequest(command: "arrange")
-        dryRun.dryRun = true
-        #expect(!CommandRouter.invalidatesPendingFocus(dryRun))
-    }
-
     @Test func multiDisplayArrangeRejectsSingleLayoutOnlyOptions() async throws {
         let (router, _, _, cleanup) = try makeRouter(windows: [])
         defer { cleanup() }
@@ -110,7 +100,7 @@ struct CommandRouterTests {
         """.write(to: configDir.appendingPathComponent("01-test.yaml"), atomically: true, encoding: .utf8)
 
         let configManager = ConfigManager(directoryURL: configDir, logger: logger)
-        configManager.start()
+        try #require(configManager.reload(trigger: "test"))
 
         let router = CommandRouter(engine: engine, configManager: configManager, logger: logger)
         let cleanup = {
@@ -268,7 +258,7 @@ struct CommandRouterTests {
             encoding: .utf8
         )
         let configManager = ConfigManager(directoryURL: configDir, logger: logger)
-        configManager.start()
+        #expect(!configManager.reload(trigger: "test"))
         defer {
             configManager.stop()
             try? FileManager.default.removeItem(at: configDir)
@@ -499,7 +489,7 @@ struct CommandServerTests {
         """.write(to: configDir.appendingPathComponent("01.yaml"), atomically: true, encoding: .utf8)
 
         let configManager = ConfigManager(directoryURL: configDir, logger: logger)
-        configManager.start()
+        try #require(configManager.reload(trigger: "test"))
         defer { configManager.stop() }
 
         let router = CommandRouter(engine: engine, configManager: configManager, logger: logger)

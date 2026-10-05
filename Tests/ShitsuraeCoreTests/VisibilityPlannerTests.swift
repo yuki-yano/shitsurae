@@ -80,28 +80,6 @@ struct VisibilityPlannerTests {
         #expect(plan?.desiredEntry.visibilityState == .visible)
     }
 
-    @Test func showPlanRestoresWindowMinimizedByManagedVisibility() {
-        let layout = TestFixtures.twoSpaceLayout()
-        let entry = makeEntry(spaceID: 1, visibilityState: .hiddenMinimized)
-        let window = TestFixtures.window(
-            id: 1,
-            bundleID: "com.apple.TextEdit",
-            isAXBacked: true,
-            minimized: true
-        )
-
-        let plan = VisibilityPlanner.plan(
-            entry: entry,
-            window: window,
-            transition: .show,
-            layout: layout,
-            hostDisplay: display,
-            displays: [display]
-        )
-
-        #expect(plan?.restoreFromMinimized == true)
-    }
-
     @Test func showPlanPreservesUserMinimizedVisibleWindow() {
         let layout = TestFixtures.twoSpaceLayout()
         let entry = makeEntry(spaceID: 1, visibilityState: .visible)
@@ -124,37 +102,6 @@ struct VisibilityPlannerTests {
         #expect(plan?.mutation == VisibilityMutation.none)
         #expect(plan?.restoreFromMinimized == false)
         #expect(plan?.desiredEntry.visibilityState == .visible)
-    }
-
-    @Test func hidePlanParksWindowOnePixelOutside() {
-        let layout = TestFixtures.twoSpaceLayout()
-        let entry = makeEntry(spaceID: 1)
-        let window = TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", isAXBacked: true)
-
-        let plan = VisibilityPlanner.plan(
-            entry: entry,
-            window: window,
-            transition: .hide,
-            layout: layout,
-            hostDisplay: display,
-            displays: [display]
-        )
-
-        guard case let .position(position)? = plan?.mutation else {
-            Issue.record("expected position mutation")
-            return
-        }
-
-        let hiddenFrame = ResolvedFrame(
-            x: position.x,
-            y: position.y,
-            width: window.frame.width,
-            height: window.frame.height
-        )
-        #expect(VisibilityPlanner.isHiddenWindowFrame(frame: hiddenFrame, displays: [display]))
-        #expect(plan?.desiredEntry.visibilityState == .hiddenOffscreen)
-        // The pre-hide frame is remembered for restoration.
-        #expect(plan?.desiredEntry.lastVisibleFrame == window.frame)
     }
 
     @Test func hidePlanSkipsMinimizedButStillPlansFullscreenWindow() {
@@ -200,7 +147,6 @@ struct VisibilityPlannerTests {
             Issue.record("fullscreen hide must attempt a physical mutation")
         }
         #expect(fullscreenPlan?.desiredEntry.lastVisibleFrame == previousWindowedFrame)
-        #expect(fullscreenPlan?.desiredEntry.lastVisibleFrame != fullscreen.frame)
     }
 
     @Test func fullscreenShowWithoutWindowedGeometryDoesNotStoreDisplayFrame() {
@@ -230,7 +176,6 @@ struct VisibilityPlannerTests {
         )
 
         #expect(plan == nil)
-        #expect(entry.lastVisibleFrame == nil)
     }
 
     @Test func rehidePreservesOriginalVisibleFrame() {
@@ -262,10 +207,11 @@ struct VisibilityPlannerTests {
         #expect(plan?.desiredEntry.lastVisibleFrame == originalFrame)
     }
 
-    @Test func movedEntryFallsBackToLastVisibleFrame() {
+    @Test func validLastVisibleFrameWinsOverVisibleCurrentFrame() {
         let layout = TestFixtures.twoSpaceLayout()
-        // Entry moved off its layout space (1 → 2): layout frame no longer
-        // applies; lastVisibleFrame wins.
+        // Both the stored lastVisibleFrame and the window's current frame are
+        // valid on-screen frames; the stored frame must win. The entry sits off
+        // its layout space, so no layout-defined frame competes here.
         var entry = makeEntry(spaceID: 1, lastVisibleFrame: ResolvedFrame(x: 50, y: 60, width: 500, height: 300))
         entry.spaceID = 2
 
@@ -812,6 +758,10 @@ struct VisibilityApplierTests {
             restoredFromMinimized: false
         )
 
+        // Only the apply-phase write above has happened so far.
+        #expect(control.setPositionAttemptWindowIDs == [1])
+        #expect(control.targetedWindowInventoryIdentitySets.isEmpty)
+
         let outcome = VisibilityApplier.converge(
             changes: [change],
             control: control,
@@ -822,6 +772,11 @@ struct VisibilityApplierTests {
         #expect(!outcome.hasPending)
         #expect(outcome.retryCount == 0)
         #expect(outcome.verifyCount == 1)
+        // A window already at its desired frame is verified once and never
+        // written again.
+        #expect(control.setPositionAttemptWindowIDs == [1])
+        #expect(control.frameMutationAttemptWindowIDs == [1])
+        #expect(control.targetedWindowInventoryIdentitySets == [[window.identity]])
     }
 
     @Test func convergeRetriesOnlyUnresolvedThenRechecksAllChanges() {

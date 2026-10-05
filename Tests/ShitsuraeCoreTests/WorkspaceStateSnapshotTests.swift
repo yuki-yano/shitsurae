@@ -12,15 +12,7 @@ struct WorkspaceStateSnapshotTests {
         windows: [WindowSnapshot],
         displays: [DisplayInfo] = [TestFixtures.display]
     ) -> (engine: VirtualSpaceEngine, control: MockWindowControl, stateURL: URL) {
-        let control = MockWindowControl(windows: windows, displays: displays)
-        let (store, stateURL) = TestFixtures.tempStateStore()
-        let engine = try! VirtualSpaceEngine(
-            store: store,
-            control: control,
-            logger: TestFixtures.nullLogger(),
-            retryDelaysMS: [1]
-        )
-        return (engine, control, stateURL)
+        TestFixtures.makeVirtualSpaceEngine(windows: windows, displays: displays)
     }
 
     private func standardWindows() -> [WindowSnapshot] {
@@ -101,36 +93,7 @@ struct WorkspaceStateSnapshotTests {
         #expect(snapshot == nil)
     }
 
-    @Test func reportsPhysicalOffscreenStateAfterWorkspaceSwitch() async throws {
-        let (engine, _, stateURL) = makeEngine(windows: standardWindows())
-        defer { try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent()) }
-        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
-        _ = try await engine.switchSpace(to: 2, config: config)
-
-        let snapshot = await engine.workspaceStateSnapshot(config: config)
-
-        #expect(snapshot.hiddenWindowCount == 2)
-        #expect(snapshot.workspaces.first(where: { $0.spaceID == 2 })?.isActive == true)
-        let inactiveWindows = try #require(
-            snapshot.workspaces.first(where: { $0.spaceID == 1 })?.windows
-        )
-        #expect(inactiveWindows.allSatisfy { $0.trackedVisibility == .hiddenOffscreen })
-        #expect(inactiveWindows.allSatisfy {
-            $0.liveWindow?.actualVisibility == .hiddenOffscreen
-        })
-        #expect(inactiveWindows.allSatisfy { $0.previewFrameSource == .lastVisibleFrame })
-        #expect(inactiveWindows.allSatisfy { window in
-            window.previewFrame.map {
-                !VisibilityPlanner.isHiddenWindowFrame(
-                    frame: $0,
-                    displays: snapshot.displays
-                )
-            } == true
-        })
-        #expect(inactiveWindows.allSatisfy { !$0.hasVisibilityMismatch })
-    }
-
-    @Test func reportsManagedMinimizedWindowAsHiddenWithVisiblePreview() async throws {
+    @Test func reportsManagedMinimizedAndOffscreenWindowsAsHiddenWithVisiblePreviews() async throws {
         let (engine, control, stateURL) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent()) }
         try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
@@ -143,12 +106,30 @@ struct WorkspaceStateSnapshotTests {
                 .flatMap(\.windows)
                 .first(where: { $0.bundleID == "com.apple.TextEdit" })
         )
+        let terminal = try #require(
+            snapshot.workspaces
+                .flatMap(\.windows)
+                .first(where: { $0.bundleID == "com.apple.Terminal" })
+        )
 
         #expect(snapshot.hiddenWindowCount == 2)
+        #expect(snapshot.workspaces.first(where: { $0.spaceID == 2 })?.isActive == true)
+
+        // TextEdit refused parking and was minimized by managed visibility.
         #expect(textEdit.trackedVisibility == .hiddenMinimized)
         #expect(textEdit.liveWindow?.actualVisibility == .minimized)
         #expect(textEdit.previewFrameSource == .lastVisibleFrame)
         #expect(!textEdit.hasVisibilityMismatch)
+
+        // Terminal was parked offscreen; its preview is still the last
+        // visible frame, not the parking position.
+        #expect(terminal.trackedVisibility == .hiddenOffscreen)
+        #expect(terminal.liveWindow?.actualVisibility == .hiddenOffscreen)
+        #expect(terminal.previewFrameSource == .lastVisibleFrame)
+        #expect(terminal.previewFrame.map {
+            !VisibilityPlanner.isHiddenWindowFrame(frame: $0, displays: snapshot.displays)
+        } == true)
+        #expect(!terminal.hasVisibilityMismatch)
     }
 
     @Test func distinguishesMissingBindingsFromUnmanagedLiveWindows() async throws {

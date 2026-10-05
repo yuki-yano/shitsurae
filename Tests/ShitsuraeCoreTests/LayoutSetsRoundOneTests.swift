@@ -16,7 +16,7 @@ final class TestSignal: @unchecked Sendable {
     func signal() { lock.lock(); value = true; lock.unlock() }
 }
 
-@Suite("Layout sets Round 1", .serialized)
+@Suite("Layout sets Round 1")
 struct LayoutSetsRoundOneTests {
     private func layout(_ bundle: String, secondary: Bool = false, title: TitleMatcher? = nil, second: Bool = false) -> LayoutDefinition {
         LayoutDefinition(display: secondary ? DisplayDefinition(id: "uuid-sub") : nil, spaces: [
@@ -44,9 +44,10 @@ struct LayoutSetsRoundOneTests {
         let (store, url) = TestFixtures.tempStateStore()
         try store.saveStrict(state: state)
         let control = MockWindowControl(windows: windows, displays: displays ?? [TestFixtures.display, TestFixtures.secondaryDisplay()])
+        let waitClock = ArrangeWaitTestClock.connected(to: control)
         let coordinator = suppliedCoordinator ?? ArrangeOperationCoordinator(uptimeNanoseconds: { clock?.now ?? DispatchTime.now().uptimeNanoseconds })
         return (try VirtualSpaceEngine(store: store, control: control, logger: TestFixtures.nullLogger(), retryDelaysMS: [1],
-            arrangeWaitTimeoutMS: 10, operationCoordinator: coordinator, transitionCheckpoint: checkpoint), control, store, url)
+            arrangeWaitTimeoutMS: 10, arrangeUptimeNanoseconds: { waitClock.now }, operationCoordinator: coordinator, transitionCheckpoint: checkpoint), control, store, url)
     }
     private func remove(_ url: URL) { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 

@@ -51,11 +51,7 @@ struct MultiDisplayWorkspaceTests {
     }
 
     private func primaryWindows() -> [WindowSnapshot] {
-        [
-            TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", isAXBacked: true, frontIndex: 0),
-            TestFixtures.window(id: 2, bundleID: "com.apple.Terminal", isAXBacked: true, frontIndex: 1),
-            TestFixtures.window(id: 3, bundleID: "com.apple.Notes", isAXBacked: true, frontIndex: 2),
-        ]
+        TestFixtures.twoSpaceLayoutWindows()
     }
 
     private func calendarWindow(displayID: String = "uuid-sub") -> WindowSnapshot {
@@ -73,15 +69,7 @@ struct MultiDisplayWorkspaceTests {
         windows: [WindowSnapshot],
         displays: [DisplayInfo] = [TestFixtures.display, TestFixtures.secondaryDisplay()]
     ) -> (engine: VirtualSpaceEngine, control: MockWindowControl, stateURL: URL) {
-        let control = MockWindowControl(windows: windows, displays: displays)
-        let (store, url) = TestFixtures.tempStateStore()
-        let engine = try! VirtualSpaceEngine(
-            store: store,
-            control: control,
-            logger: TestFixtures.nullLogger(),
-            retryDelaysMS: [1]
-        )
-        return (engine, control, url)
+        TestFixtures.makeVirtualSpaceEngine(windows: windows, displays: displays)
     }
 
     // MARK: - Resolver semantics
@@ -118,19 +106,6 @@ struct MultiDisplayWorkspaceTests {
     }
 
     // MARK: - Per-display activation
-
-    @Test func bootstrapActivatesIndependentWorkspacesPerDisplay() async throws {
-        let (engine, _, url) = makeEngine(windows: primaryWindows() + [calendarWindow()])
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-
-        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: dualConfig)
-        try await engine.bootstrapState(layoutName: "calendar", activeSpaceID: 1, config: dualConfig)
-
-        let state = await engine.currentState
-        #expect(state.activeWorkspace(displayID: "uuid-main")?.layoutName == "work")
-        #expect(state.activeWorkspace(displayID: "uuid-sub")?.layoutName == "calendar")
-        #expect(state.activeWorkspaces.count == 2)
-    }
 
     @Test func batchArrangeAppliesDistinctDisplayLayoutsInOneRequest() async throws {
         let (engine, control, url) = makeEngine(windows: primaryWindows() + [calendarWindow()])
@@ -245,6 +220,12 @@ struct MultiDisplayWorkspaceTests {
         try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: dualConfig)
         try await engine.bootstrapState(layoutName: "calendar", activeSpaceID: 1, config: dualConfig)
 
+        // Each bootstrap activates an independent workspace on its display.
+        let bootstrapped = await engine.currentState
+        #expect(bootstrapped.activeWorkspace(displayID: "uuid-main")?.layoutName == "work")
+        #expect(bootstrapped.activeWorkspace(displayID: "uuid-sub")?.layoutName == "calendar")
+        #expect(bootstrapped.activeWorkspaces.count == 2)
+
         _ = try await engine.switchSpace(to: 2, config: dualConfig)
 
         let state = await engine.currentState
@@ -257,27 +238,35 @@ struct MultiDisplayWorkspaceTests {
         #expect(calendarSlots.allSatisfy { $0.visibilityState == .visible })
     }
 
-    @Test func secondaryReconcileKeepsPrimaryWorkspace() async throws {
-        let (engine, control, url) = makeEngine(windows: primaryWindows() + [calendarWindow()])
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-
-        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: dualConfig)
-        try await engine.bootstrapState(layoutName: "calendar", activeSpaceID: 1, config: dualConfig)
-        let textEditFrame = control.window(1)?.frame
-
-        _ = try await engine.switchSpace(layoutName: "calendar", to: 1, config: dualConfig, reconcile: true)
-
-        let state = await engine.currentState
-        #expect(state.activeWorkspace(displayID: "uuid-main")?.layoutName == "work")
-        #expect(state.activeWorkspace(displayID: "uuid-main")?.spaceID == 1)
-        #expect(control.window(1)?.frame == textEditFrame)
+    /// A secondary-workspace operation that must never touch the primary
+    /// workspace.
+    enum SecondaryWorkspaceOperation: String, CaseIterable, Sendable {
+        /// Single-space calendar layout reconciled on its active space (show).
+        case reconcileActiveSpace
+        /// Two-space calendar layout switched to its other space (hide).
+        case switchToOtherSpace
     }
 
-    @Test func secondarySwitchChangesOnlySecondaryWorkspace() async throws {
-        let config = TestFixtures.loadedConfig(layouts: [
-            "work": TestFixtures.twoSpaceLayout(),
-            "calendar": twoSpaceCalendarLayout(),
-        ])
+    @Test(arguments: SecondaryWorkspaceOperation.allCases)
+    func secondarySwitchChangesOnlySecondaryWorkspace(
+        _ operation: SecondaryWorkspaceOperation
+    ) async throws {
+        let config: LoadedConfig
+        let targetSpaceID: Int
+        let reconcile: Bool
+        switch operation {
+        case .reconcileActiveSpace:
+            config = dualConfig
+            targetSpaceID = 1
+            reconcile = true
+        case .switchToOtherSpace:
+            config = TestFixtures.loadedConfig(layouts: [
+                "work": TestFixtures.twoSpaceLayout(),
+                "calendar": twoSpaceCalendarLayout(),
+            ])
+            targetSpaceID = 2
+            reconcile = false
+        }
         let (engine, control, url) = makeEngine(windows: primaryWindows() + [calendarWindow()])
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
@@ -289,22 +278,26 @@ struct MultiDisplayWorkspaceTests {
 
         _ = try await engine.switchSpace(
             layoutName: "calendar",
-            to: 2,
-            config: config
+            to: targetSpaceID,
+            config: config,
+            reconcile: reconcile
         )
 
         let state = await engine.currentState
-        #expect(state.activeWorkspace(layoutName: "work")?.spaceID == 1)
-        #expect(state.activeWorkspace(layoutName: "calendar")?.spaceID == 2)
+        #expect(state.activeWorkspace(displayID: "uuid-main")?.layoutName == "work")
+        #expect(state.activeWorkspace(displayID: "uuid-main")?.spaceID == 1)
+        #expect(state.activeWorkspace(layoutName: "calendar")?.spaceID == targetSpaceID)
         for (windowID, frame) in primaryFrames {
             #expect(control.window(windowID)?.frame == frame)
         }
-        #expect(
-            VisibilityPlanner.isHiddenWindowFrame(
-                frame: try #require(control.window(5)?.frame),
-                displays: control.displays()
+        if operation == .switchToOtherSpace {
+            #expect(
+                VisibilityPlanner.isHiddenWindowFrame(
+                    frame: try #require(control.window(5)?.frame),
+                    displays: control.displays()
+                )
             )
-        )
+        }
     }
 
     @Test func switcherAndCycleCandidatesAreScopedToRequestedDisplay() async throws {
@@ -484,7 +477,7 @@ struct MultiDisplayWorkspaceTests {
         #expect(control.focusedWindowIDs == [1, 999])
     }
 
-    @Test func layoutScopedQueriesAndSwitchTargetOnlyRequestedWorkspace() async throws {
+    @Test func layoutScopedQueriesTargetOnlyRequestedWorkspace() async throws {
         let (engine, _, url) = makeEngine(windows: primaryWindows() + [calendarWindow()])
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
@@ -499,16 +492,6 @@ struct MultiDisplayWorkspaceTests {
         let current = try await engine.spaceCurrent(layoutName: "calendar", config: dualConfig)
         #expect(current.layoutName == "calendar")
         #expect(current.space?.spaceID == 1)
-
-        _ = try await engine.switchSpace(
-            layoutName: "calendar",
-            to: 1,
-            config: dualConfig,
-            reconcile: true
-        )
-        let state = await engine.currentState
-        #expect(state.activeWorkspace(layoutName: "work")?.spaceID == 1)
-        #expect(state.activeWorkspace(layoutName: "calendar")?.spaceID == 1)
     }
 
     @Test func layoutScopedSwitchRejectsConfiguredButInactiveWorkspace() async throws {
@@ -579,45 +562,6 @@ struct MultiDisplayWorkspaceTests {
         state = await engine.currentState
         let calendarSlot = state.slots(layoutName: "calendar").first
         #expect(calendarSlot?.windowID == strandedCalendar.windowID)
-    }
-
-    @Test func arrangeReclaimsWindowAdoptedByAnotherWorkspace() async throws {
-        // Even when a rule-matching window slipped into another workspace as
-        // an adopted entry (pre-foundation state or an edge race), the layout
-        // rule claim wins and the stale adopted entry is removed.
-        let strandedCalendar = calendarWindow(displayID: "uuid-main")
-        let (engine, _, url) = makeEngine(windows: primaryWindows() + [strandedCalendar])
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-
-        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: dualConfig)
-        try await engine.bootstrapState(layoutName: "calendar", activeSpaceID: 1, config: dualConfig)
-
-        var seeded = await engine.currentState
-        seeded.slots.append(SlotEntry(
-            layoutName: "work",
-            spaceID: 1,
-            slot: 0,
-            origin: .adopted,
-            definitionFingerprint: "adopted\u{0}\(Self.calendarBundleID)\u{0}5",
-            bundleID: Self.calendarBundleID,
-            pid: strandedCalendar.pid,
-            processStartTime: strandedCalendar.processStartTime,
-            windowID: strandedCalendar.windowID,
-            lastKnownTitle: strandedCalendar.title,
-            displayID: "uuid-main",
-            lastVisibleFrame: strandedCalendar.frame,
-            visibilityState: .visible
-        ))
-        try await engine.replaceState(seeded)
-
-        let result = try await engine.arrange(layoutName: "calendar", spaceID: nil, config: dualConfig)
-        #expect(result.result == "success")
-
-        let state = await engine.currentState
-        #expect(state.slots(layoutName: "calendar").first?.windowID == strandedCalendar.windowID)
-        #expect(!state.slots.contains {
-            $0.layoutName == "work" && $0.origin == .adopted && $0.bundleID == Self.calendarBundleID
-        })
     }
 
     // MARK: - Display affinity
@@ -735,9 +679,11 @@ struct MultiDisplayWorkspaceTests {
     }
 
     @Test func arrangeReclaimsParkedAdoptedWindowIntoVisiblePosition() async throws {
-        // The reclaim also works when the foreign adopted entry parked the
-        // window offscreen: after arrange the window is visible at its
-        // declared position and the recovery metadata is gone with the entry.
+        // Even when a rule-matching window slipped into another workspace as
+        // an adopted entry (pre-foundation state or an edge race) that parked
+        // it offscreen, the layout rule claim wins: after arrange the window is
+        // visible at its declared position and the stale adopted entry, with
+        // its recovery metadata, is removed.
         let strandedCalendar = calendarWindow(displayID: "uuid-main")
         let (engine, control, url) = makeEngine(windows: primaryWindows() + [strandedCalendar])
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -868,7 +814,7 @@ struct MultiDisplayWorkspaceTests {
         control.setDisplays([TestFixtures.display]) // secondary disconnected
 
         control.setFocusedWindowID(calendar.windowID)
-        await engine.invalidateFocusEvents(upTo: 0)
+        engine.invalidateFocusEvents(upTo: 0)
         _ = await engine.processFocusEvent(
             sequence: 1,
             windowID: calendar.windowID,

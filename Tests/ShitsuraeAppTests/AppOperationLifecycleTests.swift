@@ -43,7 +43,15 @@ private final class LifecycleWindowControl: WindowControl, @unchecked Sendable {
     func launchApplication(request: ApplicationLaunchRequest) -> Bool { false }
 }
 
-@Suite("Application operation lifecycle", .serialized)
+@MainActor
+private final class ManualArrangeOperationMonitor: ArrangeOperationMonitoring {
+    private var callback: (@MainActor @Sendable () -> Void)?
+    func start(interval: Duration, tick: @escaping @MainActor @Sendable () -> Void) { callback = tick }
+    func stop() { callback = nil }
+    func tick() { callback?() }
+}
+
+@Suite("Application operation lifecycle")
 @MainActor
 struct AppOperationLifecycleTests {
     private let yaml = """
@@ -56,7 +64,9 @@ struct AppOperationLifecycleTests {
       home:
         layouts: [main]
     """
-    private func fixture(state: RuntimeState = RuntimeState(), configText: String? = nil, control: LifecycleWindowControl = LifecycleWindowControl()
+    private func fixture(state: RuntimeState = RuntimeState(), configText: String? = nil,
+        control: LifecycleWindowControl = LifecycleWindowControl(),
+        monitor: (any ArrangeOperationMonitoring)? = nil, useLiveStatusProbes: Bool = false
     ) throws -> (AppModel, RuntimeStateStore, URL) {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("shitsurae-r2-app-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -68,7 +78,15 @@ struct AppOperationLifecycleTests {
         try store.saveStrict(state: state)
         let engine = try VirtualSpaceEngine(store: store, control: control, logger: logger,
             operationCoordinator: ArrangeOperationCoordinator())
-        return (AppModel(engine: engine, configManager: manager, logger: logger), store, directory)
+        if useLiveStatusProbes {
+            // Omit the provider argument to exercise both production defaults.
+            return (AppModel(engine: engine, configManager: manager, logger: logger), store, directory)
+        }
+        let displayInputs = control.displays()
+        let probes = StatusProbes(accessibilityGranted: { true }, screenRecordingGranted: { false },
+            displays: { displayInputs })
+        return (AppModel(engine: engine, configManager: manager, logger: logger,
+            statusProbes: probes, arrangeOperationMonitor: monitor), store, directory)
     }
     private func admittedGenerations(_ model: AppModel) -> [Int] {
         ((try? String(contentsOf: model.logger.logFileURL, encoding: .utf8)) ?? "").split(separator: "\n").compactMap { line in
@@ -85,25 +103,16 @@ struct AppOperationLifecycleTests {
         return condition()
     }
 
-    @Test func noArrangeViewLatestDisplayEventRunsOnceAfterCLILeaseEnds() async throws {
-        let (model, _, directory) = try fixture(configText: yaml)
-        defer { model.stopArrangeOperationMonitoring(); try? FileManager.default.removeItem(at: directory) }
-        let coordinator = model.engine.operationCoordinator
-        let token = try coordinator.tryAdmit(requestID: "cli-lease", operation: .arrangeSet)
-        model.startArrangeOperationMonitoring(interval: .milliseconds(10))
-        model.handleDisplayChange(); model.handleDisplayChange(); model.handleDisplayChange()
-        try await Task.sleep(for: .milliseconds(70))
-        #expect(admittedGenerations(model).isEmpty && coordinator.status().active?.requestID == "cli-lease")
-        coordinator.finish(token: token, result: "failed", exitCode: 54)
-        #expect(await eventually { admittedGenerations(model) == [3] && coordinator.status().active == nil })
-        try await Task.sleep(for: .milliseconds(80))
-        #expect(admittedGenerations(model) == [3])
-        #expect(coordinator.status().lastOutcome?.operation == .displayChange)
+    private func drainWork(_ model: AppModel) async throws {
+        // Bounded state arrival, followed by a FIFO file-write completion.
+        try #require(await eventually { !model.hasPendingArrangeOperationWork })
+        await model.logger.flush()
     }
 
     @Test func actualCLIRouterLeaseCompletionDrainsLatestDisplayEventWithoutAView() async throws {
         let control = LifecycleWindowControl()
-        let (model, _, directory) = try fixture(configText: yaml, control: control)
+        let monitor = ManualArrangeOperationMonitor()
+        let (model, _, directory) = try fixture(configText: yaml, control: control, monitor: monitor)
         defer { control.releaseInventory(); model.stopArrangeOperationMonitoring(); try? FileManager.default.removeItem(at: directory) }
         control.blockNextInventory()
         var request = CommandRequest(command: "arrangeSet")
@@ -112,17 +121,20 @@ struct AppOperationLifecycleTests {
         let data = try JSONEncoder().encode(request)
         let router = model.router
         let cli = Task.detached { await router.handle(requestData: data) }
-        #expect(await eventually { control.isInventoryBlocked })
+        try #require(await eventually { control.isInventoryBlocked })
         model.startArrangeOperationMonitoring(interval: .milliseconds(10))
         model.handleDisplayChange(); model.handleDisplayChange(); model.handleDisplayChange()
-        try await Task.sleep(for: .milliseconds(60))
+        for _ in 0..<3 { monitor.tick(); try await drainWork(model) }
         #expect(control.isInventoryBlocked && admittedGenerations(model).isEmpty)
         #expect(model.engine.operationCoordinator.status().active?.requestID == "actual-cli-route")
         control.releaseInventory()
         let response = try JSONDecoder().decode(CommandResponseProbe.self, from: await cli.value)
         #expect(response.exitCode == 54)
-        #expect(await eventually { admittedGenerations(model) == [3] && model.engine.operationCoordinator.status().active == nil })
-        try await Task.sleep(for: .milliseconds(80))
+        monitor.tick()
+        try await drainWork(model)
+        #expect(admittedGenerations(model) == [3] && model.engine.operationCoordinator.status().active == nil)
+        #expect(model.engine.operationCoordinator.status().lastOutcome?.operation == .displayChange)
+        for _ in 0..<3 { monitor.tick(); try await drainWork(model) }
         #expect(admittedGenerations(model) == [3])
     }
 
@@ -160,6 +172,15 @@ struct AppOperationLifecycleTests {
             if case let .partial(_, message) = model.actionStatus { return message.contains(reason) }
             return false
         })
+        try await drainWork(model)
+        let diagnostics = try #require(model.diagnostics)
+        #expect(model.accessibilityGranted && !model.screenRecordingGranted)
+        #expect(diagnostics.permissions.accessibility && !diagnostics.permissions.screenRecording)
+        #expect(model.displays.map(\.id) == ["primary"])
+        #expect(diagnostics.displays == model.displays.map(DisplaySummaryJSON.init(display:)))
+        #expect(model.runtimeState == (await model.engine.currentState))
+        #expect(model.runtimeState.slots.count == 1 && diagnostics.state.slotCount == 1)
+        #expect(diagnostics.state.revision == model.runtimeState.revision)
         let message = try #require(model.lastActionMessage)
         #expect(message.contains(reason) && !message.contains("exitCode=51"))
         let saved = try store.loadStrict()
@@ -171,7 +192,8 @@ struct AppOperationLifecycleTests {
 
     @Test(arguments: ["configuration", "invalidReload", "stopped", "shutdown"])
     func obsoleteDisplayEventDoesNotRunAfterLifecycleInvalidation(reason: String) async throws {
-        let (model, _, directory) = try fixture(configText: yaml)
+        let monitor = ManualArrangeOperationMonitor()
+        let (model, _, directory) = try fixture(configText: yaml, monitor: monitor)
         defer { model.stopArrangeOperationMonitoring(); try? FileManager.default.removeItem(at: directory) }
         let coordinator = model.engine.operationCoordinator
         let token = try coordinator.tryAdmit(requestID: "cli-lease", operation: .arrangeSet)
@@ -183,19 +205,20 @@ struct AppOperationLifecycleTests {
             try Data("layouts: invalid".utf8).write(to: directory.appendingPathComponent("config.yml"))
             #expect(!model.configManager.reload(trigger: "test"))
             model.handleConfigChange()
+            #expect(!model.configErrors.isEmpty)
         case "stopped": model.stopArrangeOperationMonitoring()
         default:
             var completed = false
             model.shutdown { completed = true }
-            #expect(await eventually { completed })
+            try #require(await eventually { completed })
         }
         coordinator.finish(token: token, result: "failed", exitCode: 54)
         model.handleDisplayChange() // A new event is also forbidden if invalid/stopped/shutdown.
+        monitor.tick()
+        try await drainWork(model)
         if reason == "configuration" { // A new event with a valid new config is legitimate.
-            #expect(await eventually { admittedGenerations(model).count == 1 })
             #expect(admittedGenerations(model) == [4])
         } else {
-            try await Task.sleep(for: .milliseconds(100))
             #expect(admittedGenerations(model).isEmpty)
         }
     }
@@ -206,14 +229,18 @@ struct AppOperationLifecycleTests {
             definitionDigest: "old", topologyDigest: "old")
         let state = RuntimeState(pendingLayoutTransition: journal,
             activeWorkspaces: [ActiveWorkspace(displayID: "primary", layoutName: "main", spaceID: 1)])
-        let (model, _, directory) = try fixture(state: state, configText: yaml)
+        let monitor = ManualArrangeOperationMonitor()
+        let (model, _, directory) = try fixture(state: state, configText: yaml, monitor: monitor)
         defer { model.stopArrangeOperationMonitoring(); try? FileManager.default.removeItem(at: directory) }
         model.startArrangeOperationMonitoring(interval: .milliseconds(10))
         model.handleDisplayChange(); model.handleDisplayChange()
-        try await Task.sleep(for: .milliseconds(80))
+        for _ in 0..<3 { monitor.tick(); try await drainWork(model) }
         #expect(admittedGenerations(model).isEmpty)
+        #expect(model.engine.operationCoordinator.status().pendingTransition?.requestID == "local")
         _ = try await model.engine.recoverLayoutTransition(requestID: "recover")
-        #expect(await eventually { admittedGenerations(model) == [2] })
+        monitor.tick()
+        try await drainWork(model)
+        #expect(admittedGenerations(model) == [2])
     }
 
     @Test(arguments: ["missing", "invalid", "invalidReload"])
@@ -230,7 +257,6 @@ struct AppOperationLifecycleTests {
             #expect(model.configManager.configIfLoaded() != nil) // keep-last-valid is not a valid reload.
         }
         model.handleConfigChange()
-        model.startArrangeOperationMonitoring(interval: .milliseconds(10))
         #expect(await eventually { model.runtimeState.slots.count == 1 })
         #expect(model.shouldOfferWindowRecovery)
     }
@@ -259,7 +285,6 @@ struct AppOperationLifecycleTests {
         let (model, _, directory) = try fixture(state: state, configText: initial)
         defer { model.stopArrangeOperationMonitoring(); try? FileManager.default.removeItem(at: directory) }
         model.handleConfigChange()
-        model.startArrangeOperationMonitoring(interval: .milliseconds(10))
         #expect(await eventually { model.runtimeState.activeWorkspaces.count == 1 })
         #expect(!model.shouldOfferWindowRecovery)
         let changed = initial.replacingOccurrences(of: "width: 500", with: "width: 800")
@@ -272,10 +297,6 @@ struct AppOperationLifecycleTests {
         #expect(model.configManager.reload(trigger: "test"))
         model.handleConfigChange()
         #expect(model.shouldOfferWindowRecovery)
-        var clean = state
-        clean.selectedLayoutSet = SelectedLayoutSet(name: "home", memberNames: ["main"], definitionDigest: ConfigDigest.layoutSet(name: "home", config: config))
-        clean.pendingVisibilityConvergences = [PendingVisibilityConvergence(requestID: "visibility", startedAt: "now", displayID: "primary", layoutName: "main", targetSpaceID: 1)]
-        #expect(!ArrangeActionResultPresentation.shouldOfferRecovery(state: clean, needsReapply: clean.anyActiveScopeNeedsReapply(config: config)))
     }
 
     @Test func validSelectedSetOrdinaryVisibilityPendingDoesNotOfferRestoreInAppModel() async throws {
@@ -292,5 +313,23 @@ struct AppOperationLifecycleTests {
         #expect(await eventually { model.runtimeState.pendingVisibilityConvergences.count == 1 })
         #expect(!model.shouldOfferWindowRecovery)
         #expect(await model.router.diagnostics().state.needsReapply == false)
+    }
+
+    @Test func productionStatusProbeDefaultsMatchSystemProbe() async throws {
+        let (model, _, directory) = try fixture(configText: yaml, useLiveStatusProbes: true)
+        defer { model.stopArrangeOperationMonitoring(); try? FileManager.default.removeItem(at: directory) }
+        let accessibility = SystemProbe.accessibilityGranted()
+        let screenRecording = SystemProbe.screenRecordingGranted()
+        let displays = SystemProbe.displays()
+        model.refreshStatus()
+        try await drainWork(model)
+        #expect(model.accessibilityGranted == accessibility)
+        #expect(model.screenRecordingGranted == screenRecording)
+        #expect(model.displays == displays)
+        let diagnostics = try #require(model.diagnostics)
+        #expect(diagnostics.permissions.accessibility == accessibility)
+        #expect(diagnostics.permissions.screenRecording == screenRecording)
+        #expect(diagnostics.displays == displays.map(DisplaySummaryJSON.init(display:)))
+        #expect(model.runtimeState == (await model.engine.currentState))
     }
 }

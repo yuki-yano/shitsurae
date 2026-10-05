@@ -43,18 +43,6 @@ struct ConfigLoaderTests {
                   height: "100%"
     """
 
-    @Test func loadsBasicLayout() throws {
-        let dir = try makeTempDirectory()
-        defer { try? FileManager.default.removeItem(at: dir) }
-        try write(basicLayout, as: "01-basic.yaml", in: dir)
-
-        let loaded = try ConfigLoader().load(from: dir)
-        #expect(loaded.config.layouts.count == 1)
-        #expect(loaded.config.layouts["work"]?.spaces.first?.windows.count == 2)
-        #expect(loaded.configGeneration.count == 64)
-        #expect(loaded.configFiles.allSatisfy { $0.loaded })
-    }
-
     @Test func loadsWindowWithoutFrame() throws {
         let dir = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -162,38 +150,6 @@ struct ConfigLoaderTests {
         } catch {
             Issue.record("unexpected error type: \(error)")
         }
-    }
-
-    @Test func acceptsLayoutLevelDisplayDeclaration() throws {
-        let dir = try makeTempDirectory()
-        defer { try? FileManager.default.removeItem(at: dir) }
-        try write(
-            """
-            monitors:
-              calendar:
-                id: uuid-sub
-            layouts:
-              calendar:
-                display:
-                  monitor: calendar
-                spaces:
-                  - spaceID: 1
-                    windows:
-                      - slot: 1
-                        match:
-                          bundleID: com.example.Calendar
-                        frame:
-                          x: "0%"
-                          y: "0%"
-                          width: "100%"
-                          height: "100%"
-            """,
-            as: "01-layout-display.yaml",
-            in: dir
-        )
-
-        let loaded = try ConfigLoader().load(from: dir)
-        #expect(loaded.config.layouts["calendar"]?.display?.monitor == "calendar")
     }
 
     @Test func acceptsModeFollowFocus() throws {

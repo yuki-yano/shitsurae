@@ -44,9 +44,12 @@ struct ConfigValidatorTests {
                 SpaceDefinition(spaceID: 1, windows: [
                     makeWindow(bundleID: "com.apple.TextEdit", slot: 1),
                     makeWindow(bundleID: "com.apple.Terminal", slot: 2),
+                    makeWindow(bundleID: "com.googlecode.iterm2", slot: 3, index: 1),
+                    makeWindow(bundleID: "com.google.Chrome", slot: 4, profile: "Default"),
                 ]),
                 SpaceDefinition(spaceID: 2, windows: [
                     makeWindow(bundleID: "com.apple.Notes", slot: 1),
+                    makeWindow(bundleID: "com.googlecode.iterm2", slot: 2, index: 2),
                 ]),
             ]),
         ])
@@ -69,22 +72,6 @@ struct ConfigValidatorTests {
 
         let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
         #expect(errors.contains { $0.message.contains("add match.title / match.profile / match.index") })
-    }
-
-    @Test func acceptsSameBundleIDWithDiscriminators() {
-        let config = makeConfig(layouts: [
-            "work": LayoutDefinition(spaces: [
-                SpaceDefinition(spaceID: 1, windows: [
-                    makeWindow(bundleID: "com.apple.Terminal", slot: 1, index: 1),
-                ]),
-                SpaceDefinition(spaceID: 2, windows: [
-                    makeWindow(bundleID: "com.apple.Terminal", slot: 1, index: 2),
-                ]),
-            ]),
-        ])
-
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
-        #expect(errors.isEmpty)
     }
 
     @Test func rejectsIdenticalMatchers() {
@@ -140,19 +127,6 @@ struct ConfigValidatorTests {
 
         let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
         #expect(errors.contains { $0.message.contains("Chromium") })
-    }
-
-    @Test func acceptsProfileForChrome() {
-        let config = makeConfig(layouts: [
-            "work": LayoutDefinition(spaces: [
-                SpaceDefinition(spaceID: 1, windows: [
-                    makeWindow(bundleID: "com.google.Chrome", slot: 1, profile: "Default"),
-                ]),
-            ]),
-        ])
-
-        let errors = ConfigValidator.validate(config: config, sourcePath: "/test")
-        #expect(errors.isEmpty)
     }
 
     @Test func rejectsMonitorAndIDTogetherInLayoutDisplay() {

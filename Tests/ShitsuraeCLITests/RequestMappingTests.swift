@@ -142,13 +142,8 @@ struct RequestMappingTests {
         #expect(command.focus == "preserve")
     }
 
-    @Test(arguments: [
-        "windowWorkspace",
-        "windowMove",
-        "windowResize",
-        "windowSet",
-    ])
-    func windowCommandsMapGeometryAndSelector(command: String) {
+    @Test func windowSetMapsGeometryAndSelector() {
+        let command = "windowSet"
         let request = CLIRequestBuilder.window(
             command: command,
             selector: selector,

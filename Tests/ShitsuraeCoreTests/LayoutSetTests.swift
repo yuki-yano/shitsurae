@@ -136,6 +136,7 @@ struct LayoutSetTests {
         coordinator: ArrangeOperationCoordinator = ArrangeOperationCoordinator()
     ) -> (VirtualSpaceEngine, MockWindowControl, URL) {
         let control = MockWindowControl(windows: windows, displays: displays)
+        let waitClock = ArrangeWaitTestClock.connected(to: control)
         let (store, url) = TestFixtures.tempStateStore()
         let engine = try! VirtualSpaceEngine(
             store: store,
@@ -143,6 +144,7 @@ struct LayoutSetTests {
             logger: TestFixtures.nullLogger(),
             retryDelaysMS: [1],
             arrangeWaitTimeoutMS: 10,
+            arrangeUptimeNanoseconds: { waitClock.now },
             operationCoordinator: coordinator
         )
         return (engine, control, url)

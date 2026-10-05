@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import ShitsuraeCore
 
-@Suite("Layout sets Round 3", .serialized)
+@Suite("Layout sets Round 3")
 struct LayoutSetsRoundThreeTests {
     private let reason = "retainedAdoptedGeometryBlocked"
     private struct Fixture {
@@ -42,9 +42,10 @@ struct LayoutSetsRoundThreeTests {
         let (store, url) = TestFixtures.tempStateStore()
         try store.saveStrict(state: state)
         let control = MockWindowControl(windows: [good, blocked, side], displays: [TestFixtures.display, TestFixtures.secondaryDisplay()])
+        let waitClock = ArrangeWaitTestClock.connected(to: control)
         let coordinator = ArrangeOperationCoordinator(uptimeNanoseconds: { clock?.now ?? DispatchTime.now().uptimeNanoseconds })
         let engine = try VirtualSpaceEngine(store: store, control: control, logger: TestFixtures.nullLogger(), retryDelaysMS: [1],
-            arrangeWaitTimeoutMS: 10, operationCoordinator: coordinator)
+            arrangeWaitTimeoutMS: 10, arrangeUptimeNanoseconds: { waitClock.now }, operationCoordinator: coordinator)
         return Fixture(engine: engine, control: control, store: store, directory: url.deletingLastPathComponent(),
             config: config, adopted: adopted, blocked: blocked)
     }

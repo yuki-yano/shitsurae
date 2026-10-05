@@ -187,7 +187,15 @@ final class AppModel: ObservableObject {
     )
     @Published private(set) var lastLayoutSetResult: LayoutSetExecutionJSON?
     private var displayChanges = DisplayChangeEventState()
-    private var arrangeOperationStatusTask: Task<Void, Never>?
+    private let arrangeOperationMonitor: any ArrangeOperationMonitoring
+    private let statusProbes: StatusProbes
+    private var statusRefreshes: Set<UUID> = []
+    private var pendingDisplayChangeTasks = 0
+
+    /// Idle only after the scheduled status/display bodies have returned.
+    var hasPendingArrangeOperationWork: Bool {
+        !statusRefreshes.isEmpty || pendingDisplayChangeTasks != 0
+    }
     private var operationMonitoringStarted = false
     @Published var lastActionMessage: String?
     @Published var actionStatus: ActionStatus = .idle
@@ -233,6 +241,8 @@ final class AppModel: ObservableObject {
     private var workspaceStateCaptureGeneration: UInt64 = 0
 
     init() {
+        arrangeOperationMonitor = PeriodicArrangeOperationMonitor()
+        statusProbes = .live
         logger = ShitsuraeLogger()
         let focusEventGate = FocusEventGate()
         self.focusEventGate = focusEventGate
@@ -266,17 +276,20 @@ final class AppModel: ObservableObject {
 
     /// Dependency-only construction: does not start servers, AX observers,
     /// permissions checks or OS notifications.
-    init(engine: VirtualSpaceEngine, configManager: ConfigManager, logger: ShitsuraeLogger) {
+    init(engine: VirtualSpaceEngine, configManager: ConfigManager, logger: ShitsuraeLogger,
+        statusProbes: StatusProbes = .live,
+        arrangeOperationMonitor: (any ArrangeOperationMonitoring)? = nil) {
+        self.statusProbes = statusProbes
+        self.arrangeOperationMonitor = arrangeOperationMonitor ?? PeriodicArrangeOperationMonitor()
         self.logger = logger
         self.engine = engine
         self.configManager = configManager
         let gate = FocusEventGate()
         focusEventGate = gate
         focusEventCoordinator = FocusEventCoordinator(gate: gate)
-        router = CommandRouter(engine: engine, configManager: configManager, logger: logger)
+        router = CommandRouter(engine: engine, configManager: configManager, logger: logger,
+            statusProbes: statusProbes)
     }
-
-    deinit { arrangeOperationStatusTask?.cancel() }
 
     /// State loading is fail-closed: an unsupported or corrupt file may be
     /// the only record of windows parked offscreen, so it is never discarded
@@ -502,20 +515,15 @@ final class AppModel: ObservableObject {
     func startArrangeOperationMonitoring(interval: Duration = .milliseconds(500)) {
         guard !shutdownInProgress, !operationMonitoringStarted else { return }
         operationMonitoringStarted = true
-        arrangeOperationStatusTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                guard self?.operationMonitoringStarted == true, self?.shutdownInProgress == false else { return }
-                self?.refreshArrangeOperationStatus()
-                // Do not retain the application model across the suspension.
-                try? await Task.sleep(for: interval)
-            }
+        arrangeOperationMonitor.start(interval: interval) { [weak self] in
+            guard let self, self.operationMonitoringStarted, !self.shutdownInProgress else { return }
+            self.refreshArrangeOperationStatus()
         }
     }
 
     func stopArrangeOperationMonitoring() {
         operationMonitoringStarted = false
-        arrangeOperationStatusTask?.cancel()
-        arrangeOperationStatusTask = nil
+        arrangeOperationMonitor.stop()
         displayChanges.invalidateForConfigurationChange()
         if engine.operationCoordinator.status().active?.operation == .displayChange {
             engine.operationCoordinator.invalidateCurrent()
@@ -523,12 +531,15 @@ final class AppModel: ObservableObject {
     }
 
     func refreshStatus() {
-        accessibilityGranted = SystemProbe.accessibilityGranted()
-        screenRecordingGranted = SystemProbe.screenRecordingGranted()
-        displays = SystemProbe.displays()
+        accessibilityGranted = statusProbes.accessibilityGranted()
+        screenRecordingGranted = statusProbes.screenRecordingGranted()
+        displays = statusProbes.displays()
 
+        let refreshID = UUID()
+        statusRefreshes.insert(refreshID)
         Task { @MainActor [weak self] in
             guard let self else { return }
+            defer { self.statusRefreshes.remove(refreshID) }
             let primaryLayoutName = await engine.activeLayoutName()
             let primarySpaceID = await engine.activeSpaceID()
             runtimeState = await engine.currentState
@@ -1618,9 +1629,11 @@ final class AppModel: ObservableObject {
               let config = configManager.configIfLoaded(),
               let generation = displayChanges.beginLatest() else { return }
         let engine = engine
+        pendingDisplayChangeTasks += 1
         Task { [weak self] in
             guard let self else { return }
             defer {
+                self.pendingDisplayChangeTasks -= 1
                 self.displayChanges.finish()
                 self.drainPendingDisplayChange()
             }

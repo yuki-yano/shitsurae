@@ -19,22 +19,6 @@ struct FollowFocusPolicyTests {
         #expect(gate.isCurrent(11))
     }
 
-    @Test func trackedFocusedWindowKeepsItsWorkspace() {
-        let policy = FollowFocusPolicy()
-        let now = Date(timeIntervalSince1970: 100)
-
-        let decision = policy.decisionForFocusedWindow(
-            targetSpaceID: 2,
-            activeSpaceID: 1,
-            followFocusEnabled: true,
-            lastFollowFocusSwitchAt: nil,
-            lastActiveSpaceChangeAt: nil,
-            now: now.addingTimeInterval(0.2)
-        )
-
-        #expect(decision == .switchSpace(2))
-    }
-
     @Test func existingFocusedWindowSwitchesToItsTrackedWorkspace() {
         let policy = FollowFocusPolicy()
         let now = Date(timeIntervalSince1970: 100)

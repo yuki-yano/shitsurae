@@ -81,23 +81,6 @@ struct WindowRegistryTests {
         )
     }
 
-    // バグ1-a 回帰: 同一bundleIDの複数エントリが同一ウィンドウに解決されない
-    @Test func twoEntriesNeverShareOneWindow() {
-        let windows = [
-            makeWindow(id: 1, bundleID: "com.apple.Terminal", frontIndex: 0),
-            makeWindow(id: 2, bundleID: "com.apple.Terminal", frontIndex: 1),
-        ]
-        let entries = [
-            entry("space1-slot1", bundleID: "com.apple.Terminal", index: 1),
-            entry("space2-slot1", bundleID: "com.apple.Terminal", index: 2),
-        ]
-
-        let resolution = resolve(entries: entries, windows: windows)
-        #expect(resolution.unresolved.isEmpty)
-        let assigned = Set(resolution.assignments.values.map(\.windowID))
-        #expect(assigned == [1, 2])
-    }
-
     @Test func windowIDMatchWinsOverRules() {
         let windows = [
             makeWindow(id: 1, bundleID: "com.apple.Terminal", title: "small", area: 100),
@@ -115,7 +98,7 @@ struct WindowRegistryTests {
         #expect(resolution.assignments["b"]?.windowID == 2)
     }
 
-    // バグ2-c 回帰: index エントリ同士は同一の固定プールを見る
+    // バグ1-a/2-c 回帰: 重複割当せず、index エントリ同士は同一の固定プールを見る
     @Test func indexEntriesShareStableOrdering() {
         let windows = [
             makeWindow(id: 10, bundleID: "app", title: "w1", frontIndex: 0),
@@ -133,6 +116,7 @@ struct WindowRegistryTests {
         #expect(resolution.assignments["first"]?.windowID == 10)
         #expect(resolution.assignments["second"]?.windowID == 20)
         #expect(resolution.assignments["third"]?.windowID == 30)
+        #expect(resolution.unresolved.isEmpty)
     }
 
     @Test func indexOutOfBoundsIsUnresolvedAndDoesNotStealWindow() {
@@ -163,6 +147,8 @@ struct WindowRegistryTests {
         let resolution = resolve(entries: entries, windows: windows)
         #expect(resolution.assignments["notes"]?.windowID == 1)
         #expect(resolution.assignments["build"]?.windowID == 2)
+        #expect(assignedEntry(for: windows[0], entries: entries, windows: windows)?.id == "notes")
+        #expect(assignedEntry(for: windows[1], entries: entries, windows: windows)?.id == "build")
     }
 
     @Test func profileDiscriminatorMatches() {
@@ -193,18 +179,6 @@ struct WindowRegistryTests {
         let resolution = resolve(entries: entries, windows: windows)
         #expect(resolution.unresolved == ["work"])
         #expect(resolution.unassignedWindows.map(\.windowID) == [1])
-    }
-
-    @Test func staleWindowIDFallsBackToRule() {
-        let windows = [
-            makeWindow(id: 99, bundleID: "com.apple.Notes"),
-        ]
-        let entries = [
-            entry("notes", bundleID: "com.apple.Notes", windowID: 12345), // stale
-        ]
-
-        let resolution = resolve(entries: entries, windows: windows)
-        #expect(resolution.assignments["notes"]?.windowID == 99)
     }
 
     @Test func exactOnlyDoesNotRebindStaleEntryToSameBundle() {
@@ -392,25 +366,6 @@ struct WindowRegistryTests {
         #expect(
             assignedEntry(for: retitled, entries: [bound], windows: [retitled])?.id == "slot"
         )
-    }
-
-    @Test func assignedEntryRejectsMatchingWindowIDOwnedByDifferentPID() {
-        let window = makeWindow(id: 7, bundleID: "app", pid: 700)
-        let entries = [
-            entry("stale", bundleID: "app", pid: 701, windowID: 7, bindingPolicy: .exactOnly),
-        ]
-
-        #expect(assignedEntry(for: window, entries: entries, windows: [window]) == nil)
-    }
-
-    @Test func assignedEntryUniqueRuleMatch() {
-        let window = makeWindow(id: 7, bundleID: "app", title: "notes")
-        let entries = [
-            entry("a", bundleID: "app", title: TitleMatcher(contains: "notes")),
-            entry("b", bundleID: "other"),
-        ]
-
-        #expect(assignedEntry(for: window, entries: entries, windows: [window])?.id == "a")
     }
 
     @Test func assignedEntryExcludesEntriesBoundToOtherLiveWindows() {

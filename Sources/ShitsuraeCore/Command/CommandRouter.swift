@@ -56,6 +56,27 @@ private final class CommandDispatchAdmission: @unchecked Sendable {
     func record(_ token: ArrangeOperationToken) { lock.lock(); admitted = token; lock.unlock() }
 }
 
+/// OS-only status inputs. Engine/config projections remain real in diagnostics.
+public struct StatusProbes: Sendable {
+    public let accessibilityGranted: @Sendable () -> Bool
+    public let screenRecordingGranted: @Sendable () -> Bool
+    public let displays: @Sendable () -> [DisplayInfo]
+
+    public init(accessibilityGranted: @escaping @Sendable () -> Bool,
+        screenRecordingGranted: @escaping @Sendable () -> Bool,
+        displays: @escaping @Sendable () -> [DisplayInfo]) {
+        self.accessibilityGranted = accessibilityGranted
+        self.screenRecordingGranted = screenRecordingGranted
+        self.displays = displays
+    }
+
+    public static let live = StatusProbes(
+        accessibilityGranted: { SystemProbe.accessibilityGranted() },
+        screenRecordingGranted: { SystemProbe.screenRecordingGranted() },
+        displays: { SystemProbe.displays() }
+    )
+}
+
 /// Thin dispatch from wire requests to the engine; owns nothing but
 /// references. All payloads are encoded into a uniform envelope:
 /// `{"ok": Bool, "exitCode": Int, "payload": ..., "error": ...}`
@@ -74,14 +95,17 @@ public final class CommandRouter: @unchecked Sendable {
     private let engine: VirtualSpaceEngine
     private let configManager: ConfigManager
     private let logger: ShitsuraeLogger
+    private let statusProbes: StatusProbes
     private let replayLock = NSLock()
     private var activeRequestSignatures: [String: Data] = [:]
     private var lastCompletedRequest: (requestID: String, signature: Data, response: Data)?
 
-    public init(engine: VirtualSpaceEngine, configManager: ConfigManager, logger: ShitsuraeLogger) {
+    public init(engine: VirtualSpaceEngine, configManager: ConfigManager, logger: ShitsuraeLogger,
+        statusProbes: StatusProbes = .live) {
         self.engine = engine
         self.configManager = configManager
         self.logger = logger
+        self.statusProbes = statusProbes
     }
 
     public func handle(requestData: Data) async -> Data {
@@ -640,8 +664,8 @@ public final class CommandRouter: @unchecked Sendable {
         return DiagnosticsJSON(
             version: Self.appVersion,
             permissions: DiagnosticsJSON.Permissions(
-                accessibility: SystemProbe.accessibilityGranted(),
-                screenRecording: SystemProbe.screenRecordingGranted()
+                accessibility: statusProbes.accessibilityGranted(),
+                screenRecording: statusProbes.screenRecordingGranted()
             ),
             configFiles: config?.configFiles ?? [],
             configReload: configManager.reloadStatus(),
@@ -659,7 +683,7 @@ public final class CommandRouter: @unchecked Sendable {
                 configGeneration: state.configGeneration,
                 revision: state.revision
             ),
-            displays: SystemProbe.displays().map(DisplaySummaryJSON.init(display:))
+            displays: statusProbes.displays().map(DisplaySummaryJSON.init(display:))
         )
     }
 

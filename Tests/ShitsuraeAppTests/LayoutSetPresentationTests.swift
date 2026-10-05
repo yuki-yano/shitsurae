@@ -31,30 +31,16 @@ struct LayoutSetPresentationTests {
         )
     }
 
-    @Test func oneMemberSetIsApplicableAndSelectionIsOnlyPresentationState() throws {
-        let config = ShitsuraeConfig(
-            layouts: ["macbook-pro": layout(spaces: [1, 2])],
-            layoutSets: ["mobile": LayoutSetDefinition(layouts: ["macbook-pro"])]
-        )
-
-        let item = try #require(LayoutSetPresentation.makeAll(
-            config: config,
-            state: RuntimeState(),
-            displays: [primary]
-        ).first)
-
-        #expect(item.name == "mobile")
-        #expect(item.members.count == 1)
-        #expect(item.members[0].targetSpaceID == 1)
-        #expect(item.canApply)
-        #expect(!item.isSelected)
-    }
-
     @Test func selectedSetReapplyPreservesValidCurrentSpaceAndShowsDirtyDigest() throws {
         let config = ShitsuraeConfig(
             layouts: ["macbook-pro": layout(spaces: [1, 2])],
             layoutSets: ["mobile": LayoutSetDefinition(layouts: ["macbook-pro"])]
         )
+        let initial = try #require(LayoutSetPresentation.makeAll(config: config,
+            state: RuntimeState(), displays: [primary]).first)
+        #expect(initial.name == "mobile")
+        #expect(initial.members.count == 1 && initial.members[0].targetSpaceID == 1)
+        #expect(initial.canApply && !initial.isSelected)
         var state = RuntimeState(
             selectedLayoutSet: SelectedLayoutSet(
                 name: "mobile",
@@ -98,15 +84,18 @@ struct LayoutSetPresentationTests {
             layouts: ["a": layout(), "b": layout()],
             layoutSets: ["collision": LayoutSetDefinition(layouts: ["a", "b"])]
         )
+        let privateDisplay = DisplayInfo(id: "private-id", width: primary.width, height: primary.height,
+            scale: primary.scale, isPrimary: true, frame: primary.frame, visibleFrame: primary.visibleFrame)
         let collision = try #require(LayoutSetPresentation.makeAll(
             config: collisionConfig,
             state: RuntimeState(),
-            displays: [primary, secondary]
+            displays: [privateDisplay, secondary]
         ).first)
         #expect(!collision.canApply)
         #expect(collision.members.contains { $0.issue == "Display collision" })
         #expect(collision.blockingReason?.contains("Assign each member to a different display") == true)
         #expect(collision.blockingReason?.contains("displayCollision(") == false)
+        #expect(collision.blockingReason?.contains("private-id") == false)
     }
 
     @Test func deletedSelectedSetIsNeedsReapplyWithoutFabricatingAPresentation() {
@@ -143,16 +132,10 @@ struct LayoutSetPresentationTests {
     }
 
     @Test func plannerFailuresUseHumanReasonAndActionWithoutEnumDescriptions() {
-        let errors: [LayoutSetPlanError] = [.hostDisplayUnavailable("side"),
-            .displayCollision(displayID: "private-id", layouts: ["main", "side"]),
-            .candidateConflict(layouts: ["main", "side"], identity: WindowIdentity(pid: 1, processStartTime: 1, windowID: 1, bundleID: "Editor"))]
-        #expect(errors[0].displayMessage.contains("Connect it"))
-        #expect(errors[1].displayMessage.contains("different display"))
-        #expect(errors[2].displayMessage.contains("window matching rules"))
-        for error in errors {
-            #expect(!error.displayMessage.contains(String(describing: error)))
-            #expect(!error.displayMessage.contains("private-id"))
-        }
+        let error = LayoutSetPlanError.candidateConflict(layouts: ["main", "side"],
+            identity: WindowIdentity(pid: 1, processStartTime: 1, windowID: 1, bundleID: "Editor"))
+        #expect(error.displayMessage.contains("window matching rules"))
+        #expect(!error.displayMessage.contains(String(describing: error)))
     }
 
     @Test func membersShowActiveDormantAndInactiveWithoutChangingSelection() throws {

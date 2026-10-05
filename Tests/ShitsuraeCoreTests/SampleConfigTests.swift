@@ -32,6 +32,10 @@ struct SampleConfigTests {
         let loaded = try ConfigLoader().load(from: dir)
         #expect(loaded.config.layouts.keys.sorted() == ["pinnedDashboard", "virtualWork"])
         #expect(loaded.config.layouts["virtualWork"]?.spaces.count == 2)
+        #expect(loaded.config.layouts["virtualWork"]?.spaces.first?.windows.count == 2)
+        #expect(loaded.configGeneration.count == 64)
+        #expect(!loaded.configFiles.isEmpty)
+        #expect(loaded.configFiles.allSatisfy { $0.loaded })
         #expect(loaded.config.layouts["pinnedDashboard"]?.display?.monitor == "calendar")
     }
 }

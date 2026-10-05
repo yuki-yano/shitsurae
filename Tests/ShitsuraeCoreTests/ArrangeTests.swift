@@ -12,13 +12,15 @@ struct ArrangeTests {
         windows: [WindowSnapshot]
     ) -> (engine: VirtualSpaceEngine, control: MockWindowControl, stateURL: URL) {
         let control = MockWindowControl(windows: windows, displays: [TestFixtures.display])
+        let waitClock = ArrangeWaitTestClock.connected(to: control)
         let (store, url) = TestFixtures.tempStateStore()
         let engine = try! VirtualSpaceEngine(
             store: store,
             control: control,
             logger: TestFixtures.nullLogger(),
             retryDelaysMS: [1],
-            arrangeWaitTimeoutMS: 50
+            arrangeWaitTimeoutMS: 50,
+            arrangeUptimeNanoseconds: { waitClock.now }
         )
         return (engine, control, url)
     }
@@ -32,27 +34,28 @@ struct ArrangeTests {
     }
 
     @Test func dryRunListsPlanAndAvailableSpaces() async throws {
-        let (engine, _, url) = makeEngine(windows: standardWindows())
+        let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
+        let focusAttempted = TestSignal()
+        control.onFocusAttempt = { focusAttempted.signal() }
+        let before = await engine.currentState
+        let savedBefore = try? Data(contentsOf: url)
+        let savedRevision = try RuntimeStateStore(stateFileURL: url).loadStrict().revision
         let dryRun = try await engine.arrangeDryRun(layoutName: "work", spaceID: nil, config: config)
 
         #expect(dryRun.availableSpaceIDs == [1, 2])
         #expect(dryRun.plan.contains { $0.action == "setFrame" && $0.bundleID == "com.apple.TextEdit" })
         #expect(dryRun.plan.contains { $0.action == "focusInitial" })
         #expect(dryRun.skipped.isEmpty)
-        // No windows were touched.
-        #expect(dryRun.plan.allSatisfy { $0.action != "moveSpace" })
-    }
-
-    @Test func dryRunReportsMissingWindows() async throws {
-        let (engine, _, url) = makeEngine(windows: [
-            TestFixtures.window(id: 1, bundleID: "com.apple.TextEdit", isAXBacked: true),
-        ])
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-
-        let dryRun = try await engine.arrangeDryRun(layoutName: "work", spaceID: nil, config: config)
-        #expect(dryRun.skipped.contains { $0.reason == "noWindowMatched" })
+        #expect(control.frameMutationAttemptWindowIDs.isEmpty)
+        #expect(control.minimizeAttempts.isEmpty && control.focusedWindowIDs.isEmpty)
+        #expect(!focusAttempted.isSet)
+        #expect(control.launchedRequests.isEmpty && control.activatedBundles.isEmpty)
+        #expect(await engine.currentState == before)
+        #expect((await engine.currentState).revision == before.revision)
+        #expect((try? Data(contentsOf: url)) == savedBefore)
+        #expect(try RuntimeStateStore(stateFileURL: url).loadStrict().revision == savedRevision)
     }
 
     @Test func stateOnlyBootstrapsWithoutTouchingWindows() async throws {
@@ -102,6 +105,12 @@ struct ArrangeTests {
         let notesEntry = state.slots.first { $0.bundleID == "com.apple.Notes" }
         #expect(notesEntry?.visibilityState == .hiddenOffscreen)
         #expect(notesEntry?.windowID == 3)
+        let firstIDs = Set(state.slots.map(\.id))
+        #expect(state.slots.count == 3 && firstIDs.count == 3)
+        #expect(Set(state.slots.compactMap(\.boundIdentity)) == Set(standardWindows().map(\.identity)))
+        let second = try await engine.arrange(layoutName: "work", spaceID: nil, config: config)
+        #expect(second.result == "success")
+        #expect(Set((await engine.currentState).slots.map(\.id)) == firstIDs)
     }
 
     @Test func arrangeWithoutFrameTracksWindowWithoutMovingOrResizingIt() async throws {
@@ -154,6 +163,9 @@ struct ArrangeTests {
         ])
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
+        let dryRun = try await engine.arrangeDryRun(layoutName: "work", spaceID: nil, config: config)
+        // Notes is the space-2 slot-1 definition in this fixture.
+        #expect(dryRun.skipped.contains { $0.reason == "noWindowMatched" && $0.spaceID == 2 && $0.slot == 1 })
         try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
         let result = try await engine.arrange(layoutName: "work", spaceID: nil, config: config)
 
@@ -181,32 +193,6 @@ struct ArrangeTests {
         // space1 entries kept (preserved fingerprints) and hidden after reconcile.
         let space1Entries = state.slots.filter { $0.spaceID == 1 }
         #expect(space1Entries.count == 2)
-    }
-
-    @Test func arrangeRestoresHiddenWindowsBeforePlacing() async throws {
-        let (engine, control, url) = makeEngine(windows: standardWindows())
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-
-        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
-        // Hide space2 by switching to space1 context, then arrange all.
-        _ = try await engine.switchSpace(to: 2, config: config)
-        _ = try await engine.switchSpace(to: 1, config: config)
-
-        let notesBefore = control.window(3)!
-        #expect(VisibilityPlanner.isHiddenWindowFrame(frame: notesBefore.frame, displays: [TestFixtures.display]))
-
-        let result = try await engine.arrange(layoutName: "work", spaceID: nil, config: config)
-        #expect(result.result == "success")
-
-        // After arrange, notes is hidden again (active space 1), but it was
-        // restored mid-arrange and its tracked lastVisibleFrame is the layout
-        // frame, not the parking position.
-        let state = await engine.currentState
-        let notesEntry = state.slots.first { $0.bundleID == "com.apple.Notes" }
-        #expect(notesEntry != nil)
-        if let frame = notesEntry?.lastVisibleFrame {
-            #expect(!VisibilityPlanner.isHiddenWindowFrame(frame: frame, displays: [TestFixtures.display]))
-        }
     }
 
     @Test func resolutionChangeRebasesConnectedWorkspaceBeforeReconcile() async throws {
@@ -244,10 +230,15 @@ struct ArrangeTests {
 
         let initial = try await engine.arrange(layoutName: "work", spaceID: nil, config: config)
         #expect(initial.result == "success")
+        _ = try await engine.switchSpace(to: 2, config: config)
+        _ = try await engine.switchSpace(to: 1, config: config)
+        #expect(VisibilityPlanner.isHiddenWindowFrame(frame: try #require(control.window(3)).frame,
+            displays: [TestFixtures.display]))
         let staleNotesFrame = try #require((await engine.currentState).slots.first {
             $0.bundleID == "com.apple.Notes"
         }?.lastVisibleFrame)
         #expect(staleNotesFrame == ResolvedFrame(x: 0, y: 0, width: 1440, height: 875))
+        #expect(!VisibilityPlanner.isHiddenWindowFrame(frame: staleNotesFrame, displays: [TestFixtures.display]))
 
         let compactDisplay = DisplayInfo(
             id: TestFixtures.display.id,
@@ -271,6 +262,10 @@ struct ArrangeTests {
         })
         #expect(notesEntry.lastVisibleFrame == ResolvedFrame(x: 0, y: 0, width: 1000, height: 575))
         #expect(notesEntry.visibilityState == .hiddenOffscreen)
+        #expect(VisibilityPlanner.isHiddenWindowFrame(frame: try #require(control.window(3)).frame,
+            displays: [compactDisplay]))
+        #expect(!VisibilityPlanner.isHiddenWindowFrame(frame: try #require(notesEntry.lastVisibleFrame),
+            displays: [compactDisplay]))
     }
 
     @Test func stateOnlyRejectsRemovingRecoveryMetadataForHiddenWindow() async throws {
@@ -652,24 +647,6 @@ struct ArrangeTests {
         #expect(owners.first?.origin == .layout)
     }
 
-    @Test func arrangePreservesRuntimeBindingAcrossRuns() async throws {
-        let (engine, _, url) = makeEngine(windows: standardWindows())
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-
-        try await engine.bootstrapState(layoutName: "work", activeSpaceID: 1, config: config)
-        _ = try await engine.arrange(layoutName: "work", spaceID: nil, config: config)
-
-        let firstState = await engine.currentState
-        let firstIDs = Set(firstState.slots.map(\.id))
-
-        _ = try await engine.arrange(layoutName: "work", spaceID: nil, config: config)
-        let secondState = await engine.currentState
-        let secondIDs = Set(secondState.slots.map(\.id))
-
-        // Entry identity is stable across arranges (same fingerprints).
-        #expect(firstIDs == secondIDs)
-    }
-
     @Test func arrangePreferredBindingRejectsReusedIDFromAnotherProcess() async throws {
         let (engine, control, url) = makeEngine(windows: standardWindows())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -916,5 +893,78 @@ struct ArrangeTests {
         })
         #expect(control.window(1)?.frame == originalFrame)
         #expect(!(await engine.currentState).slots.contains { $0.boundIdentity == windows[0].identity })
+    }
+
+    @Test(arguments: [false, true], ["initial", "afterFirstSleep", "atDeadline", "missing"])
+    func localAppearanceWaitPreservesFirstInventoryAndDeadline(set: Bool, appearance: String) async throws {
+        let window = TestFixtures.window(id: 1, bundleID: "Late", isAXBacked: true)
+        let control = MockWindowControl(windows: appearance == "initial" ? [window] : [], displays: [TestFixtures.display])
+        let waitClock = ArrangeWaitTestClock()
+        let waitStarted = waitClock.now
+        let leaseClock = TestMonotonicClock()
+        let leaseStarted = leaseClock.now
+        let coordinator = ArrangeOperationCoordinator(uptimeNanoseconds: { leaseClock.now })
+        control.onSleep = { [weak control] milliseconds in
+            waitClock.advance(milliseconds: milliseconds)
+            if appearance == "afterFirstSleep" || appearance == "atDeadline" { control?.addWindow(window) }
+        }
+        let (store, url) = TestFixtures.tempStateStore()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let engine = try VirtualSpaceEngine(store: store, control: control, logger: TestFixtures.nullLogger(),
+            retryDelaysMS: [1], arrangeWaitTimeoutMS: appearance == "afterFirstSleep" ? 200 : 10,
+            arrangeUptimeNanoseconds: { waitClock.now }, operationCoordinator: coordinator)
+        let config = TestFixtures.loadedConfig(layouts: ["main": LayoutDefinition(spaces: [SpaceDefinition(spaceID: 1,
+            windows: [WindowDefinition(match: WindowMatchRule(bundleID: "Late"), slot: 1, launch: false,
+                frame: TestFixtures.frameDef("0%", "0%", "100%", "100%"))])])],
+            layoutSets: ["home": LayoutSetDefinition(layouts: ["main"])])
+        let result: String
+        let exitCode: Int
+        if set {
+            let execution = try await engine.arrangeSet(setName: "home", requestID: "appearance", config: config)
+            result = execution.result; exitCode = execution.exitCode
+        } else {
+            let execution = try await engine.arrange(layoutName: "main", spaceID: nil, config: config)
+            result = execution.result; exitCode = execution.exitCode
+        }
+        #expect(result == (appearance == "missing" ? "partial" : "success"))
+        #expect(exitCode == (appearance == "missing" ? 51 : 0))
+        // The local wait must finish while the independent lease clock stays frozen.
+        #expect(leaseClock.now == leaseStarted)
+        let expectedSleep = appearance == "initial" ? [] : [appearance == "afterFirstSleep" ? 100 : 10]
+        #expect(waitClock.now == waitStarted + UInt64(expectedSleep.reduce(0, +)) * 1_000_000)
+        #expect(control.sleptMilliseconds == expectedSleep)
+        #expect(coordinator.status().pendingTransition == nil)
+        #expect(try store.loadStrict().pendingLayoutTransition == nil)
+        if appearance != "missing" {
+            #expect((await engine.currentState).slots.first?.boundIdentity == window.identity)
+            #expect(control.window(1)?.frame == ResolvedFrame(x: 0, y: 0, width: 1440, height: 875))
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func productionAppearanceClockHasFiniteMissingWindowWait(set: Bool) async throws {
+        let control = MockWindowControl(windows: [], displays: [TestFixtures.display])
+        let (store, url) = TestFixtures.tempStateStore()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        // Intentionally omit clock injection and sleep hook for this smoke.
+        let engine = try VirtualSpaceEngine(store: store, control: control, logger: TestFixtures.nullLogger(),
+            retryDelaysMS: [1], arrangeWaitTimeoutMS: 10)
+        let config = TestFixtures.loadedConfig(layouts: ["main": LayoutDefinition(spaces: [SpaceDefinition(spaceID: 1,
+            windows: [WindowDefinition(match: WindowMatchRule(bundleID: "Missing"), slot: 1, launch: false)])])],
+            layoutSets: ["home": LayoutSetDefinition(layouts: ["main"])])
+        let started = DispatchTime.now().uptimeNanoseconds
+        let result: String
+        let exitCode: Int
+        if set {
+            let execution = try await engine.arrangeSet(setName: "home", requestID: "default-clock", config: config)
+            result = execution.result; exitCode = execution.exitCode
+        } else {
+            let execution = try await engine.arrange(layoutName: "main", spaceID: nil, config: config)
+            result = execution.result; exitCode = execution.exitCode
+        }
+        let elapsed = DispatchTime.now().uptimeNanoseconds - started
+        #expect(result == "partial" && exitCode == 51)
+        #expect(elapsed >= 9_000_000 && elapsed < 4_000_000_000)
+        #expect(try store.loadStrict().pendingLayoutTransition == nil)
     }
 }

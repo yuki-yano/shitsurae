@@ -52,6 +52,14 @@ public final class ShitsuraeLogger: @unchecked Sendable {
         }
     }
 
+    /// Completes after all previously enqueued file writes/rotation have run.
+    /// This is a queue barrier, not an fsync durability guarantee.
+    public func flush() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            queue.async { continuation.resume() }
+        }
+    }
+
     public func error(event: String, fields: [String: Any] = [:]) {
         log(level: "error", event: event, fields: fields)
     }

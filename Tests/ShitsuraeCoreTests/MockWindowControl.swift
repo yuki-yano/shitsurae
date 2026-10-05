@@ -54,6 +54,11 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
     private(set) var minimizeAttempts: [(windowID: UInt32, minimized: Bool)] = []
     private(set) var launchedRequests: [ApplicationLaunchRequest] = []
     private(set) var sleptMilliseconds: [Int] = []
+    private var sleepHook: (@Sendable (Int) -> Void)?
+    var onSleep: (@Sendable (Int) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return sleepHook }
+        set { lock.lock(); sleepHook = newValue; lock.unlock() }
+    }
     var onFrameMutationAttempt: (() -> Void)?
     var onMinimizeAttempt: (() -> Void)?
     var onFocusAttempt: (() -> Void)?
@@ -440,8 +445,11 @@ final class MockWindowControl: WindowControl, @unchecked Sendable {
 
     func sleep(milliseconds: Int) {
         lock.lock()
-        defer { lock.unlock() }
         sleptMilliseconds.append(milliseconds)
+        let hook = sleepHook
+        lock.unlock()
+        // The hook may update the inventory; never invoke it under this lock.
+        hook?(milliseconds)
     }
 }
 
@@ -645,10 +653,15 @@ enum TestFixtures {
         return (RuntimeStateStore(stateFileURL: url), url)
     }
 
+    // Core tests never inspect this output. One process-local logger avoids
+    // scanning the global temporary directory every time a fixture is built.
+    private static let sharedLogger = ShitsuraeLogger(
+        logFileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("shitsurae-tests-\(ProcessInfo.processInfo.processIdentifier)-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("shitsurae.log")
+    )
+
     static func nullLogger() -> ShitsuraeLogger {
-        ShitsuraeLogger(
-            logFileURL: FileManager.default.temporaryDirectory
-                .appendingPathComponent("shitsurae-test-\(UUID().uuidString).log")
-        )
+        sharedLogger
     }
 }

@@ -723,7 +723,7 @@ public extension VirtualSpaceEngine {
         config: LoadedConfig,
         token: ArrangeOperationToken
     ) -> SetAssignment {
-        let localDeadline = DispatchTime.now().uptimeNanoseconds + UInt64(arrangeWaitTimeoutMS) * 1_000_000
+        let localDeadline = arrangeUptimeNanoseconds() + UInt64(arrangeWaitTimeoutMS) * 1_000_000
         var lastInventory = control.windowInventory()
         var lastResolution = WindowRegistry.resolve(
             entries: records.map(\.entry.registryEntry),
@@ -746,7 +746,7 @@ public extension VirtualSpaceEngine {
                 lastResolution = resolution
                 if resolution.unresolved.isEmpty { break }
             }
-            let now = DispatchTime.now().uptimeNanoseconds
+            let now = arrangeUptimeNanoseconds()
             guard now < localDeadline else { break }
             let remainingLocalMS = Int((localDeadline - now) / 1_000_000)
             let remainingMS = min(remainingLocalMS, operationCoordinator.remainingBudgetMS(token: token))

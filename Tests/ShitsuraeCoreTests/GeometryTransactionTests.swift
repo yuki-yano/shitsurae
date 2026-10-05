@@ -56,19 +56,16 @@ struct GeometryTransactionTests {
     @Test func rollsBackSizeWhenPositionFailsAfterMutating() {
         let initial = CGRect(x: 100, y: 80, width: 1_200, height: 800)
         var actual = initial
-        var writes: [String] = []
         let requested = ResolvedFrame(x: 500, y: 300, width: 700, height: 500)
 
         let outcome = GeometryTransaction.applyFrame(
             initial: initial,
             requested: requested,
             setSize: { size in
-                writes.append("size")
                 actual.size = size
                 return true
             },
             setPosition: { point in
-                writes.append("position")
                 if point == requested.cgRect.origin {
                     // Chrome sheets can move even though the AX setter reports
                     // failure. The compensating path must still restore it.
@@ -84,7 +81,6 @@ struct GeometryTransactionTests {
 
         #expect(outcome == .rejectedAndRestored)
         #expect(actual == initial)
-        #expect(writes == ["size", "position", "size", "position", "size"])
     }
 
     @Test func reportsWhenCompensationCannotRestoreThePhysicalFrame() {

@@ -6,19 +6,24 @@ import Testing
 struct ArrangeActionResultTests {
     @Test(arguments: [("success", 0), ("partial", 51), ("failed", 50)])
     func cliCompletionRefreshesRuntimeOnlyAfterActiveLeaseEnds(result: String, exitCode: Int) throws {
-        let coordinator = ArrangeOperationCoordinator()
-        let idle = coordinator.status()
-        let token = try coordinator.tryAdmit(requestID: "cli", operation: .arrangeSet)
-        coordinator.update(token: token, phase: .placing, inFlight: true)
-        let busy = coordinator.status()
-        #expect(!ArrangeOperationPollPresentation.make(previous: idle, next: busy).shouldRefreshRuntime)
-        coordinator.finish(token: token, result: result, exitCode: exitCode, detail: "frameDidNotConverge")
-        let complete = coordinator.status()
-        let presentation = ArrangeOperationPollPresentation.make(previous: busy, next: complete)
-        #expect(presentation.shouldRefreshRuntime)
-        #expect(presentation.label == "Apply Layout Set")
-        #expect(presentation.outcome?.kind == (exitCode == 0 ? .success : result == "partial" ? .partial : .failed))
-        #expect(!ArrangeOperationPollPresentation.make(previous: complete, next: complete).shouldRefreshRuntime)
+        for operation in [ArrangeOperationKind.arrange, .arrangeSet] {
+            let coordinator = ArrangeOperationCoordinator()
+            let idle = coordinator.status()
+            let token = try coordinator.tryAdmit(requestID: "cli", operation: operation)
+            coordinator.update(token: token, phase: .placing, inFlight: true)
+            let busy = coordinator.status()
+            #expect(!ArrangeOperationPollPresentation.make(previous: idle, next: busy).shouldRefreshRuntime)
+            coordinator.finish(token: token, result: result, exitCode: exitCode, detail: "retainedAdoptedGeometryBlocked")
+            let complete = coordinator.status()
+            let presentation = ArrangeOperationPollPresentation.make(previous: busy, next: complete)
+            #expect(presentation.shouldRefreshRuntime)
+            #expect(presentation.label == (operation == .arrange ? "Apply Layout" : "Apply Layout Set"))
+            #expect(presentation.outcome?.kind == (exitCode == 0 ? .success : result == "partial" ? .partial : .failed))
+            if result == "partial" {
+                #expect(presentation.outcome?.message == "retainedAdoptedGeometryBlocked")
+            }
+            #expect(!ArrangeOperationPollPresentation.make(previous: complete, next: complete).shouldRefreshRuntime)
+        }
     }
 
     @Test func latestDisplayGenerationIsCoalescedAndConfigInvalidationDropsStaleEvent() throws {
@@ -82,27 +87,11 @@ struct ArrangeActionResultTests {
 
         #expect(presentation.kind == .partial)
         #expect(presentation.message == "windowNotFound")
+        let protected = ArrangeActionResultPresentation.make(result: result("partial",
+            unresolved: [PendingUnresolvedSlot(slot: 7, spaceID: 1, reason: "retainedAdoptedGeometryBlocked")]))
+        #expect(protected.kind == .partial && protected.message == "retainedAdoptedGeometryBlocked")
         #expect(ArrangeActionResultPresentation.make(result: result("success")).kind == .success)
         #expect(ArrangeActionResultPresentation.make(result: result("failed")).kind == .failed)
-    }
-
-    @Test func protectedAdoptedResultAndCLIPollRemainPartialWithRecoveryReason() throws {
-        let reason = "retainedAdoptedGeometryBlocked"
-        let execution = result("partial", unresolved: [PendingUnresolvedSlot(slot: 7, spaceID: 1, reason: reason)])
-        let presentation = ArrangeActionResultPresentation.make(result: execution)
-        #expect(presentation.kind == .partial && presentation.message == reason)
-        for operation in [ArrangeOperationKind.arrange, .arrangeSet] {
-            let coordinator = ArrangeOperationCoordinator()
-            let token = try coordinator.tryAdmit(requestID: "protected-adopted", operation: operation)
-            let busy = coordinator.status()
-            coordinator.finish(token: token, result: "partial", exitCode: 51, detail: reason)
-            let poll = ArrangeOperationPollPresentation.make(previous: busy, next: coordinator.status())
-            #expect(poll.shouldRefreshRuntime && poll.outcome?.kind == .partial && poll.outcome?.message == reason)
-        }
-        let journal = PendingLayoutTransition(requestID: "protected-adopted", scopeKind: .local, phase: .postcommit,
-            sourceLayoutNames: ["main"], targetLayoutNames: ["main"], sourceSelectedSet: nil, targetSet: nil,
-            definitionDigest: "definition", topologyDigest: "topology")
-        #expect(ArrangeActionResultPresentation.shouldOfferRecovery(state: RuntimeState(pendingLayoutTransition: journal), needsReapply: false))
     }
 
     @Test func pendingVisibilityAloneDoesNotOfferTransitionRecovery() {
@@ -126,21 +115,23 @@ struct ArrangeActionResultTests {
             needsReapply: true
         ))
 
-        let transition = PendingLayoutTransition(
-            requestID: "transition",
-            scopeKind: .layoutSet,
-            phase: .precommit,
-            sourceLayoutNames: ["home"],
-            targetLayoutNames: ["mobile"],
-            sourceSelectedSet: nil,
-            targetSet: nil,
-            definitionDigest: "digest",
-            topologyDigest: "topology"
-        )
-        #expect(ArrangeActionResultPresentation.shouldOfferRecovery(
-            state: RuntimeState(pendingLayoutTransition: transition),
-            needsReapply: false
-        ))
+        for (scope, phase) in [(LayoutTransitionScopeKind.layoutSet, LayoutTransitionPhase.precommit), (.local, .postcommit)] {
+            let transition = PendingLayoutTransition(
+                requestID: "transition",
+                scopeKind: scope,
+                phase: phase,
+                sourceLayoutNames: ["home"],
+                targetLayoutNames: ["mobile"],
+                sourceSelectedSet: nil,
+                targetSet: nil,
+                definitionDigest: "digest",
+                topologyDigest: "topology"
+            )
+            #expect(ArrangeActionResultPresentation.shouldOfferRecovery(
+                state: RuntimeState(pendingLayoutTransition: transition),
+                needsReapply: false
+            ))
+        }
     }
 
     @Test func unavailableOrInvalidConfigOffersRecoveryOnlyForSavedManagement() {

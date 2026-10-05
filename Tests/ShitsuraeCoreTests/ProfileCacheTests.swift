@@ -19,7 +19,6 @@ struct ProfileCacheTests {
         }
         #expect(first == nil)
         #expect(resolverCalls == 1)
-        #expect(cache.entryKind(bundleID: chrome, pid: 100, processStartTime: 1) == "pending")
 
         // Within TTL: no re-resolution.
         let second = cache.profileDirectory(bundleID: chrome, pid: 100, processStartTime: 1, now: base.addingTimeInterval(2)) { _, _ in
@@ -36,30 +35,33 @@ struct ProfileCacheTests {
         }
         #expect(third == "Default")
         #expect(resolverCalls == 2)
-        #expect(cache.entryKind(bundleID: chrome, pid: 100, processStartTime: 1) == "resolved")
-    }
-
-    @Test func resolvedValueIsCached() {
-        let cache = ProfileCache()
-        var resolverCalls = 0
-
-        for _ in 0 ..< 3 {
-            let result = cache.profileDirectory(bundleID: chrome, pid: 100, processStartTime: 1) { _, _ in
+        for offset in [7.0, 12.0, 30.0] {
+            let result = cache.profileDirectory(bundleID: chrome, pid: 100, processStartTime: 1, now: base.addingTimeInterval(offset)) { _, _ in
                 resolverCalls += 1
-                return "Profile 1"
+                return "ShouldNotResolveAgain"
             }
-            #expect(result == "Profile 1")
+            #expect(result == "Default")
         }
-        #expect(resolverCalls == 1)
+        #expect(resolverCalls == 2)
     }
 
     @Test func invalidateDropsEntriesForBundleID() {
         let cache = ProfileCache()
-        _ = cache.profileDirectory(bundleID: chrome, pid: 100, processStartTime: 1) { _, _ in "Default" }
-        #expect(cache.entryKind(bundleID: chrome, pid: 100, processStartTime: 1) == "resolved")
+        var resolverCalls = 0
+        let first = cache.profileDirectory(bundleID: chrome, pid: 100, processStartTime: 1) { _, _ in
+            resolverCalls += 1
+            return "Default"
+        }
+        #expect(first == "Default")
+        #expect(resolverCalls == 1)
 
         cache.invalidate(bundleID: chrome)
-        #expect(cache.entryKind(bundleID: chrome, pid: 100, processStartTime: 1) == nil)
+        let second = cache.profileDirectory(bundleID: chrome, pid: 100, processStartTime: 1) { _, _ in
+            resolverCalls += 1
+            return "Profile 1"
+        }
+        #expect(second == "Profile 1")
+        #expect(resolverCalls == 2)
     }
 
     @Test func nonChromiumBundleIDIsNeverResolvedOrCached() {

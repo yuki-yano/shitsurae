@@ -7,6 +7,9 @@ struct LayoutTransitionRecoveryTests {
     private final class SaveFailureController: @unchecked Sendable {
         private let lock = NSLock()
         private var remaining: Int
+        private var calls = 0
+        private var firedSave: Int?
+        var firedAt: Int? { lock.lock(); defer { lock.unlock() }; return firedSave }
         private let error: RuntimeStateStoreError
 
         init(failAt: Int, fileURL: URL) {
@@ -17,8 +20,11 @@ struct LayoutTransitionRecoveryTests {
         func failure(for _: RuntimeState) -> RuntimeStateStoreError? {
             lock.lock()
             defer { lock.unlock() }
+            calls += 1
             remaining -= 1
-            return remaining == 0 ? error : nil
+            guard remaining == 0 else { return nil }
+            firedSave = calls
+            return error
         }
     }
 
@@ -177,60 +183,6 @@ struct LayoutTransitionRecoveryTests {
         coordinator.abandon(token: token)
     }
 
-    @Test func failedJournalSaveDoesNotAdvanceMirrorOrStartPhysicalSideEffects() async throws {
-        let window = TestFixtures.window(
-            id: 1,
-            bundleID: "com.example.Target",
-            isAXBacked: true
-        )
-        let control = MockWindowControl(windows: [window], displays: [TestFixtures.display])
-        let (store, url) = TestFixtures.tempStateStore()
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let failure = SaveFailureController(failAt: 1, fileURL: url)
-        store.saveFailureInjector = { failure.failure(for: $0) }
-        let engine = try VirtualSpaceEngine(
-            store: store,
-            control: control,
-            logger: TestFixtures.nullLogger(),
-            retryDelaysMS: [1],
-            arrangeWaitTimeoutMS: 10
-        )
-        let targetLayout = LayoutDefinition(spaces: [
-            SpaceDefinition(spaceID: 1, windows: [
-                WindowDefinition(
-                    match: WindowMatchRule(bundleID: "com.example.Target"),
-                    slot: 1,
-                    launch: false,
-                    frame: TestFixtures.frameDef("0%", "0%", "100%", "100%")
-                ),
-            ]),
-        ])
-        let config = TestFixtures.loadedConfig(
-            layouts: ["target": targetLayout],
-            layoutSets: ["mobile": LayoutSetDefinition(layouts: ["target"])]
-        )
-        let token = try engine.operationCoordinator.tryAdmit(
-            requestID: "persist-failure",
-            operation: .arrangeSet
-        )
-        defer { engine.operationCoordinator.abandon(token: token) }
-
-        await #expect(throws: VirtualSpaceEngineError.self) {
-            _ = try await engine.arrangeSet(
-                setName: "mobile",
-                requestID: "persist-failure",
-                config: config,
-                token: token
-            )
-        }
-
-        #expect(engine.operationCoordinator.status().pendingTransition == nil)
-        #expect(control.launchedRequests.isEmpty)
-        #expect(control.frameMutationAttemptWindowIDs.isEmpty)
-        #expect(control.focusedWindowIDs.isEmpty)
-        #expect((await engine.currentState).revision == 0)
-    }
-
     @Test func sixPersistenceBoundariesRemainRecoverableAfterRestart() async throws {
         for failAt in 1 ... 6 {
             let sourceWindow = TestFixtures.window(
@@ -310,17 +262,24 @@ struct LayoutTransitionRecoveryTests {
                 windows: [sourceWindow, targetOne, targetTwo],
                 displays: [TestFixtures.display]
             )
+            let focusAttempted = TestSignal()
+            control.onFocusAttempt = { focusAttempted.signal() }
+            let waitClock = ArrangeWaitTestClock.connected(to: control)
             var engine = try VirtualSpaceEngine(
                 store: store,
                 control: control,
                 logger: TestFixtures.nullLogger(),
                 retryDelaysMS: [1],
-                arrangeWaitTimeoutMS: 10
+                arrangeWaitTimeoutMS: 10,
+                arrangeUptimeNanoseconds: { waitClock.now }
             )
+            let beforeFailure = await engine.currentState
             let token = try engine.operationCoordinator.tryAdmit(
                 requestID: "failure-\(failAt)",
                 operation: .arrangeSet
             )
+            let failedCoordinator = engine.operationCoordinator
+            defer { failedCoordinator.abandon(token: token) }
             do {
                 _ = try await engine.arrangeSet(
                     setName: "mobile",
@@ -329,8 +288,22 @@ struct LayoutTransitionRecoveryTests {
                     token: token
                 )
                 Issue.record("boundary \(failAt) unexpectedly completed")
+            } catch let error as VirtualSpaceEngineError {
+                if case let .persistenceFailed(detail) = error {
+                    #expect(detail.contains("injected save failure"))
+                } else {
+                    Issue.record("boundary \(failAt) threw the wrong engine error: \(error)")
+                }
             } catch {
-                // Expected: the injected durable-state failure interrupts the operation.
+                Issue.record("boundary \(failAt) threw the wrong error type: \(error)")
+            }
+            try #require(failure.firedAt == failAt)
+            if failAt == 1 {
+                #expect((await engine.currentState).revision == beforeFailure.revision)
+                #expect(engine.operationCoordinator.status().pendingTransition == nil)
+                #expect(control.launchedRequests.isEmpty && control.frameMutationAttemptWindowIDs.isEmpty)
+                #expect(control.focusedWindowIDs.isEmpty && !focusAttempted.isSet)
+                #expect(control.minimizeAttempts.isEmpty && control.activatedBundles.isEmpty)
             }
             engine.operationCoordinator.abandon(token: token)
             store.saveFailureInjector = nil
@@ -344,7 +317,8 @@ struct LayoutTransitionRecoveryTests {
                 control: control,
                 logger: TestFixtures.nullLogger(),
                 retryDelaysMS: [1],
-                arrangeWaitTimeoutMS: 10
+                arrangeWaitTimeoutMS: 10,
+                arrangeUptimeNanoseconds: { waitClock.now }
             )
             let result = try await recover(engine)
             #expect(result.result == "success")

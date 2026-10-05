@@ -101,9 +101,10 @@ struct StateStoreTests {
 
         var state = RuntimeState(configGeneration: "gen")
         state.upsertActiveWorkspace(displayID: "uuid-main", layoutName: "work", spaceID: 2)
-        var minimizedEntry = makeEntry(spaceID: 2, slot: 1)
+        state.upsertActiveWorkspace(displayID: "a-secondary", layoutName: "calendar", spaceID: 3)
+        var minimizedEntry = makeEntry(spaceID: 2, slot: 2)
         minimizedEntry.visibilityState = .hiddenMinimized
-        state.slots = [makeEntry(spaceID: 1, slot: 1), minimizedEntry]
+        state.slots = [minimizedEntry, makeEntry(spaceID: 1, slot: 2), makeEntry(spaceID: 1, slot: 1)]
 
         try store.saveStrict(state: state)
         let loaded = try store.loadStrict()
@@ -112,7 +113,13 @@ struct StateStoreTests {
         #expect(loaded.activeLayoutName == "work")
         #expect(loaded.activeSpaceID(displayID: "uuid-main") == 2)
         #expect(loaded.primaryActiveSpaceID == 2)
-        #expect(loaded.slots.count == 2)
+        #expect(loaded.activeWorkspaces.count == 2)
+        #expect(loaded.activeWorkspaces.map(\.displayID) == ["uuid-main", "a-secondary"])
+        #expect(loaded.activeWorkspace(displayID: "uuid-main")?.layoutName == "work")
+        #expect(loaded.activeWorkspace(displayID: "a-secondary")?.layoutName == "calendar")
+        #expect(loaded.activeWorkspace(displayID: "a-secondary")?.spaceID == 3)
+        #expect(loaded.slots.count == 3)
+        #expect(loaded.slots.map { "\($0.spaceID)-\($0.slot)" } == ["1-1", "1-2", "2-2"])
         #expect(loaded.slots.first { $0.spaceID == 2 }?.visibilityState == .hiddenMinimized)
     }
 
@@ -209,22 +216,6 @@ struct StateStoreTests {
         #expect(loaded.revision == 6)
     }
 
-    @Test func sortsSlotsOnSave() throws {
-        let (store, url) = TestFixtures.tempStateStore()
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-
-        var state = RuntimeState(configGeneration: "gen")
-        state.slots = [
-            makeEntry(spaceID: 2, slot: 2),
-            makeEntry(spaceID: 1, slot: 2),
-            makeEntry(spaceID: 1, slot: 1),
-        ]
-        try store.saveStrict(state: state)
-
-        let loaded = try store.loadStrict()
-        #expect(loaded.slots.map { "\($0.spaceID)-\($0.slot)" } == ["1-1", "1-2", "2-2"])
-    }
-
     @Test func movesUnreadableStateFileAsideOnExplicitConsent() throws {
         let (store, url) = TestFixtures.tempStateStore()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -244,21 +235,5 @@ struct StateStoreTests {
 
         // Nothing to move → nil, and no phantom backup appears.
         #expect(store.moveStateFileAside(label: "unsupported") == nil)
-    }
-
-    @Test func multiDisplayActiveWorkspacesRoundTrip() throws {
-        let (store, url) = TestFixtures.tempStateStore()
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-
-        var state = RuntimeState(configGeneration: "gen")
-        state.upsertActiveWorkspace(displayID: "uuid-a", layoutName: "work", spaceID: 1)
-        state.upsertActiveWorkspace(displayID: "uuid-b", layoutName: "calendar", spaceID: 3)
-        try store.saveStrict(state: state)
-
-        let loaded = try store.loadStrict()
-        #expect(loaded.activeWorkspace(displayID: "uuid-a")?.spaceID == 1)
-        #expect(loaded.activeWorkspace(displayID: "uuid-a")?.layoutName == "work")
-        #expect(loaded.activeWorkspace(displayID: "uuid-b")?.spaceID == 3)
-        #expect(loaded.activeWorkspace(displayID: "uuid-b")?.layoutName == "calendar")
     }
 }

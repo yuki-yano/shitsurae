@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import ShitsuraeCore
 
-@Suite("Layout sets Round 2", .serialized)
+@Suite("Layout sets Round 2")
 struct LayoutSetsRoundTwoTests {
     private func layout(_ rule: WindowMatchRule? = nil, secondary: Bool = false, spaces: [Int] = [1]) -> LayoutDefinition {
         LayoutDefinition(display: secondary ? DisplayDefinition(id: "uuid-sub") : nil,
@@ -15,8 +15,9 @@ struct LayoutSetsRoundTwoTests {
         let (store, url) = TestFixtures.tempStateStore()
         try store.saveStrict(state: state)
         let control = MockWindowControl(windows: windows, displays: displays ?? [TestFixtures.display, TestFixtures.secondaryDisplay()])
+        let waitClock = ArrangeWaitTestClock.connected(to: control)
         return (try VirtualSpaceEngine(store: store, control: control, logger: TestFixtures.nullLogger(), retryDelaysMS: [1],
-            arrangeWaitTimeoutMS: 10, operationCoordinator: ArrangeOperationCoordinator()), control, store, url)
+            arrangeWaitTimeoutMS: 10, arrangeUptimeNanoseconds: { waitClock.now }, operationCoordinator: ArrangeOperationCoordinator()), control, store, url)
     }
     private func remove(_ url: URL) { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
     private func entry(_ window: WindowSnapshot, name: String, adopted: Bool = false, space: Int = 1, hidden: Bool = false,
